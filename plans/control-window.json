@@ -1,0 +1,43 @@
+{
+  "schema": "oz.plan.v1",
+  "name": "control-window-capture",
+  "subject": {
+    "name": "control-window",
+    "executable": "{{control_exe}}",
+    "version_hint": "test-fixture",
+    "enabled": true,
+    "skip_reason": ""
+  },
+  "collector": "external_visible_frame",
+  "adapter": "oz_desktop_duplication",
+  "endpoint": "ExternalFirstImageVisible",
+  "cache": "cold",
+  "manifest": "../benchmark/manifests/control-window.private.json",
+  "timeout_ms": 30000,
+  "repetitions": 1,
+  "warmups": 0,
+  "collector_config": {
+    "monitor_index": -1,
+    "window_wait_ms": 10000,
+    "frame_timeout_ms": 15000,
+    "probe": {
+      "min_edge_density": 0.3,
+      "min_luma_variance": 0.04,
+      "min_mean_luma": 0.02,
+      "max_mean_luma": 0.98,
+      "consecutive_frames": 2
+    }
+  },
+  "args": ["--pattern", "--animate-ms", "50", "--image-path", "{{image_path}}"],
+  "images": [
+    {
+      "path": "control-window-fixture.jpg",
+      "alias": "control-window",
+      "format": "jpg",
+      "width": null,
+      "height": null,
+      "size_bytes": null,
+      "provenance": "test-only; the control window ignores the image"
+    }
+  ]
+}

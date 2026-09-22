@@ -1,0 +1,27 @@
+{
+  "name": "ozbench",
+  "version-string": "0.1.0",
+  "description": "OZ image viewer. Stage 0 benchmark harness plus Stage 1 minimal JPEG viewer. nlohmann-json is restricted to the runner (ozbench_lib) and is optional: the runner falls back to a small internal JSON module when vcpkg is not present. libjpeg-turbo is required by the Stage 1 viewer (ozviewer_core).",
+  "dependencies": [
+    "nlohmann-json",
+    "libjpeg-turbo",
+    {
+      "name": "libwebp",
+      "default-features": false,
+      "features": [
+        "simd"
+      ]
+    },
+    {
+      "name": "libavif",
+      "default-features": false,
+      "features": [
+        "dav1d"
+      ]
+    },
+    {
+      "name": "libheif",
+      "default-features": false
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+﻿{
+    "schema":  "oz.manifest.v1",
+    "id":  "selection-20260912-064955",
+    "images":  [
+                   {
+                       "alias":  "jpeg-2mp",
+                       "path":  "E:\\Projects\\OZ image viewer\\test viewer\\24mb.jpg",
+                       "sha256":  "7821958680a09ed39fb69549fc8bd473778b20f0aa9075e70ebbe2c97e168c92",
+                       "width":  1000,
+                       "height":  1000,
+                       "size_bytes":  25440000,
+                       "pixels":  1000000,
+                       "target_mp":  2,
+                       "deviation_mp":  1
+                   },
+                   {
+                       "alias":  "jpeg-12mp",
+                       "path":  "E:\\Projects\\OZ image viewer\\test viewer\\landscape_hires_4000x2667_6.83mb.jpg",
+                       "sha256":  "6269e47a811df79a32614647f1783eb4859657e732e1f0e55979bd0e02aeeea7",
+                       "width":  4000,
+                       "height":  2667,
+                       "size_bytes":  7162626,
+                       "pixels":  10668000,
+                       "target_mp":  12,
+                       "deviation_mp":  1.332
+                   },
+                   {
+                       "alias":  "jpeg-24mp",
+                       "path":  "E:\\Projects\\OZ image viewer\\test viewer\\upload_test_5000x3333_11.6mb.jpg",
+                       "sha256":  "c8605e4842f1a44db13bea0b26122c2a4fbbdedc9b947bb85bd87d4a25690dc7",
+                       "width":  5000,
+                       "height":  3333,
+                       "size_bytes":  12171894,
+                       "pixels":  16665000,
+                       "target_mp":  24,
+                       "deviation_mp":  7.335
+                   }
+               ]
+}

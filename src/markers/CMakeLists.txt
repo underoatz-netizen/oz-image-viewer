@@ -1,0 +1,3 @@
+add_library(oz_benchmark_markers STATIC markers.cpp)
+target_include_directories(oz_benchmark_markers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(oz_benchmark_markers PUBLIC cxx_std_23)

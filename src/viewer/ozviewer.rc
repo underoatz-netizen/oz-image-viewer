@@ -1,0 +1,13 @@
+// ozviewer.rc - application resources for the WIN32 ozviewer executable.
+//
+// The single icon resource below gives ozviewer.exe its window, taskbar, and
+// Explorer/Shell icon. The identifier lives in ozviewer_resources.h so the
+// resource compiler and the C++ code share one definition; the numeric value
+// (101) sits outside the system-reserved IDI_* range.
+//
+// The .ico path is resolved by the resource compiler relative to this file
+// (src/viewer/), pointing at the shared asset under assets/icons/.
+
+#include "ozviewer_resources.h"
+
+IDI_OZVIEWER_APPICON ICON "../../assets/icons/ozviewer.ico"

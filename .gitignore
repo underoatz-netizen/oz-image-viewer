@@ -1,0 +1,21 @@
+# Build output
+build/
+out/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# CMake user presets
+CMakeUserPresets.json
+
+# vcpkg
+vcpkg_installed/
+
+# Benchmark artifacts
+benchmark/results/*.jsonl
+benchmark/results/*.csv
+benchmark/corpus/
+benchmark/navigation_corpus/
+benchmark/evidence/stage6-surrogate-*/

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-label="OZ Image Viewer">
+  <!--
+    Canonical vector source for the OZ Image Viewer application icon.
+
+    The checked-in binary resource assets/icons/ozviewer.ico is generated from
+    this geometry by assets/icons/generate-ozviewer-icon.ps1 at the small
+    Windows shell sizes. Design intent: a deep-navy rounded application tile
+    carrying a cyan rounded frame (the image/viewport motif) around a
+    high-contrast white "OZ" monogram. The frame is omitted below 24 px so the
+    monogram stays readable at 16 px.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1E3A8A"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Application tile. -->
+  <rect x="0" y="0" width="256" height="256" rx="51.2" ry="51.2" fill="url(#tile)"/>
+
+  <!-- Image/viewport frame. -->
+  <rect x="25.6" y="25.6" width="204.8" height="204.8" rx="15.36" ry="15.36"
+        fill="none" stroke="#38BDF8" stroke-width="8.192"/>
+
+  <!-- "O" of the monogram. -->
+  <ellipse cx="77.44" cy="128" rx="36.48" ry="56.32"
+           fill="none" stroke="#FFFFFF" stroke-width="21.76"/>
+
+  <!-- "Z" of the monogram. -->
+  <polyline points="142.08,71.68 215.04,71.68 142.08,184.32 215.04,184.32"
+            fill="none" stroke="#FFFFFF" stroke-width="21.76"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

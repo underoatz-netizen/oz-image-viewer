@@ -1,0 +1,52 @@
+{
+    "schema": "oz.plan.v1",
+    "name": "stage7-candidate-jpeg-benchmark",
+    "note": "Post-Stage-7 Candidate Release benchmark run",
+    "subject": {
+        "name": "stage7-candidate-ozviewer",
+        "executable": "E:/Projects/OZ image viewer/build/stage6-surrogate-candidate/src/viewer/Release/ozviewer.exe",
+        "version_hint": "Release-x64",
+        "enabled": true,
+        "skip_reason": ""
+    },
+    "collector": "markers",
+    "adapter": "oz_markers",
+    "endpoint": "FirstPresent",
+    "cache": "warm",
+    "timeout_ms": 60000,
+    "repetitions": 20,
+    "warmups": 1,
+    "args": [
+        "--benchmark",
+        "{{image_path}}"
+    ],
+    "images": [
+        {
+            "path": "E:/Projects/OZ image viewer/benchmark/evidence/stage6-surrogate-20260917-035453/corpus/jpeg-2mp.jpg",
+            "alias": "jpeg-2mp",
+            "format": "jpg",
+            "width": 2000,
+            "height": 1000,
+            "size_bytes": 88804,
+            "provenance": "Deterministic synthetic TurboJPEG gradient (2000x1000, q90, 420, fastdct)"
+        },
+        {
+            "path": "E:/Projects/OZ image viewer/benchmark/evidence/stage6-surrogate-20260917-035453/corpus/jpeg-12mp.jpg",
+            "alias": "jpeg-12mp",
+            "format": "jpg",
+            "width": 4000,
+            "height": 3000,
+            "size_bytes": 329796,
+            "provenance": "Deterministic synthetic TurboJPEG gradient (4000x3000, q90, 420, fastdct)"
+        },
+        {
+            "path": "E:/Projects/OZ image viewer/benchmark/evidence/stage6-surrogate-20260917-035453/corpus/jpeg-24mp.jpg",
+            "alias": "jpeg-24mp",
+            "format": "jpg",
+            "width": 6000,
+            "height": 4000,
+            "size_bytes": 583196,
+            "provenance": "Deterministic synthetic TurboJPEG gradient (6000x4000, q90, 420, fastdct)"
+        }
+    ]
+}

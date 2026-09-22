@@ -1,0 +1,17 @@
+{
+  "schema": "oz.manifest.v1",
+  "id": "control-window-test",
+  "images": [
+    {
+      "alias": "control-window",
+      "path": "control-window-fixture.jpg",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "width": 640,
+      "height": 480,
+      "size_bytes": 0,
+      "pixels": 307200,
+      "target_mp": 0,
+      "deviation_mp": 0
+    }
+  ]
+}

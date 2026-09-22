@@ -1,0 +1,2 @@
+add_executable(ozbench_fixture main.cpp)
+target_link_libraries(ozbench_fixture PRIVATE oz_benchmark_markers)
