@@ -50,6 +50,8 @@
 #include "crop_strip.hpp"
 #include "context_menu.hpp"
 #include "clipboard_output.hpp"
+#include "clipboard_input.hpp"
+#include "paste_install.hpp"
 #include "copy_controller.hpp"
 #include "shortcut_routing.hpp"
 #include "shell_integration.hpp"
@@ -63,6 +65,7 @@
 #include "oz/viewer_core/crop_interaction.hpp"
 #include "oz/viewer_core/image_document.hpp"
 #include "oz/viewer_core/save_pipeline.hpp"
+#include "presentation_edits.hpp"
 #include "edit_controller.hpp"
 #include "resize_dialog.hpp"
 #include "save_controller.hpp"
@@ -148,6 +151,8 @@ struct app_state;
 static void schedule_navigation_plan(app_state& app);
 static void start_open_file_dialog(app_state& app);
 static void open_new_document(app_state& app, const std::filesystem::path& path);
+static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& bitmap);
+static void start_paste_from_clipboard(app_state& app);
 static void update_open_button_layout(app_state& app);
 static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app) noexcept;
 static oz::viewer::ui_layout_result current_ui_layout(const app_state& app) noexcept;
@@ -1253,7 +1258,14 @@ static oz::viewer::presentation_plan compute_active_presentation_plan(app_state&
     plan.canvas_offset_y = layout.canvas_physical.y;
 
 #if OZVIEWER_ENABLE_EDITING
-    if (app.image_doc && (app.image_doc->history().total_commands() > 0 || app.draft_resize.has_value())) {
+    // Suppression wins over edit state: during a transactional document swap
+    // (file open / navigation commit / clipboard paste) app.image_doc still
+    // describes the document being replaced, so its history/draft must not
+    // transform the incoming bitmap. should_use_edit_presentation checks
+    // suppression before touching history/draft; when it is false the plain
+    // fit path below presents the incoming bitmap unmodified.
+    if (oz::viewer::should_use_edit_presentation(app.suppress_edit_presentation, app.image_doc.get(),
+                                                 app.draft_resize)) {
         const auto source_dims = app.image_doc->metadata().source_dimensions;
         if (!source_dims.is_valid()) {
             return plan;
@@ -1441,6 +1453,13 @@ static oz::viewer::ui_command_context current_ui_command_context(const app_state
     }
     ctx.resize_busy = (app.resize_dlg != nullptr) || app.pending_resize.has_value();
     ctx.save_busy = app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active());
+#else
+    // Editing-OFF builds retain no full-resolution source buffer: the
+    // presentable retained bitmap itself is the Copy Image source (mirroring
+    // the OFF copy submission path, which publishes app.current directly).
+    // Without this a temporary clipboard document (no file path) would leave
+    // Copy Image disabled even though its pixels are fully copyable.
+    ctx.has_source = app.have_image && (app.current != nullptr);
 #endif
     ctx.copy_busy = app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active());
 
@@ -2821,6 +2840,138 @@ static void start_copy_image(app_state& app) {
     update_edit_menu_state(app);
 }
 
+// Stage 9.5: Paste Image from the Windows clipboard (interactive Ctrl+V).
+// Reads a valid clipboard DIB-family image and opens it as an in-memory
+// temporary document. Any clipboard or bitmap failure is quiet: no prompt,
+// no partial document, current state untouched. Benchmark and
+// navigation-benchmark modes never reach here (guarded at every caller).
+static void start_paste_from_clipboard(app_state& app) {
+    if (app.benchmark || app.nav_benchmark) return;
+#if OZVIEWER_ENABLE_EDITING
+    if (app.crop.has_value() && app.crop->active) {
+        return;
+    }
+    if (app.resize_dlg != nullptr || app.pending_resize.has_value()) {
+        return;
+    }
+    if (app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active())) {
+        return;
+    }
+#endif
+    // A pending/in-flight Copy owns the clipboard handoff; pasting now would
+    // orphan its generation without user-visible benefit, so wait quietly.
+    if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+
+    oz::viewer::clipboard_bitmap bitmap;
+    const auto res = oz::viewer::read_clipboard_image(app.hwnd, bitmap);
+    if (!res.ok() || !bitmap.is_valid()) {
+        return;  // Locked/absent/invalid/unsupported clipboard: fail quietly.
+    }
+
+    if (!check_dirty_discard_allowed(app)) {
+        return;  // User kept the current dirty document; nothing changes.
+    }
+
+    open_pasted_document(app, std::move(bitmap));
+}
+
+// Commit an already-validated clipboard bitmap as the active temporary
+// document. The complete install - display image, pathless domain document,
+// and the payload-sized retained source used by Copy Image - is staged by
+// prepare_paste_install BEFORE any state mutation, so a clipboard-payload
+// allocation fault returns quietly with the prior display/document/view/flags
+// untouched. The commit then bumps the document generation first so in-flight
+// file workers (initial decode, enumeration, navigation, copy) can never
+// commit stale file state over the pasted pixels. The temporary document
+// carries no source file path: file-only commands stay disabled via
+// has_file_path, while Copy Image remains functional through the retained
+// source.
+static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& bitmap) {
+    // Phase 1 (allocation-safe staging): every allocation-capable artifact of
+    // the temporary document install is built here, including the pixel copy
+    // into the retained source. Failure is quiet: no UI/document/presentation
+    // state has been touched yet.
+    oz::viewer::paste_install install;
+    if (!oz::viewer::prepare_paste_install(std::move(bitmap), install)) {
+        return false;
+    }
+    const auto& img = install.image;
+
+    // Phase 2 (commit): no-throw moves/swaps and bool-signaled presentation
+    // only; the remaining allocation-capable work already happened above.
+    // Invalidate the old generation so any in-flight workers won't commit.
+    const std::uint64_t new_gen = app.doc.next_generation();
+    (void)new_gen;
+
+    // Cooperative cancel of any pending background file work.
+    app.cancel_initial_decode.store(true, std::memory_order_relaxed);
+    app.cancel_enum.store(true, std::memory_order_relaxed);
+    app.work_queue.replace_plan(++app.current_epoch, {});
+
+    // Clear initial decode cancellation for future file opens.
+    app.cancel_initial_decode.store(false, std::memory_order_relaxed);
+
+    const auto layout = current_ui_layout(app);
+    const auto old_view = app.view;
+    oz::viewer_core::set_fit(app.view, img->src_width, img->src_height,
+                             layout.canvas_physical.width, layout.canvas_physical.height);
+
+    auto prev_image = app.current;
+    const bool prev_have = app.have_image;
+#if OZVIEWER_ENABLE_EDITING
+    const bool old_suppress_edit_presentation = app.suppress_edit_presentation;
+    app.suppress_edit_presentation = true;
+#endif
+    app.current = img;
+    app.have_image = true;
+
+    if (!upload_and_present(app)) {
+        if (!recover_and_present(app)) {
+            // Restore the prior image and its view; never leave a half-presented document.
+            app.current = prev_image;
+            app.have_image = prev_have;
+            app.view = old_view;
+#if OZVIEWER_ENABLE_EDITING
+            app.suppress_edit_presentation = old_suppress_edit_presentation;
+#endif
+            if (app.have_image) {
+                redraw_current_view(app);
+            } else {
+                oz::viewer::render_blank(app.renderer);
+                update_open_button_layout(app);
+            }
+            return false;
+        }
+    }
+
+#if OZVIEWER_ENABLE_EDITING
+    app.suppress_edit_presentation = old_suppress_edit_presentation;
+#endif
+
+    // Successful commit: temporary document with no source file path and no
+    // file navigation siblings (enumeration never runs for clipboard docs).
+    app.doc.has_document = true;
+    app.doc.active_path.clear();
+    app.nav = oz::viewer_core::navigation_list{};
+    app.desired_index = 0;
+    app.committed_index = 0;
+
+#if OZVIEWER_ENABLE_EDITING
+    // The staged document and retained source become current together. Both
+    // are no-throw moves, so the successful presentation above can never be
+    // followed by a clipboard-driven allocation fault: the source pixels were
+    // already copied into install.source before the first mutation.
+    app.image_doc = std::move(install.document);
+    app.full_res_source = std::move(install.source);
+#endif
+
+    update_edit_menu_state(app);
+    update_open_button_layout(app);
+    return true;
+}
+
 // Open a new document replacing the current image or no-image state.
 static void open_new_document(app_state& app, const std::filesystem::path& path) {
     // Invalidate old generation so any in-flight workers won't commit
@@ -3253,6 +3404,30 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 } else if (action == oz::viewer::shortcut_action::crop_consume ||
                            action == oz::viewer::shortcut_action::command_disabled) {
                     return 0; // Consumed without action
+                }
+            }
+
+            // Paste Image from clipboard: Ctrl+V (evaluated via pure shortcut routing helper)
+            if (wparam == 'V' || wparam == 'v') {
+                if (!noninteractive_mode(*app)) {
+                    const auto ctx = current_ui_command_context(*app);
+                    const auto copy_img_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_copy_image, ctx);
+                    HWND resize_hwnd = nullptr;
+#if OZVIEWER_ENABLE_EDITING
+                    resize_hwnd = app->resize_dlg;
+#endif
+                    const auto action = oz::viewer::route_shortcut_key(
+                        wparam, ctrl_down, shift_down, alt_down,
+                        focused, resize_hwnd, crop_active, copy_img_st);
+
+                    if (action == oz::viewer::shortcut_action::file_paste_image) {
+                        start_paste_from_clipboard(*app);
+                        return 0;
+                    } else if (action == oz::viewer::shortcut_action::crop_consume ||
+                               action == oz::viewer::shortcut_action::command_disabled) {
+                        return 0; // Consumed without action
+                    }
+                    // native_text_paste / dialog_default fall through to normal dispatch.
                 }
             }
 
@@ -4354,10 +4529,10 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
 
             // 2. Global Hotkeys & Modifiers:
             // Hotkeys (Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+Z, Ctrl+Y, Ctrl+L, Ctrl+R,
-            // Ctrl+Alt+R, Ctrl+C, F11, etc.) must work regardless of child control focus,
-            // unless native text copy applies to an Edit/RichEdit control or Resize dialog owns focus.
+            // Ctrl+Alt+R, Ctrl+C, Ctrl+V, F11, etc.) must work regardless of child control focus,
+            // unless native text copy/paste applies to an Edit/RichEdit control or Resize dialog owns focus.
             if (ctrl_down || alt_down || msg.wParam == VK_F11) {
-                if (msg.wParam == 'C' || msg.wParam == 'c') {
+                if (msg.wParam == 'C' || msg.wParam == 'c' || msg.wParam == 'V' || msg.wParam == 'v') {
                     HWND resize_hwnd = nullptr;
 #if OZVIEWER_ENABLE_EDITING
                     resize_hwnd = app.resize_dlg;
@@ -4375,8 +4550,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
                         copy_img_st);
 
                     if (action == oz::viewer::shortcut_action::dialog_default ||
-                        action == oz::viewer::shortcut_action::native_text_copy) {
-                        // Let standard dispatch handle native text copy for edit control or resize dialog
+                        action == oz::viewer::shortcut_action::native_text_copy ||
+                        action == oz::viewer::shortcut_action::native_text_paste) {
+                        // Let standard dispatch handle native text copy/paste for edit control or resize dialog
                         TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                         continue;

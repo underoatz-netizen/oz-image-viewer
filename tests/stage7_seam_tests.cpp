@@ -5,9 +5,13 @@
 #include "oz/viewer_core/crop_interaction.hpp"
 #include "oz/viewer_core/edit_state.hpp"
 #include "oz/viewer_core/fit.hpp"
+#include "oz/viewer_core/image_document.hpp"
 #include "../src/viewer/crop_strip.hpp"
 #include "../src/viewer/context_menu.hpp"
 #include "../src/viewer/clipboard_output.hpp"
+#include "../src/viewer/clipboard_input.hpp"
+#include "../src/viewer/paste_install.hpp"
+#include "../src/viewer/presentation_edits.hpp"
 #include "../src/viewer/shortcut_routing.hpp"
 #include "../src/viewer/modern_dialogs.hpp"
 #include "../src/viewer/shell_integration.hpp"
@@ -1676,6 +1680,728 @@ void test_shortcut_routing_seam() {
     CHECK(a7 == shortcut_action::command_disabled);
 }
 
+void test_clipboard_input_seam() {
+    using namespace oz::viewer;
+
+    // Helper: build a minimal 40-byte BI_RGB/BI_BITFIELDS DIB buffer.
+    auto make_dib40 = [](std::int32_t w, std::int32_t h, std::uint16_t bpp,
+                         std::uint32_t comp, const std::vector<std::uint8_t>& px,
+                         const std::vector<std::uint32_t>& masks = {}) {
+        std::vector<std::uint8_t> buf(40, 0);
+        auto put32 = [&](std::size_t off, std::uint32_t v) { std::memcpy(buf.data() + off, &v, 4); };
+        auto put32s = [&](std::size_t off, std::int32_t v) { std::memcpy(buf.data() + off, &v, 4); };
+        auto put16 = [&](std::size_t off, std::uint16_t v) { std::memcpy(buf.data() + off, &v, 2); };
+        put32(0, 40);
+        put32s(4, w);
+        put32s(8, h);
+        put16(12, 1);
+        put16(14, bpp);
+        put32(16, comp);
+        for (const auto m : masks) {
+            const std::size_t off = buf.size();
+            buf.resize(off + 4);
+            std::memcpy(buf.data() + off, &m, 4);
+        }
+        buf.insert(buf.end(), px.begin(), px.end());
+        return buf;
+    };
+
+    // 1. Straight BGRA -> premultiplied BGRA conversion incl. alpha exactness
+    {
+        const std::uint8_t straight[16] = {
+            0, 0, 0, 0,          // transparent -> zeroed RGB
+            0, 0, 255, 255,      // opaque -> exact copy
+            255, 255, 255, 128,  // 50% white -> (255*128+127)/255 = 128
+            7, 8, 9, 200         // partial: B=(7*200+127)/255=5, G=(8*200+127)/255=6, R=(9*200+127)/255=7
+        };
+        const auto premul = convert_straight_bgra_to_pbgra(straight, 2, 2, 8);
+        CHECK(premul.size() == 16);
+        if (premul.size() == 16) {
+            CHECK(premul[0] == 0 && premul[1] == 0 && premul[2] == 0 && premul[3] == 0);
+            CHECK(premul[4] == 0 && premul[5] == 0 && premul[6] == 255 && premul[7] == 255);
+            CHECK(premul[8] == 128 && premul[9] == 128 && premul[10] == 128 && premul[11] == 128);
+            CHECK(premul[12] == 5 && premul[13] == 6 && premul[14] == 7 && premul[15] == 200);
+        }
+        // Invalid inputs rejected
+        CHECK(convert_straight_bgra_to_pbgra(nullptr, 2, 2, 8).empty());
+        CHECK(convert_straight_bgra_to_pbgra(straight, 0, 2, 8).empty());
+        CHECK(convert_straight_bgra_to_pbgra(straight, 70000, 2, 70000 * 4).empty());
+        CHECK(convert_straight_bgra_to_pbgra(straight, 2, 2, 4).empty()); // stride too small
+    }
+
+    // 2. CF_DIBV5 round-trip through the existing Copy Image payload builder:
+    //    orientation, dimensions, and alpha contract preserved.
+    {
+        const std::uint8_t straight[16] = {
+            0, 0, 0, 0,
+            0, 0, 255, 255,
+            255, 255, 255, 128,
+            0, 128, 0, 200
+        };
+        const auto dibv5 = build_dibv5_payload_from_straight_bgra(straight, 2, 2, 8);
+        CHECK(dibv5.size() == sizeof(BITMAPV5HEADER) + 16);
+
+        clipboard_bitmap bmp;
+        const auto res = parse_dib_bytes(dibv5.data(), dibv5.size(), bmp);
+        CHECK(res.ok());
+        CHECK(res.status == paste_status::success);
+        CHECK(bmp.width == 2);
+        CHECK(bmp.height == 2);
+        CHECK(bmp.stride == 8);
+        CHECK(bmp.is_valid());
+        CHECK(bmp.pixels.size() == 16);
+        if (bmp.pixels.size() == 16) {
+            // Row order preserved (top-down negative height in the payload)
+            CHECK(bmp.pixels[0] == 0 && bmp.pixels[1] == 0 && bmp.pixels[2] == 0 && bmp.pixels[3] == 0);
+            CHECK(bmp.pixels[4] == 0 && bmp.pixels[5] == 0 && bmp.pixels[6] == 255 && bmp.pixels[7] == 255);
+            CHECK(bmp.pixels[8] == 128 && bmp.pixels[9] == 128 && bmp.pixels[10] == 128 && bmp.pixels[11] == 128);
+            // (128*200+127)/255 = 100
+            CHECK(bmp.pixels[12] == 0 && bmp.pixels[13] == 100 && bmp.pixels[14] == 0 && bmp.pixels[15] == 200);
+        }
+    }
+
+    // 3. Bottom-up (positive height) DIB rows are flipped to top-down.
+    {
+        // 24-bit: stride = ((2*24+31)/32)*4 = 8; rows stored bottom-first with 2 pad bytes.
+        const std::vector<std::uint8_t> px = {
+            1, 2, 3, 4, 5, 6, 0, 0,        // bottom row
+            11, 12, 13, 14, 15, 16, 0, 0  // top row
+        };
+        const auto dib = make_dib40(2, 2, 24, BI_RGB, px);
+        clipboard_bitmap bmp;
+        const auto res = parse_dib_bytes(dib.data(), dib.size(), bmp);
+        CHECK(res.ok());
+        CHECK(bmp.width == 2 && bmp.height == 2 && bmp.stride == 8);
+        CHECK(bmp.pixels.size() == 16);
+        if (bmp.pixels.size() == 16) {
+            // Output row 0 is the stored top row, expanded opaque.
+            CHECK(bmp.pixels[0] == 11 && bmp.pixels[1] == 12 && bmp.pixels[2] == 13 && bmp.pixels[3] == 255);
+            CHECK(bmp.pixels[4] == 14 && bmp.pixels[5] == 15 && bmp.pixels[6] == 16 && bmp.pixels[7] == 255);
+            CHECK(bmp.pixels[8] == 1 && bmp.pixels[9] == 2 && bmp.pixels[10] == 3 && bmp.pixels[11] == 255);
+            CHECK(bmp.pixels[12] == 4 && bmp.pixels[13] == 5 && bmp.pixels[14] == 6 && bmp.pixels[15] == 255);
+        }
+    }
+
+    // 4. 32-bit BI_RGB carries no alpha channel: alpha bytes forced opaque.
+    {
+        const std::vector<std::uint8_t> px = {7, 8, 9, 123};
+        const auto dib = make_dib40(1, -1, 32, BI_RGB, px);
+        clipboard_bitmap bmp;
+        const auto res = parse_dib_bytes(dib.data(), dib.size(), bmp);
+        CHECK(res.ok());
+        CHECK(bmp.pixels.size() == 4);
+        if (bmp.pixels.size() == 4) {
+            CHECK(bmp.pixels[0] == 7 && bmp.pixels[1] == 8 && bmp.pixels[2] == 9 && bmp.pixels[3] == 255);
+        }
+    }
+
+    // 5. Unsupported formats rejected quietly (no success, no partial bitmap).
+    {
+        clipboard_bitmap bmp;
+        // 8-bit palettized
+        {
+            const std::vector<std::uint8_t> px(4, 0);
+            const auto dib = make_dib40(2, 2, 8, BI_RGB, px);
+            const auto res = parse_dib_bytes(dib.data(), dib.size(), bmp);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unsupported_format);
+            CHECK(!bmp.is_valid());
+        }
+        // RLE compression
+        {
+            const std::vector<std::uint8_t> px(16, 0);
+            const auto dib = make_dib40(2, -2, 32, BI_RLE8, px);
+            const auto res = parse_dib_bytes(dib.data(), dib.size(), bmp);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unsupported_format);
+            CHECK(!bmp.is_valid());
+        }
+        // Non-standard BITFIELDS masks (swapped red/blue)
+        {
+            const std::vector<std::uint8_t> px(16, 0);
+            const auto dib = make_dib40(2, -2, 32, BI_BITFIELDS, px,
+                                        {0x000000FFu, 0x0000FF00u, 0x00FF0000u});
+            const auto res = parse_dib_bytes(dib.data(), dib.size(), bmp);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unsupported_format);
+            CHECK(!bmp.is_valid());
+        }
+        // Legacy 40-byte standard BI_BITFIELDS declares RGB only: the pixel
+        // high byte is ignored and alpha is forced opaque (no fourth mask).
+        {
+            const std::vector<std::uint8_t> px_zero = {10, 20, 30, 0};
+            const auto dib_zero = make_dib40(1, -1, 32, BI_BITFIELDS, px_zero,
+                                        {0x00FF0000u, 0x0000FF00u, 0x000000FFu});
+            const auto res_zero = parse_dib_bytes(dib_zero.data(), dib_zero.size(), bmp);
+            CHECK(res_zero.ok());
+            CHECK(bmp.pixels.size() == 4);
+            if (bmp.pixels.size() == 4) {
+                CHECK(bmp.pixels[0] == 10 && bmp.pixels[1] == 20 && bmp.pixels[2] == 30 && bmp.pixels[3] == 255);
+            }
+        }
+        {
+            const std::vector<std::uint8_t> px_part = {10, 20, 30, 40};
+            const auto dib_part = make_dib40(1, -1, 32, BI_BITFIELDS, px_part,
+                                        {0x00FF0000u, 0x0000FF00u, 0x000000FFu});
+            const auto res_part = parse_dib_bytes(dib_part.data(), dib_part.size(), bmp);
+            CHECK(res_part.ok());
+            CHECK(bmp.pixels.size() == 4);
+            if (bmp.pixels.size() == 4) {
+                // High byte 40 ignored: original RGB kept, alpha forced opaque.
+                CHECK(bmp.pixels[0] == 10 && bmp.pixels[1] == 20 && bmp.pixels[2] == 30 && bmp.pixels[3] == 255);
+            }
+        }
+        // Truncated RGB masks: 40-byte BI_BITFIELDS without three mask DWORDs.
+        {
+            auto dib_full = make_dib40(1, -1, 32, BI_BITFIELDS, std::vector<std::uint8_t>{10, 20, 30, 40},
+                                         {0x00FF0000u, 0x0000FF00u, 0x000000FFu});
+            dib_full.resize(40 + 2 * sizeof(std::uint32_t));
+            const auto res_masks = parse_dib_bytes(dib_full.data(), dib_full.size(), bmp);
+            CHECK(!res_masks.ok());
+            CHECK(res_masks.status == paste_status::invalid_bitmap);
+            CHECK(!bmp.is_valid());
+        }
+        // V5 explicit alpha: full mask preserves/premultiplies partial alpha.
+        {
+            const std::uint8_t straight[4] = {10, 20, 30, 40};
+            auto dibv5_full = build_dibv5_payload_from_straight_bgra(straight, 1, 1, 4);
+            CHECK(!dibv5_full.empty());
+            if (!dibv5_full.empty()) {
+                clipboard_bitmap v5bmp;
+                const auto res_full = parse_dib_bytes(dibv5_full.data(), dibv5_full.size(), v5bmp);
+                CHECK(res_full.ok());
+                CHECK(v5bmp.pixels.size() == 4);
+                if (v5bmp.pixels.size() == 4) {
+                    // (10*40+127)/255=2, (20*40+127)/255=3, (30*40+127)/255=5
+                    CHECK(v5bmp.pixels[0] == 2 && v5bmp.pixels[1] == 3 && v5bmp.pixels[2] == 5 && v5bmp.pixels[3] == 40);
+                }
+            }
+        }
+        // V5 explicit alpha: zero mask ignores the high byte, forces opaque.
+        {
+            const std::uint8_t straight[4] = {10, 20, 30, 40};
+            auto dibv5_zero = build_dibv5_payload_from_straight_bgra(straight, 1, 1, 4);
+            CHECK(!dibv5_zero.empty());
+            if (!dibv5_zero.empty()) {
+                const std::uint32_t zero_mask = 0;
+                std::memcpy(dibv5_zero.data() + 52, &zero_mask, 4);
+                clipboard_bitmap v5zbmp;
+                const auto res_zero = parse_dib_bytes(dibv5_zero.data(), dibv5_zero.size(), v5zbmp);
+                CHECK(res_zero.ok());
+                CHECK(v5zbmp.pixels.size() == 4);
+                if (v5zbmp.pixels.size() == 4) {
+                    CHECK(v5zbmp.pixels[0] == 10 && v5zbmp.pixels[1] == 20 && v5zbmp.pixels[2] == 30 && v5zbmp.pixels[3] == 255);
+                }
+            }
+        }
+    }
+
+    // 6. Malformed / truncated / overflowing input rejected safely.
+    {
+        clipboard_bitmap bmp;
+        CHECK(!parse_dib_bytes(nullptr, 0, bmp).ok());
+        const std::vector<std::uint8_t> tiny(10, 0);
+        auto r_tiny = parse_dib_bytes(tiny.data(), tiny.size(), bmp);
+        CHECK(!r_tiny.ok());
+        CHECK(r_tiny.status == paste_status::invalid_bitmap);
+        CHECK(!bmp.is_valid());
+
+        // Legacy core header size is not a DIB.
+        auto core = make_dib40(2, 2, 24, BI_RGB, std::vector<std::uint8_t>(16, 0));
+        std::uint32_t core_size = 12;
+        std::memcpy(core.data(), &core_size, 4);
+        auto r_core = parse_dib_bytes(core.data(), core.size(), bmp);
+        CHECK(!r_core.ok());
+        CHECK(!bmp.is_valid());
+
+        // Zero dimensions.
+        auto zero_w = make_dib40(0, 2, 24, BI_RGB, std::vector<std::uint8_t>(16, 0));
+        CHECK(!parse_dib_bytes(zero_w.data(), zero_w.size(), bmp).ok());
+        auto zero_h = make_dib40(2, 0, 24, BI_RGB, std::vector<std::uint8_t>(16, 0));
+        CHECK(!parse_dib_bytes(zero_h.data(), zero_h.size(), bmp).ok());
+
+        // Truncated pixel data.
+        auto trunc = make_dib40(2, -2, 32, BI_RGB, std::vector<std::uint8_t>(4, 0));
+        auto r_trunc = parse_dib_bytes(trunc.data(), trunc.size(), bmp);
+        CHECK(!r_trunc.ok());
+        CHECK(r_trunc.status == paste_status::invalid_bitmap);
+        CHECK(!bmp.is_valid());
+
+        // Oversized dimensions exceed the bounded transfer limits.
+        auto huge = make_dib40(70000, 2, 24, BI_RGB, std::vector<std::uint8_t>(16, 0));
+        auto r_huge = parse_dib_bytes(huge.data(), huge.size(), bmp);
+        CHECK(!r_huge.ok());
+        CHECK(r_huge.status == paste_status::overflow);
+        CHECK(!bmp.is_valid());
+    }
+
+    // 6b. Allocation robustness boundaries: oversized payloads are rejected
+    // before any large allocation, `out` is cleared, and no exception escapes.
+    {
+        clipboard_bitmap bmp;
+        // convert path: claimed output exceeds the 2 GiB decoded cap, so it
+        // returns empty without allocating (no 2 GiB vector is created).
+        {
+            const std::uint8_t dummy = 0;
+            // 32768 * 4 * 16385 = 2147614720 > 2 GiB.
+            CHECK(convert_straight_bgra_to_pbgra(&dummy, 32768, 16385, 131072).empty());
+        }
+        // parse path: header-only buffer claims ~3.6 GiB of source pixels
+        // (30000x30000x4); must report overflow with `out` cleared.
+        {
+            bmp.width = 7;
+            bmp.height = 7;
+            bmp.stride = 28;
+            bmp.pixels.assign(196, 0xAB);
+            auto claim = make_dib40(30000, 30000, 32, BI_RGB, std::vector<std::uint8_t>{});
+            bool threw = false;
+            paste_result r{};
+            try {
+                r = parse_dib_bytes(claim.data(), claim.size(), bmp);
+            } catch (...) {
+                threw = true;
+            }
+            CHECK(!threw);
+            CHECK(!r.ok());
+            CHECK(r.status == paste_status::overflow);
+            CHECK(!bmp.is_valid());
+            CHECK(bmp.pixels.empty());
+        }
+        // read path: seam reports an oversized block; the copy must be
+        // rejected before allocation with the clipboard still closed.
+        {
+            struct tiny_clip {
+                bool closed = false;
+            } tc;
+            clipboard_read_seam oseam;
+            const HWND ohwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x0BAD));
+            const HANDLE ohandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x0D18));
+            const std::uint8_t one = 0;
+            oseam.open_clipboard = [&](HWND) -> BOOL { return TRUE; };
+            oseam.close_clipboard = [&]() -> BOOL {
+                tc.closed = true;
+                return TRUE;
+            };
+            oseam.is_format_available = [&](UINT fmt) -> BOOL {
+                return fmt == CF_DIB ? TRUE : FALSE;
+            };
+            oseam.get_data = [&](UINT) -> HANDLE { return ohandle; };
+            oseam.lock = [&](HANDLE) -> void* { return const_cast<std::uint8_t*>(&one); };
+            oseam.unlock = [&](HANDLE) -> BOOL { return TRUE; };
+            oseam.mem_size = [&](HANDLE) -> SIZE_T {
+                return static_cast<SIZE_T>((1ull << 31) + 1024);
+            };
+            bmp.width = 5;
+            bmp.height = 5;
+            bmp.stride = 20;
+            bmp.pixels.assign(100, 0xCD);
+            bool threw = false;
+            paste_result r{};
+            try {
+                r = read_clipboard_image(ohwnd, bmp, &oseam);
+            } catch (...) {
+                threw = true;
+            }
+            CHECK(!threw);
+            CHECK(!r.ok());
+            CHECK(r.status == paste_status::overflow);
+            CHECK(!bmp.is_valid());
+            CHECK(bmp.pixels.empty());
+            CHECK(tc.closed);
+        }
+    }
+
+    // 7. Full clipboard read through an injected seam (no real OS clipboard).
+    {
+        const std::uint8_t straight[16] = {
+            0, 0, 255, 255, 0, 255, 0, 255,
+            255, 0, 0, 255, 255, 255, 255, 255
+        };
+        const auto dibv5 = build_dibv5_payload_from_straight_bgra(straight, 2, 2, 8);
+        const auto dib40 = make_dib40(2, -2, 32, BI_RGB,
+                                      std::vector<std::uint8_t>(straight, straight + 16));
+
+        struct fake_clip {
+            bool opened = false;
+            bool closed = false;
+            bool has_v5 = false;
+            bool has_dib = false;
+            bool open_ok = true;
+            bool lock_ok = true;
+            UINT last_format = 0;
+            std::vector<std::uint8_t> v5bytes;
+            std::vector<std::uint8_t> dibbytes;
+        } fake;
+        fake.v5bytes = dibv5;
+        fake.dibbytes = dib40;
+
+        const HWND fake_hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x9A9A));
+        const HANDLE kV5Handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x51));
+        const HANDLE kDibHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xD1));
+
+        clipboard_read_seam seam;
+        seam.open_clipboard = [&](HWND h) -> BOOL {
+            CHECK(h == fake_hwnd);
+            fake.opened = true;
+            return fake.open_ok ? TRUE : FALSE;
+        };
+        seam.close_clipboard = [&]() -> BOOL {
+            fake.closed = true;
+            return TRUE;
+        };
+        seam.is_format_available = [&](UINT fmt) -> BOOL {
+            if (fmt == CF_DIBV5) return fake.has_v5 ? TRUE : FALSE;
+            if (fmt == CF_DIB) return fake.has_dib ? TRUE : FALSE;
+            return FALSE;
+        };
+        seam.get_data = [&](UINT fmt) -> HANDLE {
+            fake.last_format = fmt;
+            if (fmt == CF_DIBV5 && fake.has_v5) return kV5Handle;
+            if (fmt == CF_DIB && fake.has_dib) return kDibHandle;
+            return nullptr;
+        };
+        seam.lock = [&](HANDLE h) -> void* {
+            if (!fake.lock_ok) return nullptr;
+            if (h == kV5Handle) return fake.v5bytes.data();
+            if (h == kDibHandle) return fake.dibbytes.data();
+            return nullptr;
+        };
+        seam.unlock = [&](HANDLE) -> BOOL { return TRUE; };
+        seam.mem_size = [&](HANDLE h) -> SIZE_T {
+            if (h == kV5Handle) return fake.v5bytes.size();
+            if (h == kDibHandle) return fake.dibbytes.size();
+            return 0;
+        };
+
+        // CF_DIBV5 preferred when both present.
+        fake.has_v5 = true;
+        fake.has_dib = true;
+        {
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(fake_hwnd, bmp, &seam);
+            CHECK(res.ok());
+            CHECK(fake.opened && fake.closed);
+            CHECK(fake.last_format == CF_DIBV5);
+            CHECK(bmp.width == 2 && bmp.height == 2 && bmp.is_valid());
+        }
+        // CF_DIB fallback when V5 absent.
+        fake.has_v5 = false;
+        fake.has_dib = true;
+        {
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(fake_hwnd, bmp, &seam);
+            CHECK(res.ok());
+            CHECK(fake.last_format == CF_DIB);
+            CHECK(bmp.width == 2 && bmp.height == 2 && bmp.is_valid());
+        }
+        // No DIB-family format: quiet no_image, clipboard still closed.
+        fake.has_v5 = false;
+        fake.has_dib = false;
+        {
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(fake_hwnd, bmp, &seam);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::no_image);
+            CHECK(!bmp.is_valid());
+            CHECK(fake.opened && fake.closed);
+        }
+        // Locked clipboard: quiet unavailable.
+        fake.has_v5 = true;
+        fake.open_ok = false;
+        {
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(fake_hwnd, bmp, &seam);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unavailable);
+            CHECK(!bmp.is_valid());
+        }
+        fake.open_ok = true;
+        // Lock failure: quiet unavailable.
+        fake.lock_ok = false;
+        {
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(fake_hwnd, bmp, &seam);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unavailable);
+            CHECK(!bmp.is_valid());
+        }
+        fake.lock_ok = true;
+        // Null owner rejected without touching the seam.
+        {
+            fake.opened = false;
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(nullptr, bmp, &seam);
+            CHECK(!res.ok());
+            CHECK(res.status == paste_status::unavailable);
+            CHECK(!fake.opened);
+        }
+        // M2 lock-lifetime: the DIB bytes are copied while locks are held, so
+        // the parsed result stays valid even though unlock poisons the source
+        // handle bytes and the clipboard is closed (cleanup preserved).
+        {
+            const std::vector<std::uint8_t> px = {9, 8, 7, 200};
+            const auto dib = make_dib40(1, -1, 32, BI_RGB, px);
+            struct poison_clip {
+                std::vector<std::uint8_t> bytes;
+                bool unlocked = false;
+                bool closed = false;
+            } pc;
+            pc.bytes = dib;
+            const HWND phwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(0xBEEF));
+            const HANDLE phandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xD18));
+            clipboard_read_seam pseam;
+            pseam.open_clipboard = [&](HWND) -> BOOL { return TRUE; };
+            pseam.close_clipboard = [&]() -> BOOL {
+                pc.closed = true;
+                return TRUE;
+            };
+            pseam.is_format_available = [&](UINT fmt) -> BOOL {
+                return fmt == CF_DIB ? TRUE : FALSE;
+            };
+            pseam.get_data = [&](UINT) -> HANDLE { return phandle; };
+            pseam.lock = [&](HANDLE) -> void* { return pc.bytes.data(); };
+            pseam.unlock = [&](HANDLE) -> BOOL {
+                pc.unlocked = true;
+                std::fill(pc.bytes.begin(), pc.bytes.end(), static_cast<std::uint8_t>(0xFF));
+                return TRUE;
+            };
+            pseam.mem_size = [&](HANDLE) -> SIZE_T { return pc.bytes.size(); };
+            clipboard_bitmap bmp;
+            const auto res = read_clipboard_image(phwnd, bmp, &pseam);
+            CHECK(res.ok());
+            CHECK(pc.unlocked);
+            CHECK(pc.closed);
+            CHECK(bmp.is_valid());
+            CHECK(bmp.width == 1 && bmp.height == 1);
+            if (bmp.pixels.size() == 4) {
+                // 32-bit BI_RGB is forced opaque; source poisoning after the
+                // copy must not leak into the parsed pixels.
+                CHECK(bmp.pixels[0] == 9 && bmp.pixels[1] == 8 && bmp.pixels[2] == 7 &&
+                      bmp.pixels[3] == 255);
+            }
+        }
+    }
+
+    // 8. Ctrl+V shortcut routing: paste path, ownership, and modifier parity.
+    {
+        const HWND fake_main_hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x2222));
+        const HWND fake_resize_dlg = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x3333));
+
+        ui_item_state copy_enabled{};
+        copy_enabled.enabled = true;
+
+        // Exact Ctrl+V routes to the paste path regardless of copy state.
+        auto p1 = route_shortcut_key('V', true, false, false, fake_main_hwnd, nullptr, false, copy_enabled);
+        CHECK(p1 == shortcut_action::file_paste_image);
+        auto p1_lower = route_shortcut_key('v', true, false, false, fake_main_hwnd, nullptr, false, copy_enabled);
+        CHECK(p1_lower == shortcut_action::file_paste_image);
+
+        // Modified variants never paste: Ctrl+Shift+V stays with Flip Vertical.
+        CHECK(route_shortcut_key('V', true, true, false, fake_main_hwnd, nullptr, false, copy_enabled) == shortcut_action::none);
+        CHECK(route_shortcut_key('V', true, false, true, fake_main_hwnd, nullptr, false, copy_enabled) == shortcut_action::none);
+        // Plain V keeps existing ownership (crop entry / no-op), never pastes.
+        CHECK(route_shortcut_key('V', false, false, false, fake_main_hwnd, nullptr, false, copy_enabled) == shortcut_action::none);
+        CHECK(route_shortcut_key('V', false, false, false, fake_main_hwnd, nullptr, true, copy_enabled) == shortcut_action::crop_consume);
+
+        // Crop consumes Ctrl+V; dialog owns it when focused.
+        CHECK(route_shortcut_key('V', true, false, false, fake_main_hwnd, nullptr, true, copy_enabled) == shortcut_action::crop_consume);
+        CHECK(route_shortcut_key('V', true, false, false, fake_resize_dlg, fake_resize_dlg, false, copy_enabled) == shortcut_action::dialog_default);
+
+        // Focused text input keeps native paste (and native copy is unchanged).
+        const wchar_t kEditHostClass[] = L"OzPasteRoutingTestHost";
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kEditHostClass;
+        RegisterClassExW(&wc);
+        HWND host_hwnd = CreateWindowExW(0, kEditHostClass, L"PasteRoutingHost", WS_OVERLAPPEDWINDOW,
+                                        0, 0, 400, 300, nullptr, nullptr, wc.hInstance, nullptr);
+        CHECK(host_hwnd != nullptr);
+        if (host_hwnd) {
+            HWND edit_hwnd = CreateWindowExW(0, L"Edit", L"", WS_CHILD | ES_LEFT,
+                                            0, 0, 100, 24, host_hwnd, nullptr, wc.hInstance, nullptr);
+            CHECK(edit_hwnd != nullptr);
+            if (edit_hwnd) {
+                auto p_text = route_shortcut_key('V', true, false, false, edit_hwnd, nullptr, false, copy_enabled);
+                CHECK(p_text == shortcut_action::native_text_paste);
+                auto c_text = route_shortcut_key('C', true, false, false, edit_hwnd, nullptr, false, copy_enabled);
+                CHECK(c_text == shortcut_action::native_text_copy);
+                DestroyWindow(edit_hwnd);
+            }
+            DestroyWindow(host_hwnd);
+        }
+        UnregisterClassW(kEditHostClass, wc.hInstance);
+    }
+
+    // 9. Temporary-document command-state contract: no file path disables
+    //    file-only commands while Copy Image stays functional via source.
+    {
+        ui_command_context ctx{};
+        ctx.benchmark_mode = false;
+        ctx.have_image = true;
+        ctx.has_document = true;
+        ctx.has_source = true;      // retained pasted pixels (Editing-ON) / presentable bitmap (OFF)
+        ctx.has_file_path = false;  // temporary document: no source file path
+
+        CHECK(derive_command_state(ui_command_id::file_copy_image, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_copy, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_copy_path, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_open_location, ctx).enabled);
+        // File Open stays available; Save As remains source-gated as for file docs.
+        CHECK(derive_command_state(ui_command_id::file_open, ctx).enabled);
+    }
+}
+
+// Stage 9.5 M1: presentation planning must observe suppress_edit_presentation
+// before any edit-history/draft path. During a transactional document swap
+// (file open / navigation commit / clipboard paste) app.image_doc still holds
+// the replaced document's history; the suppression-aware seam must return the
+// plain non-edit plan without consulting that history or a draft resize, so
+// the incoming bitmap never inherits the prior document's transform/source_rect.
+void test_presentation_edit_suppression() {
+    using namespace oz::viewer;
+    using namespace oz::viewer_core;
+
+    document_metadata meta{};
+    meta.source_dimensions = edit_dimensions{400, 300};
+    const std::optional<edit_dimensions> no_draft{};
+    const std::optional<edit_dimensions> draft{edit_dimensions{200, 150}};
+
+    // Empty document: no edit state, so the plain plan is used regardless.
+    image_document empty_doc(meta);
+    CHECK(!should_use_edit_presentation(false, &empty_doc, no_draft));
+    CHECK(!should_use_edit_presentation(true, &empty_doc, no_draft));
+
+    // Prior document with real rotate/crop/resize edits would drive the
+    // edit-aware plan when presentation is not suppressed...
+    image_document edited_doc(meta);
+    CHECK(edited_doc.history().push_command(rotate_command{rotate_direction::right_90}));
+    CHECK(edited_doc.history().push_command(crop_command{edit_rect{10, 10, 100, 100}}));
+    CHECK(edited_doc.history().push_command(resize_command{edit_dimensions{200, 150}, resize_filter::bicubic}));
+    CHECK(edited_doc.history().total_commands() == 3);
+    CHECK(should_use_edit_presentation(false, &edited_doc, no_draft));
+
+    // ...but during a transactional swap suppression must force the plain
+    // plan, with or without a draft resize, before any history/draft state is
+    // consulted.
+    CHECK(!should_use_edit_presentation(true, &edited_doc, no_draft));
+    CHECK(!should_use_edit_presentation(true, &edited_doc, draft));
+
+    // A pending draft resize with no history is suppressed the same way.
+    image_document draft_doc(meta);
+    CHECK(should_use_edit_presentation(false, &draft_doc, draft));
+    CHECK(!should_use_edit_presentation(true, &draft_doc, draft));
+
+    // No document at all never uses the edit-aware plan.
+    CHECK(!should_use_edit_presentation(false, nullptr, draft));
+    CHECK(!should_use_edit_presentation(true, nullptr, draft));
+}
+
+// Stage 9.5 paste-install staging (repeat final review MUST_FIX): the complete
+// temporary document install - display image, pathless domain document, and the
+// payload-sized retained source used by Copy Image - must be built before any
+// caller mutation, and an invalid/faulty payload must fail quietly, leaving the
+// caller's install untouched. The allocation-fault path itself is OOM-only; the
+// source scan (check_paste_isolation.cmake section 7) pins that catch-and-quiet
+// structure, while this test proves the staged ownership/shape it protects.
+void test_paste_install_staging_seam() {
+    using namespace oz::viewer;
+    using namespace oz::viewer_core;
+
+    // 1. Invalid payload: quiet false, a pre-existing install is untouched.
+    {
+        clipboard_bitmap empty;  // no dimensions, no pixels
+        paste_install existing;
+        existing.image = std::make_shared<decoded_image_data>();
+        const auto sentinel = existing.image;
+        CHECK(!prepare_paste_install(std::move(empty), existing));
+        CHECK(existing.image == sentinel);
+    }
+    // 1b. Inconsistent payload metadata (huge declared dims, tiny real buffer):
+    //     rejected before any payload-sized allocation could be attempted.
+    {
+        clipboard_bitmap lying;
+        lying.width = 65535;
+        lying.height = 65535;
+        lying.stride = 65535 * 4;
+        lying.pixels.assign(16, 0);
+        paste_install install;
+        CHECK(!prepare_paste_install(std::move(lying), install));
+        CHECK(install.image == nullptr);
+    }
+
+    // 2. Valid payload: the staged install is the complete temporary document,
+    //    including a retained source whose identity already matches the
+    //    pre-built document (Copy Image contract) - all before any swap.
+    {
+        clipboard_bitmap bmp;
+        bmp.width = 2;
+        bmp.height = 2;
+        bmp.stride = 8;
+        bmp.pixels.assign({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+        const std::vector<std::uint8_t> payload = bmp.pixels;
+
+        paste_install install;
+        CHECK(prepare_paste_install(std::move(bmp), install));
+        CHECK(install.image != nullptr);
+        CHECK(install.image->pixels == payload);
+        CHECK(install.image->width == 2);
+        CHECK(install.image->height == 2);
+        CHECK(install.image->stride == 8);
+        CHECK(install.image->scale_den == 1);
+        CHECK(install.image->src_width == 2);
+        CHECK(install.image->src_height == 2);
+        CHECK(install.image->codec == codec_id::bmp_wic);
+        CHECK(install.image->source_file_size == 0);
+        CHECK(install.image->source_last_write_time == 0);
+
+#if OZVIEWER_ENABLE_EDITING
+        CHECK(install.document != nullptr);
+        CHECK(install.source != nullptr);
+        CHECK(install.source->is_valid());
+        CHECK(install.source->document_instance_id != 0);
+        CHECK(install.source->document_instance_id == install.document->instance_id());
+        CHECK(install.source->pixels == install.image->pixels);
+        const edit_dimensions expected_dims{2, 2};
+        CHECK(install.source->dimensions == expected_dims);
+        CHECK(install.source->stride == 8);
+        CHECK(install.source->source_path.empty());
+        CHECK(install.source->file_size == 0);
+        CHECK(install.source->last_write_time == 0);
+        CHECK(install.document->metadata().source_path.empty());
+        CHECK(!install.document->source_baseline().valid);
+        CHECK(install.document->history().total_commands() == 0);
+        CHECK(install.document->history().source_dimensions() == expected_dims);
+        CHECK(!install.document->is_dirty());
+#endif
+        // The payload buffer transferred out of the input bitmap (std::vector
+        // move with the standard allocator leaves the source empty): exactly
+        // one canonical copy exists in the staged install.
+        CHECK(bmp.pixels.empty());
+    }
+
+#if OZVIEWER_ENABLE_EDITING
+    // 3. Every successful staging uses a fresh document identity, so a pasted
+    //    install can never alias the replaced document in stale checks.
+    {
+        auto make_bitmap = [] {
+            clipboard_bitmap b;
+            b.width = 1;
+            b.height = 1;
+            b.stride = 4;
+            b.pixels.assign({9, 8, 7, 255});
+            return b;
+        };
+        paste_install first;
+        paste_install second;
+        CHECK(prepare_paste_install(make_bitmap(), first));
+        CHECK(prepare_paste_install(make_bitmap(), second));
+        CHECK(first.document->instance_id() != second.document->instance_id());
+        CHECK(first.source->document_instance_id != second.source->document_instance_id);
+    }
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -1688,6 +2414,9 @@ int main() {
     test_context_menu_seam();
     test_clipboard_output_seam();
     test_shortcut_routing_seam();
+    test_clipboard_input_seam();
+    test_presentation_edit_suppression();
+    test_paste_install_staging_seam();
 
     std::printf("stage7_seam_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

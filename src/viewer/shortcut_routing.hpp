@@ -15,7 +15,9 @@ enum class shortcut_action {
     dialog_default,     // Native dialog (e.g. Resize dialog) owns key
     crop_consume,       // In-progress crop consumes key (e.g. C or Ctrl+C)
     native_text_copy,   // Focused Edit/RichEdit control receives standard text copy
+    native_text_paste,  // Focused Edit/RichEdit control receives standard text paste
     file_copy_image,    // Routes to Copy Image (ID 108) command path
+    file_paste_image,   // Routes to Paste Image (Ctrl+V clipboard import) path
     command_disabled    // Target command is disabled; consume key with no clipboard work or warning
 };
 
