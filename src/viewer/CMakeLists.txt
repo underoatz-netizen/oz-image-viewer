@@ -9,7 +9,7 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
     # ozviewer.rc embeds the application icon (assets/icons/ozviewer.ico) so the
     # built executable carries its Shell/window/taskbar identity. CMake's RC
     # language is already enabled for this MSVC project; no extra dependency.
-    set(OZVIEWER_SOURCES main.cpp renderer.cpp modern_dialogs.cpp shell_integration.cpp clipboard_output.cpp copy_controller.cpp source_identity.cpp shortcut_routing.cpp ui_command_state.cpp ui_layout.cpp ui_theme.cpp svg_icon_cache.cpp ui_chrome.cpp crop_strip.cpp context_menu.cpp ozviewer.rc)
+    set(OZVIEWER_SOURCES main.cpp renderer.cpp modern_dialogs.cpp shell_integration.cpp clipboard_output.cpp clipboard_input.cpp copy_controller.cpp source_identity.cpp shortcut_routing.cpp ui_command_state.cpp ui_layout.cpp ui_theme.cpp svg_icon_cache.cpp ui_chrome.cpp crop_strip.cpp context_menu.cpp ozviewer.rc)
     if(OZVIEWER_ENABLE_EDITING)
         list(APPEND OZVIEWER_SOURCES edit_controller.cpp resize_dialog.cpp save_controller.cpp)
     endif()

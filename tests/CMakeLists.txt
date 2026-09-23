@@ -65,6 +65,15 @@ add_test(NAME ozviewer_copy_source_identity_scan
                  -DMAIN_CPP=${CMAKE_SOURCE_DIR}/src/viewer/main.cpp
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_copy_source_identity.cmake)
 
+# Stage 9.5 paste isolation-scan: Ctrl+V clipboard import must live behind
+# the clipboard_input boundary, stay out of benchmark modes, and never use
+# direct Win32 clipboard calls from main.cpp.
+add_test(NAME ozviewer_paste_isolation_scan
+         COMMAND ${CMAKE_COMMAND}
+                 -DMAIN_CPP=${CMAKE_SOURCE_DIR}/src/viewer/main.cpp
+                 -DVIEWER_DIR=${CMAKE_SOURCE_DIR}/src/viewer
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/check_paste_isolation.cmake)
+
 # Stage 9.4-OFF link guard: copy_controller.cpp (always built) calls
 # read_file_stable_identity, so the always-built source_identity.cpp must own
 # that symbol while edit_controller.cpp stays behind the editing gate.
@@ -84,10 +93,11 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/crop_strip.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/modern_dialogs.cpp
-                   ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
-                   ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
-                   ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
-                   ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp)
+                    ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
+                    ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
+                    ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_input.cpp
+                    ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
+                    ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp)
     target_link_libraries(ozviewer_stage7_seam_tests PRIVATE ozviewer_core d2d1 comctl32 shell32)
     target_include_directories(ozviewer_stage7_seam_tests PRIVATE
                                ${CMAKE_CURRENT_SOURCE_DIR}
