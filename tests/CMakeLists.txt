@@ -82,6 +82,13 @@ add_test(NAME ozviewer_off_link_sources_scan
                  -DVIEWER_DIR=${CMAKE_SOURCE_DIR}/src/viewer
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_off_link_sources.cmake)
 
+# Stage 9.6A multi-drop classification seam tests (dependency-free header-only
+# seam; builds in all presets including no-vcpkg).
+add_executable(ozviewer_drop_classify_tests drop_classify_tests.cpp)
+target_include_directories(ozviewer_drop_classify_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/viewer)
+target_compile_features(ozviewer_drop_classify_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_drop_classify_tests COMMAND ozviewer_drop_classify_tests)
+
 # Stage 7 UI Seam focused unit tests (dependency-free; builds in all presets including no-vcpkg)
 if(OZVIEWER_ENABLE_EDITING)
     add_executable(ozviewer_stage7_seam_tests
