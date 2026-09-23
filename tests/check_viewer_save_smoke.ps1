@@ -17,6 +17,15 @@
 # Exit codes: 0 = all phases passed; 77 = skipped (no interactive desktop or
 # window could not be created); 1 = smoke failure (message explains).
 #
+# The native save dialog is DirectUI-hosted: its file-name field and buttons
+# only react to real keystrokes, so the phases must type the destination while
+# the dialog is the foreground window. A background test host can lose that
+# foreground to another application, which used to drop the keystrokes and
+# fail phases 2-6 after a silent 30 s wait. Set-DialogForeground re-acquires
+# and verifies the foreground (attaching to the incumbent foreground thread
+# when Windows denies a plain SetForegroundWindow) and Set-SaveDialogFilename
+# retries the typed commit a bounded number of times.
+#
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File check_viewer_save_smoke.ps1 `
 #       -Viewer <ozviewer.exe> -MakePng <ozviewer_make_png.exe> `
@@ -69,6 +78,19 @@ public static class OzSmokeNative {
 
     [DllImport("user32.dll")]
     public static extern bool SetActiveWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageW(IntPtr hwnd, uint msg, IntPtr wparam, string lparam);
 
@@ -163,21 +185,107 @@ function Invoke-SendKeys([IntPtr]$hwnd, [string]$keys) {
     [System.Windows.Forms.SendKeys]::SendWait($keys)
 }
 
-function Post-Command([IntPtr]$hwnd, [int]$commandId) {
-    [void][OzSmokeNative]::PostMessageW($hwnd, $WM_COMMAND, [IntPtr]$commandId, [IntPtr]::Zero)
+# The common item dialog is DirectUI-hosted: its file-name Edit ignores
+# cross-process WM_SETTEXT and its Save button ignores BM_CLICK, so the smoke
+# must deliver real keystrokes. SendKeys only reaches the dialog while it is
+# the foreground window; when the test host runs in the background another
+# application can keep (or reclaim) the foreground, silently dropping the
+# keystrokes. Acquire the foreground explicitly (attaching to the current
+# foreground thread when Windows denies a plain SetForegroundWindow) and
+# verify it, rather than assuming the dialog kept focus.
+function Set-DialogForeground([IntPtr]$dialog) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        if ([OzSmokeNative]::GetForegroundWindow() -eq $dialog) { return $true }
+        [void][OzSmokeNative]::SetForegroundWindow($dialog)
+        Start-Sleep -Milliseconds 100
+        if ([OzSmokeNative]::GetForegroundWindow() -eq $dialog) { return $true }
+        $foreground = [OzSmokeNative]::GetForegroundWindow()
+        if ($foreground -ne [IntPtr]::Zero) {
+            $foregroundPid = 0
+            $foregroundThread = [OzSmokeNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+            $ownThread = [OzSmokeNative]::GetCurrentThreadId()
+            if ($foregroundThread -ne 0 -and $foregroundThread -ne $ownThread) {
+                if ([OzSmokeNative]::AttachThreadInput($ownThread, $foregroundThread, $true)) {
+                    [void][OzSmokeNative]::SetForegroundWindow($dialog)
+                    [void][OzSmokeNative]::AttachThreadInput($ownThread, $foregroundThread, $false)
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 150
+        if ([OzSmokeNative]::GetForegroundWindow() -eq $dialog) { return $true }
+    }
+    return $false
+}
+
+function Test-DialogClosed([IntPtr]$dialog) {
+    return (-not [OzSmokeNative]::IsWindow($dialog)) -or (-not [OzSmokeNative]::IsWindowVisible($dialog))
+}
+
+# Find a visible top-level dialog of the process that is not the given one
+# (overwrite confirmation, alpha rejection, or an error prompt).
+function Find-OtherDialog([int]$processId, [IntPtr]$exclude) {
+    $script:otherDialog = [IntPtr]::Zero
+    $callback = [OzSmokeNative+EnumWindowsProc]{
+        param([IntPtr]$hwnd, [IntPtr]$lparam)
+        $pidOut = 0
+        [void][OzSmokeNative]::GetWindowThreadProcessId($hwnd, [ref]$pidOut)
+        if ($pidOut -eq $processId -and [OzSmokeNative]::IsWindowVisible($hwnd) -and
+            (Get-WindowClass $hwnd) -eq "#32770" -and $hwnd -ne $exclude) {
+            $script:otherDialog = $hwnd
+            return $false
+        }
+        return $true
+    }
+    [void][OzSmokeNative]::EnumWindows($callback, [IntPtr]::Zero)
+    return $script:otherDialog
 }
 
 # The common save dialog pre-selects only the suggested file-name stem, so the
-# whole field is selected before typing an absolute path.
-function Set-SaveDialogFilename([IntPtr]$dialog, [string]$path) {
-    [void][OzSmokeNative]::SetForegroundWindow($dialog)
-    [void][OzSmokeNative]::SetActiveWindow($dialog)
-    Start-Sleep -Milliseconds 250
-    Invoke-SendKeys $dialog "^a"
-    Start-Sleep -Milliseconds 200
-    Invoke-SendKeys $dialog $path
-    Start-Sleep -Milliseconds 400
-    Invoke-SendKeys $dialog "{ENTER}"
+# whole field is selected before typing an absolute path. After Enter the
+# helper waits for the dialog to react (close, a secondary prompt, or the new
+# file appearing) and retries the keystrokes a bounded number of times so a
+# transient foreground loss cannot turn into a silent 30 s failure.
+function Set-SaveDialogFilename([IntPtr]$dialog, [int]$processId, [string]$path) {
+    $preExisting = Test-Path -LiteralPath $path
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Set-DialogForeground $dialog)) {
+            continue  # Foreground could not be acquired; retry.
+        }
+        Start-Sleep -Milliseconds 250
+        Invoke-SendKeys $dialog "^a"
+        Start-Sleep -Milliseconds 200
+        Invoke-SendKeys $dialog $path
+        Start-Sleep -Milliseconds 400
+        Invoke-SendKeys $dialog "{ENTER}"
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(6)
+        do {
+            if (Test-DialogClosed $dialog) { return }
+            if ((Test-Path -LiteralPath $path) -and -not $preExisting) { return }
+            if ((Find-OtherDialog $processId $dialog) -ne [IntPtr]::Zero) { return }
+            Start-Sleep -Milliseconds 200
+        } while ([DateTime]::UtcNow -lt $deadline)
+    }
+    Fail "save dialog did not accept the typed destination after 3 attempts (foreground/keystroke delivery failed)"
+}
+
+# Deterministically cancel a still-open save dialog (used by phases that
+# deliberately dismiss it rather than committing).
+function Close-DialogByEscape([IntPtr]$dialog) {
+    if (-not (Set-DialogForeground $dialog)) {
+        Fail "could not bring the save dialog to the foreground to cancel it"
+    }
+    Invoke-SendKeys $dialog "{ESC}"
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    do {
+        if (Test-DialogClosed $dialog) { return }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Fail "save dialog did not close after Escape"
+}
+
+function Post-Command([IntPtr]$hwnd, [int]$commandId) {
+    [void][OzSmokeNative]::PostMessageW($hwnd, $WM_COMMAND, [IntPtr]$commandId, [IntPtr]::Zero)
 }
 
 function Get-FileMd5([string]$path) {
@@ -368,7 +476,7 @@ if ($dialog -eq [IntPtr]::Zero) {
 }
 $copyPng = Join-Path $WorkDir "smoke_copy.png"
 Remove-Item -LiteralPath $copyPng -ErrorAction SilentlyContinue
-Set-SaveDialogFilename $dialog $copyPng
+Set-SaveDialogFilename $dialog $process.Id $copyPng
 if (-not (Wait-FileExists $copyPng 30000)) {
     Stop-Viewer $process $hwnd $true | Out-Null
     Fail "phase2: Save As PNG copy was not written"
@@ -403,7 +511,7 @@ if ($dialog -eq [IntPtr]::Zero) {
 }
 $copyJpg = Join-Path $WorkDir "smoke_copy.jpg"
 Remove-Item -LiteralPath $copyJpg -ErrorAction SilentlyContinue
-Set-SaveDialogFilename $dialog $copyJpg
+Set-SaveDialogFilename $dialog $process.Id $copyJpg
 if (-not (Wait-FileExists $copyJpg 30000)) {
     Stop-Viewer $process $hwnd $true | Out-Null
     Fail "phase3: Save As JPEG copy was not written"
@@ -434,7 +542,7 @@ if ($dialog -eq [IntPtr]::Zero) {
 }
 $alphaJpg = Join-Path $WorkDir "smoke_alpha_output.jpg"
 Remove-Item -LiteralPath $alphaJpg -ErrorAction SilentlyContinue
-Set-SaveDialogFilename $dialog $alphaJpg
+Set-SaveDialogFilename $dialog $process.Id $alphaJpg
 
 # The save dialog closes, then the alpha rejection message box must appear.
 $deadline = [DateTime]::UtcNow.AddMilliseconds(30000)
@@ -497,7 +605,7 @@ $process = $phase5[0]; $hwnd = $phase5[1]
 Post-Command $hwnd $ID_FILE_SAVE_AS
 $dialog = Find-ProcessWindow $process.Id "#32770" 15000
 if ($dialog -ne [IntPtr]::Zero) {
-    Set-SaveDialogFilename $dialog $tiffFixture
+    Set-SaveDialogFilename $dialog $process.Id $tiffFixture
     if (Wait-FileExists $tiffFixture 30000) {
         Stop-Viewer $process $hwnd $false | Out-Null
         # Now open TIFF and test File -> Save routes to Save As
@@ -511,7 +619,7 @@ if ($dialog -ne [IntPtr]::Zero) {
             Stop-Viewer $pTiff $hTiff $true | Out-Null
             Fail "phase5: Save on TIFF source did not route to Save As dialog"
         }
-        Invoke-SendKeys $saveAsDlg "{ESC}"
+        Close-DialogByEscape $saveAsDlg
         Start-Sleep -Milliseconds 500
         Stop-Viewer $pTiff $hTiff $true | Out-Null
         Write-Output "SAVE_SMOKE_PHASE5_TIFF_SAVE_AS_ONLY_ROUTES_TO_SAVE_AS_OK"
@@ -540,7 +648,7 @@ if ($dialog -eq [IntPtr]::Zero) {
     Stop-Viewer $process $hwnd $true | Out-Null
     Fail "phase6: Save As dialog did not appear"
 }
-Set-SaveDialogFilename $dialog $existingCopy
+Set-SaveDialogFilename $dialog $process.Id $existingCopy
 $overwriteDeadline = [DateTime]::UtcNow.AddMilliseconds(10000)
 $overwriteDeclined = $false
 do {
@@ -565,7 +673,7 @@ if ((Get-FileMd5 $existingCopy) -ne $existingHashBefore) {
 # The save dialog remains open after No: cancel it, then discard-close.
 $dialog = Find-ProcessWindow $process.Id "#32770" 5000
 if ($dialog -ne [IntPtr]::Zero) {
-    Invoke-SendKeys $dialog "{ESC}"
+    Close-DialogByEscape $dialog
 }
 Start-Sleep -Milliseconds 500
 $exitCode = Stop-Viewer $process $hwnd $true
