@@ -216,4 +216,15 @@ if(NOT reg_clip_pos EQUAL -1)
     message(FATAL_ERROR "Direct RegisterClipboardFormat call found in main.cpp; clipboard format registration must be on-demand in clipboard_output boundary")
 endif()
 
+# 11. Verify that WM_DROPFILES is guarded against benchmark and navigation benchmark modes:
+string(FIND "${content}" "case WM_DROPFILES:" drop_msg_pos)
+if(drop_msg_pos EQUAL -1)
+    message(FATAL_ERROR "WM_DROPFILES handler not found in main.cpp")
+endif()
+string(SUBSTRING "${content}" ${drop_msg_pos} 300 drop_msg_window)
+string(FIND "${drop_msg_window}" "app->benchmark || app->nav_benchmark" drop_bench_guard_pos)
+if(drop_bench_guard_pos EQUAL -1)
+    message(FATAL_ERROR "WM_DROPFILES handler must be guarded by (app->benchmark || app->nav_benchmark)")
+endif()
+
 message(STATUS "check_benchmark_ui_isolation: OK (all interactive menus, context menu popup, buttons, drag/drop, chrome, dialogs, edit/save controllers, clipboard commands, and decode/present failure prompts are strictly excluded from both --benchmark and --navigation-benchmark)")

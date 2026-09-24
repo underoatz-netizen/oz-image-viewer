@@ -174,9 +174,17 @@ const std::filesystem::path* navigation_list::select_index(std::size_t index) no
 }
 
 navigation_list enumerate_sibling_images(const std::filesystem::path& target_path) {
+    return enumerate_sibling_images(target_path, [] { return false; });
+}
+
+namespace {
+
+// Shared bounded directory walk. Cancellation is polled once per entry so a
+// superseded worker stops promptly instead of running a whole traversal; a
+// predicate fault is treated as cancellation (fail-safe).
+std::vector<std::filesystem::path> enumerate_directory_candidates(
+    const std::filesystem::path& search_dir, const std::function<bool()>& check_cancel) {
     std::vector<std::filesystem::path> candidates;
-    const std::filesystem::path parent = target_path.parent_path();
-    const std::filesystem::path search_dir = parent.empty() ? std::filesystem::path(L".") : parent;
 
     std::wstring pattern = search_dir.native();
     if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/') {
@@ -188,6 +196,15 @@ navigation_list enumerate_sibling_images(const std::filesystem::path& target_pat
     HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
+            bool cancelled = false;
+            try {
+                cancelled = check_cancel();
+            } catch (...) {
+                cancelled = true;
+            }
+            if (cancelled) {
+                break;
+            }
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
                 candidates.push_back(search_dir / fd.cFileName);
             }
@@ -195,12 +212,65 @@ navigation_list enumerate_sibling_images(const std::filesystem::path& target_pat
         FindClose(hFind);
     }
 
-    return navigation_list::build(candidates, target_path);
+    return candidates;
+}
+
+}  // namespace
+
+navigation_list enumerate_sibling_images(const std::filesystem::path& target_path,
+                                         const std::function<bool()>& check_cancel) {
+    const std::filesystem::path parent = target_path.parent_path();
+    const std::filesystem::path search_dir = parent.empty() ? std::filesystem::path(L".") : parent;
+
+    return navigation_list::build(enumerate_directory_candidates(search_dir, check_cancel),
+                                  target_path);
 }
 
 navigation_list enumerate_sibling_jpegs(const std::filesystem::path& target_path) {
     // Compatibility wrapper: same extension-hinted enumeration entry point.
     return enumerate_sibling_images(target_path);
+}
+
+navigation_list navigation_list::from_ordered_items(
+    const std::vector<std::filesystem::path>& items) {
+    navigation_list list;
+    list.items_ = items;
+    if (!list.items_.empty()) {
+        list.active_index_ = 0;
+    }
+    return list;
+}
+
+drop_path_kind query_drop_path_kind(const std::filesystem::path& path) noexcept {
+    try {
+        if (path.empty()) {
+            return drop_path_kind::unknown;
+        }
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            return drop_path_kind::unknown;
+        }
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            return drop_path_kind::directory;
+        }
+        return drop_path_kind::file;
+    } catch (...) {
+        return drop_path_kind::unknown;
+    }
+}
+
+navigation_list enumerate_folder_images(const std::filesystem::path& folder) {
+    return enumerate_folder_images(folder, [] { return false; });
+}
+
+navigation_list enumerate_folder_images(const std::filesystem::path& folder,
+                                        const std::function<bool()>& check_cancel) {
+    if (folder.empty()) {
+        return navigation_list::build({}, std::filesystem::path{});
+    }
+
+    return navigation_list::build(enumerate_directory_candidates(folder, check_cancel),
+                                  std::filesystem::path{});
 }
 
 }  // namespace oz::viewer_core

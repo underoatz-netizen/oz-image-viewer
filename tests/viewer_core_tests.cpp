@@ -68,6 +68,7 @@
 #include <iterator>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -466,6 +467,153 @@ void test_navigation_empty() {
     CHECK(nav.select_previous() == nullptr);
     CHECK(nav.select_first() == nullptr);
     CHECK(nav.select_last() == nullptr);
+}
+
+// Stage 9.6B Navigation list from ordered items and drop queries
+void test_stage9_6b_navigation_and_drop_queries() {
+    using namespace oz::viewer_core;
+
+    // 1. from_ordered_items preserves drop order, active index 0, bounds
+    {
+        std::vector<std::filesystem::path> ordered = {
+            L"C:\\pics\\b.png",
+            L"C:\\pics\\a.jpg",
+            L"C:\\pics\\c.webp"
+        };
+        auto nav = navigation_list::from_ordered_items(ordered);
+        CHECK(!nav.empty());
+        CHECK(nav.size() == 3);
+        CHECK(nav.active_index().has_value());
+        CHECK(*nav.active_index() == 0);
+        CHECK(nav.current() != nullptr && *nav.current() == ordered[0]);
+        CHECK(nav.at(0) != nullptr && *nav.at(0) == ordered[0]);
+        CHECK(nav.at(1) != nullptr && *nav.at(1) == ordered[1]);
+        CHECK(nav.at(2) != nullptr && *nav.at(2) == ordered[2]);
+        CHECK(nav.at(3) == nullptr);
+
+        // Navigation stepping
+        CHECK(nav.select_next() != nullptr && *nav.current() == ordered[1]);
+        CHECK(*nav.active_index() == 1);
+        CHECK(nav.select_next() != nullptr && *nav.current() == ordered[2]);
+        CHECK(*nav.active_index() == 2);
+        CHECK(nav.select_next() == nullptr); // Clamp at boundary
+        CHECK(*nav.active_index() == 2);
+
+        CHECK(nav.select_previous() != nullptr && *nav.current() == ordered[1]);
+        CHECK(nav.select_first() != nullptr && *nav.current() == ordered[0]);
+        CHECK(*nav.active_index() == 0);
+        CHECK(nav.select_last() != nullptr && *nav.current() == ordered[2]);
+        CHECK(*nav.active_index() == 2);
+    }
+
+    // 2. from_ordered_items with empty list
+    {
+        auto empty_nav = navigation_list::from_ordered_items({});
+        CHECK(empty_nav.empty());
+        CHECK(empty_nav.size() == 0);
+        CHECK(!empty_nav.active_index().has_value());
+        CHECK(empty_nav.current() == nullptr);
+        CHECK(empty_nav.at(0) == nullptr);
+    }
+
+    // 3. query_drop_path_kind
+    {
+        CHECK(query_drop_path_kind(std::filesystem::path{}) == drop_path_kind::unknown);
+        CHECK(query_drop_path_kind(L"Z:\\nonexistent_volume_xyz\\no.png") == drop_path_kind::unknown);
+        
+        // Project directory itself is a directory
+        CHECK(query_drop_path_kind(L"E:\\Projects\\OZ image viewer") == drop_path_kind::directory);
+        // CMakeLists.txt is a file
+        CHECK(query_drop_path_kind(L"E:\\Projects\\OZ image viewer\\CMakeLists.txt") == drop_path_kind::file);
+    }
+
+    // 4. enumerate_folder_images: empty/nonexistent folder returns empty list
+    {
+        auto nav_empty = enumerate_folder_images(std::filesystem::path{});
+        CHECK(nav_empty.empty());
+        auto nav_none = enumerate_folder_images(L"Z:\\does_not_exist_xyz");
+        CHECK(nav_none.empty());
+    }
+
+    // 5. enumerate_folder_images: real directory with test images
+    {
+        // Directory with known files or test viewer directory
+        auto nav_dir = enumerate_folder_images(L"E:\\Projects\\OZ image viewer\\tests\\data\\phasea");
+        CHECK(!nav_dir.empty());
+        // Phase A has .bmp, .gif, .tif, .ico, etc.
+        // It must be naturally sorted via natural_path_less
+        for (std::size_t i = 1; i < nav_dir.size(); ++i) {
+            CHECK(natural_path_less(*nav_dir.at(i - 1), *nav_dir.at(i)));
+        }
+    }
+}
+
+// Stage 9.6B MUST_FIX: cooperative-cancellation contract for the enumeration
+// overloads used by the async enum workers. No GUI or HWND involvement.
+void test_stage9_6b_enumeration_cancellation() {
+    using namespace oz::viewer_core;
+
+    const auto dir = std::filesystem::temp_directory_path() / L"ozviewer_stage96b_enum_cancel";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    for (const wchar_t* name : {L"a.png", L"b.png", L"c.png", L"d.png"}) {
+        std::ofstream(dir / name, std::ios::binary) << "x";
+    }
+
+    // 1. Pre-cancelled folder walk stops before collecting anything.
+    {
+        int polls = 0;
+        const auto list = enumerate_folder_images(dir, [&polls] { ++polls; return true; });
+        CHECK(list.empty());
+        CHECK(polls == 1);
+    }
+
+    // 2. Cancellation mid-walk stops promptly and returns only the prefix.
+    {
+        int polls = 0;
+        const auto list = enumerate_folder_images(dir, [&polls] { return ++polls >= 3; });
+        CHECK(polls == 3);
+        CHECK(list.size() < 4);
+        CHECK(list.size() <= 2);
+    }
+
+    // 3. A predicate fault is treated as cancellation: no exception escapes.
+    {
+        const auto list = enumerate_folder_images(
+            dir, []() -> bool { throw std::runtime_error("probe fault"); });
+        CHECK(list.empty());
+    }
+
+    // 4. The uncancelled overloads still return the complete natural order.
+    {
+        const auto full = enumerate_folder_images(dir);
+        CHECK(full.size() == 4);
+        for (std::size_t i = 1; i < full.size(); ++i) {
+            CHECK(natural_path_less(*full.at(i - 1), *full.at(i)));
+        }
+        int polls = 0;
+        const auto polled = enumerate_folder_images(dir, [&polls] { ++polls; return false; });
+        CHECK(polled.size() == 4);
+        CHECK(polls >= 4);  // polled at least once per collected entry
+    }
+
+    // 5. Sibling overload honours the same contract and keeps the active item.
+    {
+        int polls = 0;
+        const auto cancelled = enumerate_sibling_images(
+            dir / L"b.png", [&polls] { ++polls; return true; });
+        CHECK(cancelled.empty());
+        CHECK(polls == 1);
+
+        const auto full = enumerate_sibling_images(dir / L"b.png");
+        CHECK(full.size() == 4);
+        CHECK(full.active_index().has_value());
+        CHECK(*full.active_index() == 1);  // a.png, b.png, c.png, d.png
+        CHECK(full.current() != nullptr && full.current()->filename() == L"b.png");
+    }
+
+    std::filesystem::remove_all(dir, ec);
 }
 
 // --- Stage 2.2 Cache and Preload tests ------------------------------------
@@ -6041,6 +6189,8 @@ int wmain() {
     test_navigation_boundary_and_movement();
     test_navigation_absent_active();
     test_navigation_empty();
+    test_stage9_6b_navigation_and_drop_queries();
+    test_stage9_6b_enumeration_cancellation();
 
     // Stage 2.2 Preload and Cache tests
     test_cache_budget_calculation();

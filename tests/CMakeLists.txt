@@ -89,6 +89,20 @@ target_include_directories(ozviewer_drop_classify_tests PRIVATE ${CMAKE_SOURCE_D
 target_compile_features(ozviewer_drop_classify_tests PRIVATE cxx_std_23)
 add_test(NAME ozviewer_drop_classify_tests COMMAND ozviewer_drop_classify_tests)
 
+# Stage 9.6B drop-open policy helper tests (dependency-free header-only
+# helpers; builds in all presets including no-vcpkg).
+add_executable(ozviewer_drop_flow_tests drop_flow_tests.cpp)
+target_include_directories(ozviewer_drop_flow_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/viewer)
+target_compile_features(ozviewer_drop_flow_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_drop_flow_tests COMMAND ozviewer_drop_flow_tests)
+
+# Stage 9.6B MUST_FIX async enum-worker slot lifecycle tests (dependency-free
+# header-only seam; real std::jthread replacement/stop/reap contract, no GUI).
+add_executable(ozviewer_async_worker_slot_tests async_worker_slot_tests.cpp)
+target_include_directories(ozviewer_async_worker_slot_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/viewer)
+target_compile_features(ozviewer_async_worker_slot_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_async_worker_slot_tests COMMAND ozviewer_async_worker_slot_tests)
+
 # Stage 7 UI Seam focused unit tests (dependency-free; builds in all presets including no-vcpkg)
 if(OZVIEWER_ENABLE_EDITING)
     add_executable(ozviewer_stage7_seam_tests

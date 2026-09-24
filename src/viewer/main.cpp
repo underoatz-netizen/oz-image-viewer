@@ -53,6 +53,9 @@
 #include "clipboard_input.hpp"
 #include "paste_install.hpp"
 #include "copy_controller.hpp"
+#include "drop_classify.hpp"
+#include "drop_flow.hpp"
+#include "enum_worker_slot.hpp"
 #include "shortcut_routing.hpp"
 #include "shell_integration.hpp"
 #include "ui_chrome.hpp"
@@ -96,6 +99,7 @@ bool verify_source_file_metadata(const std::filesystem::path& path,
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -150,7 +154,15 @@ constexpr int kIdCropRatioASeries  = 229;
 struct app_state;
 static void schedule_navigation_plan(app_state& app);
 static void start_open_file_dialog(app_state& app);
-static void open_new_document(app_state& app, const std::filesystem::path& path);
+[[nodiscard]] static bool open_new_document(app_state& app, const std::filesystem::path& path);
+[[nodiscard]] static bool launch_initial_decode_for_path(app_state& app,
+                                                         const std::filesystem::path& path,
+                                                         std::uint64_t launch_gen);
+static void open_dropped_file_list(app_state& app,
+                                   std::vector<std::filesystem::path>&& ordered_supported);
+static void schedule_dropped_folder(app_state& app, const std::filesystem::path& folder);
+static void report_drop_rejection(app_state& app, const oz::viewer::drop_reject_text& text);
+static void handle_dropped_paths(app_state& app, HDROP hDrop);
 static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& bitmap);
 static void start_paste_from_clipboard(app_state& app);
 static void update_open_button_layout(app_state& app);
@@ -316,16 +328,42 @@ struct app_state {
     std::mutex initial_decode_mutex;
     std::shared_ptr<initial_decode_outcome> initial_result;
     std::atomic<bool> cancel_initial_decode{false};
-    std::jthread initial_decode_thread;
+    // Stage 9.6B MUST_FIX: single-slot worker with asynchronous retirement.
+    // Replacing the active initial-decode worker never joins it on the UI
+    // thread; the superseded worker is stop-requested and handed to the slot's
+    // reaper thread, which owns every join. A dedicated slot instance (not the
+    // enumeration slot) keeps the decode completion channel and its retirement
+    // budget independent from folder/sibling traversals.
+    oz::viewer::async_worker_slot initial_decode_workers;
 
     // Stage 2.1 Enumeration worker state
     std::mutex enum_mutex;
     std::uint64_t enum_generation = 0;
     std::unique_ptr<oz::viewer_core::navigation_list> enum_result;
     std::atomic<bool> cancel_enum{false};
-    std::jthread enum_thread;
+    // Stage 9.6B MUST_FIX: single-slot worker with asynchronous retirement.
+    // Replacing the active enumeration worker never joins it on the UI thread;
+    // the superseded worker is stop-requested and handed to the slot's reaper
+    // thread, which owns every join. UI paths only launch, stop, and drop
+    // bookkeeping for workers the reaper has already joined.
+    oz::viewer::async_worker_slot enum_workers;
     bool enum_started = false;
     oz::viewer_core::navigation_list nav;
+
+    // Stage 9.6B: staged drop-driven temporary navigation. A multi-file drop
+    // stages its drop-order list here until the first item presents; a folder
+    // drop stages the folder path while its worker lists it off-thread, then
+    // stages the resulting list until the first item presents. The
+    // sibling-listing launch on decode success is skipped while a matching
+    // stage is alive, so drop lists are never overwritten by it.
+    struct staged_drop_state {
+        std::uint64_t generation = 0;
+        oz::viewer_core::navigation_list list;  // staged: installed only on first present
+        std::filesystem::path folder;           // folder drop: listed off-thread
+        bool folder_enumeration = false;        // folder worker owns the enum slots
+        bool list_installed = false;            // stays false until first present installs
+    };
+    std::optional<staged_drop_state> staged_drop;
 
     // Stage 2.2 Navigation and persistent decode worker state
     std::size_t desired_index = 0;
@@ -687,22 +725,51 @@ bool execute_navigation_request(app_state& app, WPARAM vk_key, const std::string
 
 // --- Initial fast-first decode worker ---------------------------------------
 
-void initial_decode_worker_func(app_state& app, std::filesystem::path path,
+// Store a completed initial-decode outcome in the shared result slot and wake
+// the UI. Newest launch wins: a superseded worker that is still winding down
+// (decode_image() itself is not cancellable) must never overwrite a newer
+// launch's result with its older generation. Returns true when the outcome was
+// stored and kMsgDecodeComplete was posted.
+bool publish_initial_decode_result(app_state& app,
+                                   std::shared_ptr<initial_decode_outcome> outcome,
+                                   std::uint64_t launch_gen) {
+    {
+        std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
+        const std::uint64_t stored_gen = app.initial_result ? app.initial_result->generation : 0;
+        if (!oz::viewer::should_publish_initial_decode_result(launch_gen, stored_gen)) {
+            return false;
+        }
+        app.initial_result = std::move(outcome);
+    }
+    PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+    return true;
+}
+
+// Stage 9.6B MUST_FIX: the worker takes a sticky per-thread stop token (set
+// when its slot retires it) in addition to the shared cancellation flag. The
+// launching paths clear the shared flag for the new task before a superseded
+// worker may poll it, so only the stop token guarantees prompt cancellation
+// when a replacement is launched.
+void initial_decode_worker_func(std::stop_token stop, app_state& app, std::filesystem::path path,
                                 std::int32_t view_w, std::int32_t view_h,
                                 std::uint64_t launch_gen) {
     auto outcome = std::make_shared<initial_decode_outcome>();
     outcome->path = path;
     outcome->generation = launch_gen;
 
+    const auto cancelled = [&app, &stop] {
+        return oz::viewer::initial_decode_cancel_requested(stop, app.cancel_initial_decode);
+    };
+
     std::vector<std::uint8_t> data;
     std::uint64_t stable_size = 0;
     std::uint64_t stable_last_write = 0;
-    if (!read_file_chunked_stable(path, data, outcome->detail, stable_size, stable_last_write, [&app] {
-        return app.cancel_initial_decode.load(std::memory_order_relaxed);
-    })) {
-        std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
-        app.initial_result = std::move(outcome);
-        PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+    if (!read_file_chunked_stable(path, data, outcome->detail, stable_size, stable_last_write,
+                                  cancelled)) {
+        if (cancelled()) {
+            return;  // superseded/cancelled: publish nothing
+        }
+        publish_initial_decode_result(app, std::move(outcome), launch_gen);
         return;
     }
     outcome->source_file_size = stable_size;
@@ -712,15 +779,13 @@ void initial_decode_worker_func(app_state& app, std::filesystem::path path,
         app.markers->record(oz::markers::marker_id::file_opened);
     }
 
-    if (app.cancel_initial_decode.load(std::memory_order_relaxed)) {
+    if (cancelled()) {
         return;
     }
 
     if (!oz::viewer_core::detect_codec(data.data(), data.size()).has_value()) {
         outcome->detail = "unsupported image format";
-        std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
-        app.initial_result = std::move(outcome);
-        PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+        publish_initial_decode_result(app, std::move(outcome), launch_gen);
         return;
     }
     if (app.markers) {
@@ -731,9 +796,7 @@ void initial_decode_worker_func(app_state& app, std::filesystem::path path,
     const auto herr = oz::viewer_core::parse_image_header(data.data(), data.size(), info);
     if (herr != oz::viewer_core::codec_error::none) {
         outcome->detail = "header parse failed";
-        std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
-        app.initial_result = std::move(outcome);
-        PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+        publish_initial_decode_result(app, std::move(outcome), launch_gen);
         return;
     }
     if (app.markers) {
@@ -752,10 +815,12 @@ void initial_decode_worker_func(app_state& app, std::filesystem::path path,
 
     if (reg.error != oz::viewer_core::codec_error::none) {
         outcome->detail = reg.detail.empty() ? "decode failed" : reg.detail;
-        std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
-        app.initial_result = std::move(outcome);
-        PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+        publish_initial_decode_result(app, std::move(outcome), launch_gen);
         return;
+    }
+
+    if (cancelled()) {
+        return;  // retired during decode: never publish a stale success
     }
 
     auto img = wrap_registry_result(reg);
@@ -767,9 +832,7 @@ void initial_decode_worker_func(app_state& app, std::filesystem::path path,
     outcome->src_width = reg.image.src_width;
     outcome->src_height = reg.image.src_height;
 
-    std::lock_guard<std::mutex> lock(app.initial_decode_mutex);
-    app.initial_result = std::move(outcome);
-    PostMessageW(app.hwnd, kMsgDecodeComplete, 0, 0);
+    publish_initial_decode_result(app, std::move(outcome), launch_gen);
 }
 
 // --- Persistent decode worker for Stage 2.2 ---------------------------------
@@ -897,20 +960,92 @@ void persistent_worker_func(app_state& app) {
 
 // --- Stage 2.1 enumeration worker -------------------------------------------
 
-void enum_worker_func(app_state& app, std::filesystem::path target_path, std::uint64_t launch_gen) {
-    auto list = std::make_unique<oz::viewer_core::navigation_list>(
-        oz::viewer_core::enumerate_sibling_images(target_path));
+// Publish a completed enumeration under the shared enum slots. Newest launch
+// wins: a superseded worker that is still winding down must never overwrite a
+// newer launch's result with its older generation. Returns true when the
+// result was stored and the caller should post kMsgEnumComplete.
+bool publish_enum_result(app_state& app,
+                         std::unique_ptr<oz::viewer_core::navigation_list> list,
+                         std::uint64_t launch_gen) {
+    std::lock_guard<std::mutex> lock(app.enum_mutex);
+    if (!oz::viewer::should_publish_enumeration_result(launch_gen, app.enum_generation)) {
+        return false;
+    }
+    app.enum_result = std::move(list);
+    app.enum_generation = launch_gen;
+    return true;
+}
 
-    if (app.cancel_enum.load(std::memory_order_relaxed)) {
+// Cooperative cancellation predicate for enumeration workers: sticky per-thread
+// stop request (set when the slot replaces this worker) OR the shared flag
+// (set by Open/Paste/shutdown intents). The enumeration polls this per entry,
+// so a superseded traversal winds down promptly instead of running to
+// completion while its replacement waits.
+std::function<bool()> enum_cancel_check(app_state& app, const std::stop_token& stop) {
+    return [&app, &stop] {
+        return stop.stop_requested() || app.cancel_enum.load(std::memory_order_relaxed);
+    };
+}
+
+void enum_worker_func(std::stop_token stop, app_state& app, std::filesystem::path target_path,
+                      std::uint64_t launch_gen) {
+    const auto cancelled = enum_cancel_check(app, stop);
+    auto list = std::make_unique<oz::viewer_core::navigation_list>(
+        oz::viewer_core::enumerate_sibling_images(target_path, cancelled));
+
+    if (cancelled()) {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(app.enum_mutex);
-        app.enum_result = std::move(list);
-        app.enum_generation = launch_gen;
+    if (!publish_enum_result(app, std::move(list), launch_gen)) {
+        return;
     }
     PostMessageW(app.hwnd, kMsgEnumComplete, 0, 0);
+}
+
+// Stage 9.6B folder-drop listing worker: non-recursive supported-image
+// listing of one folder on a background thread. Never runs on the
+// WM_DROPFILES path; completion flows through the shared enum slots and
+// kMsgEnumComplete, where the folder stage claims or discards it by
+// generation (stale results are dropped, matching the sibling rule).
+void drop_folder_enum_worker_func(std::stop_token stop, app_state& app,
+                                  std::filesystem::path folder, std::uint64_t launch_gen) {
+    const auto cancelled = enum_cancel_check(app, stop);
+    auto list = std::make_unique<oz::viewer_core::navigation_list>(
+        oz::viewer_core::enumerate_folder_images(folder, cancelled));
+
+    if (cancelled()) {
+        return;
+    }
+
+    if (!publish_enum_result(app, std::move(list), launch_gen)) {
+        return;
+    }
+    PostMessageW(app.hwnd, kMsgEnumComplete, 0, 0);
+}
+
+// Launch a one-shot enumeration worker into the single slot. The prior active
+// worker (if any) is retired without joining; the slot's reaper thread joins
+// it off the UI thread. `reap_finished()` only drops bookkeeping for workers
+// the reaper has already joined, so neither call ever waits. Only `launch`
+// touches the slot, so the stop request always lands on the worker being
+// superseded.
+//
+// Returns false when the slot rejected the launch: the finite retirement
+// budget is exhausted (stalled reaper or a superseded worker that ignores
+// cancellation) or the slot could not allocate worker/bookkeeping. On
+// rejection nothing about the active worker or the backlog changed, and the
+// caller must keep its current document/task and report the rejection. Never
+// joins, waits, or detaches.
+using enum_worker_fn = void (*)(std::stop_token, app_state&, std::filesystem::path, std::uint64_t);
+
+[[nodiscard]] bool launch_enum_worker(app_state& app, enum_worker_fn worker,
+                                      std::filesystem::path path, std::uint64_t launch_gen) {
+    app.enum_workers.reap_finished();
+    return app.enum_workers.launch([&app, worker, path = std::move(path),
+                                    launch_gen](std::stop_token stop) mutable {
+               worker(stop, app, std::move(path), launch_gen);
+           }) == oz::viewer::async_worker_slot::launch_status::launched;
 }
 
 // --- render + present on the UI thread --------------------------------------
@@ -2733,7 +2868,7 @@ static void start_open_file_dialog(app_state& app) {
 
     const auto selected = oz::viewer::show_open_image_dialog(app.hwnd);
     if (selected.has_value()) {
-        open_new_document(app, *selected);
+        static_cast<void>(open_new_document(app, *selected));
     }
 }
 
@@ -2905,6 +3040,10 @@ static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& 
     const std::uint64_t new_gen = app.doc.next_generation();
     (void)new_gen;
 
+    // A paste replaces the document: abandon any staged drop list so a late
+    // folder listing or drop decode can never install over pasted pixels.
+    app.staged_drop.reset();
+
     // Cooperative cancel of any pending background file work.
     app.cancel_initial_decode.store(true, std::memory_order_relaxed);
     app.cancel_enum.store(true, std::memory_order_relaxed);
@@ -2972,8 +3111,10 @@ static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& 
     return true;
 }
 
-// Open a new document replacing the current image or no-image state.
-static void open_new_document(app_state& app, const std::filesystem::path& path) {
+// Open a new document replacing the current image or no-image state. Returns
+// false only when the initial decode launch was rejected; the current document
+// and image are retained unchanged in that case.
+[[nodiscard]] static bool open_new_document(app_state& app, const std::filesystem::path& path) {
     // Invalidate old generation so any in-flight workers won't commit
     const std::uint64_t new_gen = app.doc.next_generation();
 
@@ -2982,17 +3123,254 @@ static void open_new_document(app_state& app, const std::filesystem::path& path)
     app.cancel_enum.store(true, std::memory_order_relaxed);
     app.work_queue.replace_plan(++app.current_epoch, {});
 
-    // Clear initial decode cancellation for the new task
+    // A direct open abandons any staged drop list: the newest intent wins.
+    app.staged_drop.reset();
+
+    // Clear initial decode cancellation for the new task. A superseded decode
+    // worker is cancelled by its sticky slot stop request, not by this flag.
     app.cancel_initial_decode.store(false, std::memory_order_relaxed);
 
+    return launch_initial_decode_for_path(app, path, new_gen);
+}
+
+// Shared fast-first decode launch: snapshots the viewport and starts the
+// worker that decodes and presents the new document. The existing image is
+// retained until that worker succeeds.
+//
+// Stage 9.6B MUST_FIX: the worker is launched through the dedicated
+// initial-decode slot, so replacing a still-running prior decode never joins
+// it on this (UI) thread. The slot stop-requests the superseded worker and
+// hands it to its reaper; only the reaper (or teardown) ever joins. Returns
+// false when the slot rejected the launch (finite retirement budget exhausted
+// or worker/bookkeeping allocation failed); nothing was replaced and the
+// caller keeps its current document.
+[[nodiscard]] static bool launch_initial_decode_for_path(app_state& app,
+                                                         const std::filesystem::path& path,
+                                                         std::uint64_t launch_gen) {
     const auto layout = current_ui_layout(app);
     const int view_w = layout.canvas_physical.width;
     const int view_h = layout.canvas_physical.height;
 
-    // Launch initial decode worker for the new document
-    // We retain the existing image until this worker successfully decodes and presents!
-    app.initial_decode_thread = std::jthread(initial_decode_worker_func, std::ref(app), path,
-                                             view_w, view_h, new_gen);
+    // Drop bookkeeping for superseded decodes the reaper has already joined.
+    // No join happens here, and unfinished workers are never waited for.
+    app.initial_decode_workers.reap_finished();
+    return app.initial_decode_workers.launch(
+               [&app, path, view_w, view_h, launch_gen](std::stop_token stop) {
+                   initial_decode_worker_func(stop, app, path, view_w, view_h, launch_gen);
+               }) == oz::viewer::async_worker_slot::launch_status::launched;
+}
+
+// Stage 9.6B: explicit rejection or shortfall report for a drop batch. The
+// current document and its navigation are retained. Benchmark modes never
+// reach here (the WM_DROPFILES handler returns before any drop work), with
+// a shared-predicate guard for defense in depth.
+static void report_drop_rejection(app_state& app, const oz::viewer::drop_reject_text& text) {
+    if (noninteractive_mode(app)) {
+        return;
+    }
+    static_cast<void>(oz::viewer::show_prompt(
+        app.hwnd, text.title, text.headline, text.detail, MB_OK, MB_ICONWARNING));
+}
+
+// Stage 9.6B: open the first supported item of a multi-file drop behind a
+// staged drop-order navigation list. The list installs only on successful
+// present; decode/present failure keeps the current document and its
+// navigation through the standard outcome branches (which release the
+// stage by generation).
+static void open_dropped_file_list(app_state& app,
+                                   std::vector<std::filesystem::path>&& ordered_supported) {
+    // Invalidate old generation so any in-flight workers won't commit
+    const std::uint64_t new_gen = app.doc.next_generation();
+
+    // Cooperative cancel of any pending background work
+    app.cancel_initial_decode.store(true, std::memory_order_relaxed);
+    app.cancel_enum.store(true, std::memory_order_relaxed);
+    app.work_queue.replace_plan(++app.current_epoch, {});
+
+    // A superseded traversal (for example an in-flight folder drop) must wind
+    // down promptly; its stale result is discarded by generation either way.
+    app.enum_workers.request_stop_all();
+
+    // Clear initial decode cancellation for the new task
+    app.cancel_initial_decode.store(false, std::memory_order_relaxed);
+
+    const std::filesystem::path first = ordered_supported.front();
+
+    app_state::staged_drop_state staged;
+    staged.generation = new_gen;
+    staged.list = oz::viewer_core::navigation_list::from_ordered_items(ordered_supported);
+    app.staged_drop = std::move(staged);
+
+    if (!launch_initial_decode_for_path(app, first, new_gen)) {
+        // Launch rejection after the state mutation: no decode will ever
+        // complete this stage, so release it and report. The current document
+        // and its navigation stay exactly as they were.
+        app.staged_drop.reset();
+        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+    }
+}
+
+// Stage 9.6B: schedule async listing of exactly one dropped folder. This
+// captures and validates on the UI thread only; the listing runs on a
+// background worker and completes through kMsgEnumComplete, so the
+// WM_DROPFILES handler itself never traverses the folder.
+//
+// MUST_FIX: a prior folder/sibling traversal must not block this path. The
+// shared cancel flag wakes a worker that has not yet polled its stop token;
+// the slot then retires the superseded worker without joining it, and the
+// replacement worker is launched only after the stop request is sticky.
+//
+// MUST_FIX (bounded overload): the slot's finite retirement budget is checked
+// before any mutation of document generation, cancellations, staged state, or
+// the worker slot. When the budget is exhausted (stalled reaper or a
+// superseded worker that ignores cancellation) the drop is rejected with an
+// explicit prompt and the current document, navigation, and in-flight work
+// are left untouched. A launch fault after the gate releases the stage and
+// reports the same way; the displayed document is retained.
+static void schedule_dropped_folder(app_state& app, const std::filesystem::path& folder) {
+    if (!app.enum_workers.can_accept_launch()) {
+        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+        return;
+    }
+
+    // Invalidate old generation so any in-flight workers won't commit
+    const std::uint64_t new_gen = app.doc.next_generation();
+
+    // Cooperative cancel of any pending background work
+    app.cancel_initial_decode.store(true, std::memory_order_relaxed);
+    app.cancel_enum.store(true, std::memory_order_relaxed);
+    app.work_queue.replace_plan(++app.current_epoch, {});
+
+    // Sticky per-worker stop for the traversal being superseded. The slot
+    // hands that worker to its reaper thread, which owns the join, so this
+    // path never waits on an active traversal.
+    app.enum_workers.request_stop_all();
+
+    // Clear cancellations for the new task. The superseded worker's stop
+    // request is sticky, so clearing the shared flag cannot revive it.
+    app.cancel_initial_decode.store(false, std::memory_order_relaxed);
+    app.cancel_enum.store(false, std::memory_order_relaxed);
+
+    app_state::staged_drop_state staged;
+    staged.generation = new_gen;
+    staged.folder = folder;
+    staged.folder_enumeration = true;
+    app.staged_drop = std::move(staged);
+
+    if (!launch_enum_worker(app, drop_folder_enum_worker_func, folder, new_gen)) {
+        // Allocation-level rejection after the gate: no listing worker will
+        // ever complete this stage, so release it and report. The current
+        // document and its navigation stay exactly as they were.
+        app.staged_drop.reset();
+        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+    }
+}
+
+// Stage 9.6B: WM_DROPFILES dispatch. Captures the dropped paths, finishes
+// the shell handle, validates, classifies through the approved 9.6A seam,
+// and schedules navigation work only. Rejected batches and supported-image
+// shortfalls report explicitly; the current document is always retained on
+// those paths. Dirty-discard cancellation likewise changes nothing.
+static void handle_dropped_paths(app_state& app, HDROP hDrop) {
+    const UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+    if (count == 0) {
+        DragFinish(hDrop);
+        return;
+    }
+    if (static_cast<std::size_t>(count) > oz::viewer::kMaxDropEntries) {
+        DragFinish(hDrop);
+        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
+            oz::viewer::drop_classify_status::overflow));
+        return;
+    }
+
+    std::vector<std::filesystem::path> raw_paths;
+    bool capture_ok = true;
+    try {
+        raw_paths.reserve(static_cast<std::size_t>(count));
+        wchar_t path_buf[32768]{};
+        for (UINT i = 0; i < count; ++i) {
+            if (DragQueryFileW(hDrop, i, path_buf, static_cast<UINT>(std::size(path_buf))) == 0) {
+                capture_ok = false;
+                break;
+            }
+            raw_paths.emplace_back(path_buf);
+        }
+    } catch (...) {
+        capture_ok = false;
+    }
+    DragFinish(hDrop);
+    if (!capture_ok) {
+        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
+            oz::viewer::drop_classify_status::invalid_entry));
+        return;
+    }
+
+    try {
+        std::vector<oz::viewer::drop_entry> entries;
+        entries.reserve(raw_paths.size());
+        for (const auto& raw : raw_paths) {
+            oz::viewer::drop_entry entry;
+            entry.path = raw;
+            switch (oz::viewer_core::query_drop_path_kind(raw)) {
+                case oz::viewer_core::drop_path_kind::file:
+                    entry.kind = oz::viewer::drop_entry_kind::file;
+                    break;
+                case oz::viewer_core::drop_path_kind::directory:
+                    entry.kind = oz::viewer::drop_entry_kind::directory;
+                    break;
+                case oz::viewer_core::drop_path_kind::unknown:
+                    entry.kind = oz::viewer::drop_entry_kind::unknown;
+                    break;
+            }
+            entries.push_back(std::move(entry));
+        }
+
+        const oz::viewer::drop_classify_result verdict = oz::viewer::classify_drop_paths(entries);
+        if (!verdict.ok()) {
+            if (oz::viewer::is_promptable_drop_rejection(verdict.status)) {
+                report_drop_rejection(app, oz::viewer::describe_drop_rejection(verdict.status));
+            }
+            return;
+        }
+
+        switch (verdict.intent) {
+            case oz::viewer::drop_intent::single_file: {
+                if (!check_dirty_discard_allowed(app)) {
+                    return;
+                }
+                if (!open_new_document(app, verdict.files.front())) {
+                    report_drop_rejection(app, oz::viewer::describe_drop_overload());
+                }
+                return;
+            }
+            case oz::viewer::drop_intent::file_list: {
+                auto supported = oz::viewer::select_supported_in_drop_order(
+                    verdict.files, oz::viewer_core::is_supported_image_extension);
+                if (supported.empty()) {
+                    report_drop_rejection(app, oz::viewer::describe_no_supported_images(false));
+                    return;
+                }
+                if (!check_dirty_discard_allowed(app)) {
+                    return;
+                }
+                open_dropped_file_list(app, std::move(supported));
+                return;
+            }
+            case oz::viewer::drop_intent::folder: {
+                if (!check_dirty_discard_allowed(app)) {
+                    return;
+                }
+                schedule_dropped_folder(app, verdict.folder);
+                return;
+            }
+            case oz::viewer::drop_intent::none:
+                return;
+        }
+    } catch (...) {
+        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
+            oz::viewer::drop_classify_status::overflow));
+    }
 }
 
 // --- window procedure -------------------------------------------------------
@@ -3217,20 +3595,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (!app || app->benchmark || app->nav_benchmark) {
                 return 0;
             }
-            if (!check_dirty_discard_allowed(*app)) {
-                DragFinish(reinterpret_cast<HDROP>(wparam));
-                return 0;
-            }
-            HDROP hDrop = reinterpret_cast<HDROP>(wparam);
-            const UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
-            if (count == 1) {
-                wchar_t path_buf[32768]{};
-                if (DragQueryFileW(hDrop, 0, path_buf, static_cast<UINT>(std::size(path_buf))) > 0) {
-                    open_new_document(*app, std::filesystem::path(path_buf));
-                }
-            }
-            // Safely finish drop and ignore multiple or 0 items
-            DragFinish(hDrop);
+            // Stage 9.6B: capture/validate/classify/schedule only. Folder
+            // listing never runs here; rejections report explicitly and
+            // retain the current document.
+            handle_dropped_paths(*app, reinterpret_cast<HDROP>(wparam));
             return 0;
         }
         case WM_SIZE: {
@@ -3676,6 +4044,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (!app) {
                 return 0;
             }
+            // Drop bookkeeping for superseded enumeration workers the reaper
+            // has already joined. No join happens here, and unfinished workers
+            // are never waited for on this path.
+            app->enum_workers.reap_finished();
             std::unique_ptr<oz::viewer_core::navigation_list> list;
             std::uint64_t enum_gen = 0;
             {
@@ -3685,6 +4057,57 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             // Reject stale enumeration from an older document generation
             if (enum_gen != app->doc.generation) {
+                if (app->staged_drop.has_value() &&
+                    app->staged_drop->generation == enum_gen) {
+                    app->staged_drop.reset();
+                }
+                return 0;
+            }
+            // Stage 9.6B: a folder-drop worker owns these slots while its
+            // stage is alive. An empty listing reports explicitly and keeps
+            // the current document and navigation; otherwise the
+            // naturally-sorted list is staged (prior navigation untouched)
+            // and its first item opens under a fresh generation. The staged
+            // list installs only after that first item successfully presents;
+            // decode or present failure discards the stage and retains the
+            // prior document and navigation.
+            if (app->staged_drop.has_value() && app->staged_drop->folder_enumeration &&
+                app->staged_drop->generation == enum_gen) {
+                if (!list || list->empty()) {
+                    app->staged_drop.reset();
+                    report_drop_rejection(*app, oz::viewer::describe_no_supported_images(true));
+                    return 0;
+                }
+                const std::filesystem::path* first_item = list->at(0);
+                if (first_item == nullptr) {
+                    app->staged_drop.reset();
+                    report_drop_rejection(*app, oz::viewer::describe_no_supported_images(true));
+                    return 0;
+                }
+                const std::filesystem::path first_path = *first_item;
+                app->staged_drop->list = std::move(*list);
+
+                // The first item decodes under a fresh generation so earlier
+                // file work cannot commit over it; the staged list installs
+                // only on successful present, so only the sibling launch is
+                // suppressed when it presents.
+                const std::uint64_t first_gen = app->doc.next_generation();
+                app->cancel_initial_decode.store(true, std::memory_order_relaxed);
+                app->cancel_enum.store(true, std::memory_order_relaxed);
+                app->work_queue.replace_plan(++app->current_epoch, {});
+                app->cancel_initial_decode.store(false, std::memory_order_relaxed);
+
+                app->staged_drop->generation = first_gen;
+                app->staged_drop->folder_enumeration = false;
+                app->staged_drop->list_installed = false;
+                app->staged_drop->folder.clear();
+                if (!launch_initial_decode_for_path(*app, first_path, first_gen)) {
+                    // Launch rejection after the stage mutation: no decode will
+                    // ever complete this stage, so release it and report. The
+                    // current document and its navigation stay as they were.
+                    app->staged_drop.reset();
+                    report_drop_rejection(*app, oz::viewer::describe_drop_overload());
+                }
                 return 0;
             }
             if (list) {
@@ -3711,6 +4134,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (!app) {
                 return 0;
             }
+            // Drop bookkeeping for superseded initial-decode workers the
+            // reaper has already joined. No join happens here, and unfinished
+            // workers are never waited for on this path.
+            app->initial_decode_workers.reap_finished();
 
             // 1. Initial / new document decode completion
             std::shared_ptr<initial_decode_outcome> outcome;
@@ -3721,6 +4148,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (outcome) {
                 // Reject stale completion from an older document generation
                 if (outcome->generation != app->doc.generation) {
+                    if (app->staged_drop.has_value() &&
+                        app->staged_drop->generation == outcome->generation) {
+                        app->staged_drop.reset();
+                    }
                     return 0;
                 }
                 // Clear out initial_result slot
@@ -3730,6 +4161,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
 
                 if (!outcome->ok) {
+                    // A failed drop first-item releases its stage; the
+                    // current document and navigation are retained below.
+                    if (app->staged_drop.has_value() &&
+                        app->staged_drop->generation == outcome->generation) {
+                        app->staged_drop.reset();
+                    }
                     if (noninteractive_mode(*app)) {
                         std::fprintf(stderr, "ozviewer: decode failed: %s\n", outcome->detail.c_str());
                         PostQuitMessage(1);
@@ -3776,6 +4213,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
                 if (!upload_and_present(*app)) {
                     if (!recover_and_present(*app)) {
+                        // A drop first-item that cannot present releases its
+                        // stage; the prior image is restored below.
+                        if (app->staged_drop.has_value() &&
+                            app->staged_drop->generation == outcome->generation) {
+                            app->staged_drop.reset();
+                        }
                         if (noninteractive_mode(*app)) {
                             std::fprintf(stderr, "ozviewer: present failed\n");
                             PostQuitMessage(1);
@@ -3857,11 +4300,47 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     outcome->scale_den};
                 app->cache.insert(init_key, outcome->image, true);
 
+                // Stage 9.6B: a staged drop list wins over the sibling
+                // listing. Multi-file and folder drops both install their
+                // staged list here, only after the first item successfully
+                // presents. Either way the worker pool starts (when needed)
+                // and the navigation plan schedules, exactly as the sibling
+                // path does on enumeration completion.
+                if (app->staged_drop.has_value() &&
+                    app->staged_drop->generation == outcome->generation) {
+                    if (!app->staged_drop->list_installed) {
+                        app->nav = std::move(app->staged_drop->list);
+                        app->desired_index = 0;
+                        app->committed_index = 0;
+                    }
+                    app->staged_drop.reset();
+                    if (!app->persistent_worker_started && !app->benchmark) {
+                        app->persistent_worker_started = true;
+                        app->persistent_worker_thread = std::jthread(persistent_worker_func, std::ref(*app));
+                        schedule_navigation_plan(*app);
+
+                        if (app->nav_benchmark) {
+                            SetTimer(hwnd, kNavBenchTimerId, 16, nullptr);
+                        }
+                    } else if (app->persistent_worker_started && !app->benchmark) {
+                        schedule_navigation_plan(*app);
+                    }
+                    return 0;
+                }
+
                 // Launch async enumeration worker strictly after successful Present
                 if (!app->benchmark) {
                     app->cancel_enum.store(true, std::memory_order_relaxed);
+                    app->enum_workers.request_stop_all();
                     app->cancel_enum.store(false, std::memory_order_relaxed);
-                    app->enum_thread = std::jthread(enum_worker_func, std::ref(*app), outcome->path, app->doc.generation);
+                    // Bounded overload policy: when the slot's finite retirement
+                    // budget is exhausted the sibling listing is deferred (not
+                    // queued) and the current navigation stays unchanged. The
+                    // document is already presented; this is a background
+                    // enhancement, so the rejection is not prompted. The next
+                    // successful open retries it once the budget frees up.
+                    static_cast<void>(launch_enum_worker(*app, enum_worker_func, outcome->path,
+                                                         app->doc.generation));
                 }
                 return 0;
             }
@@ -4486,10 +4965,14 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
 
     // --- initial fast-first decode worker (if launched with image path) -------
     if (!zero_arg_launch) {
-        app.initial_decode_thread = std::jthread(initial_decode_worker_func, std::ref(app), app.initial_path,
-                                                 static_cast<std::int32_t>(rc.right),
-                                                 static_cast<std::int32_t>(rc.bottom),
-                                                 app.doc.generation);
+        // Launch through the initial-decode slot so startup and later
+        // replacements share one non-blocking lifecycle; teardown drains it.
+        const std::uint64_t initial_gen = app.doc.generation;
+        static_cast<void>(app.initial_decode_workers.launch(
+            [&app, path = app.initial_path, view_w = static_cast<std::int32_t>(rc.right),
+             view_h = static_cast<std::int32_t>(rc.bottom), initial_gen](std::stop_token stop) {
+                initial_decode_worker_func(stop, app, path, view_w, view_h, initial_gen);
+            }));
     } else {
         // Zero-arg interactive launch: clear viewport and show centered Open button
         oz::viewer::render_blank(app.renderer);
@@ -4652,12 +5135,14 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
     app.cancel_enum.store(true, std::memory_order_relaxed);
     app.work_queue.request_stop();
 
-    if (app.initial_decode_thread.joinable()) {
-        app.initial_decode_thread.join();
-    }
-    if (app.enum_thread.joinable()) {
-        app.enum_thread.join();
-    }
+    // Teardown: stop and join the active initial-decode worker and drain the
+    // slot's reaper queue (the window is still alive, so a worker may post its
+    // final completion). UI paths never join; only this boundary waits.
+    app.initial_decode_workers.join_all();
+    // Teardown: stop and join the active enumeration worker and drain the
+    // slot's reaper queue (the window is still alive, so a worker may post its
+    // final completion).
+    app.enum_workers.join_all();
     if (app.persistent_worker_thread.joinable()) {
         app.persistent_worker_thread.join();
     }

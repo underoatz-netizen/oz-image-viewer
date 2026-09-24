@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -62,6 +63,11 @@ public:
     // Select specific index. Returns target path or nullptr if out of bounds.
     const std::filesystem::path* select_index(std::size_t index) noexcept;
 
+    // Adopt an already-ordered item set verbatim (no filtering, no sorting).
+    // Used for drop-order temporary lists where the caller's order is the
+    // policy. The active item is the first entry when non-empty.
+    static navigation_list from_ordered_items(const std::vector<std::filesystem::path>& items);
+
 private:
     std::vector<std::filesystem::path> items_;
     std::optional<std::size_t> active_index_;
@@ -74,7 +80,42 @@ private:
 // routing stays signature-first.
 navigation_list enumerate_sibling_images(const std::filesystem::path& target_path);
 
+// Stage 9.6B MUST_FIX: cooperative-cancellation overload. `check_cancel` is
+// polled once per directory entry; when it reports true the walk stops
+// promptly and returns only the entries collected so far. Callers own
+// staleness policy: a cancelled result must never be installed (workers
+// discard it by launch generation). A predicate fault is treated as
+// cancellation, so a throwing checker can never escape a worker thread.
+// Pure data function; no GUI or HWND access.
+[[nodiscard]] navigation_list enumerate_sibling_images(
+    const std::filesystem::path& target_path, const std::function<bool()>& check_cancel);
+
 // Legacy JPEG-only enumerator, preserved for compatibility.
 navigation_list enumerate_sibling_jpegs(const std::filesystem::path& target_path);
+
+// Stage 9.6B: single-entry attribute query for WM_DROPFILES classification
+// support. Reports whether a dropped path is a file, a folder, or neither
+// (missing path, access failure, or any other non-file/non-folder shape).
+// Exactly one bounded attribute read; never enumerates a folder.
+enum class drop_path_kind {
+    file,
+    directory,
+    unknown
+};
+
+[[nodiscard]] drop_path_kind query_drop_path_kind(const std::filesystem::path& path) noexcept;
+
+// Stage 9.6B: enumerate supported still images directly inside one folder
+// (non-recursive, extension-hinted, naturally sorted). Pure data function;
+// does not touch GUI or HWND. Runs on a background worker only, never on
+// the WM_DROPFILES path. An empty list means the folder holds no supported
+// images (or could not be listed); the caller reports that explicitly.
+[[nodiscard]] navigation_list enumerate_folder_images(const std::filesystem::path& folder);
+
+// Stage 9.6B MUST_FIX: cooperative-cancellation overload with the same
+// contract as the sibling overload above (polled per directory entry, stops
+// promptly, predicate faults are treated as cancellation).
+[[nodiscard]] navigation_list enumerate_folder_images(
+    const std::filesystem::path& folder, const std::function<bool()>& check_cancel);
 
 }  // namespace oz::viewer_core
