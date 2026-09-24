@@ -5599,6 +5599,10 @@ void test_stage7_ui_command_state() {
         CHECK(open_loc_st.enabled);
         CHECK(open_loc_st.visible);
 
+        const auto delete_st = derive_command_state(ui_command_id::file_delete, ctx);
+        CHECK(delete_st.enabled);
+        CHECK(delete_st.visible);
+
         // Disabled if no file path and no source
         ctx.has_file_path = false;
         ctx.has_source = false;
@@ -5606,6 +5610,7 @@ void test_stage7_ui_command_state() {
         CHECK(!derive_command_state(ui_command_id::file_copy_path, ctx).enabled);
         CHECK(!derive_command_state(ui_command_id::file_copy_image, ctx).enabled);
         CHECK(!derive_command_state(ui_command_id::file_open_location, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
 
         // Copy Image enabled if has_source is true even without file_path
         ctx.has_source = true;
@@ -5619,11 +5624,13 @@ void test_stage7_ui_command_state() {
         CHECK(!derive_command_state(ui_command_id::file_copy_path, ctx).enabled);
         CHECK(!derive_command_state(ui_command_id::file_copy_image, ctx).enabled);
         CHECK(!derive_command_state(ui_command_id::file_open_location, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
 
         ctx.crop_active = false;
         ctx.copy_busy = true;
         CHECK(!derive_command_state(ui_command_id::file_copy_image, ctx).enabled);
         CHECK(!derive_command_state(ui_command_id::file_copy, ctx).enabled);
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
     }
 }
 

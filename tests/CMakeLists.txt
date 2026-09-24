@@ -96,6 +96,13 @@ target_include_directories(ozviewer_drop_flow_tests PRIVATE ${CMAKE_SOURCE_DIR}/
 target_compile_features(ozviewer_drop_flow_tests PRIVATE cxx_std_23)
 add_test(NAME ozviewer_drop_flow_tests COMMAND ozviewer_drop_flow_tests)
 
+# Stage 9.7 post-recycle navigation policy tests (dependency-free
+# header-only helpers; builds in all presets including no-vcpkg).
+add_executable(ozviewer_recycle_delete_tests recycle_delete_tests.cpp)
+target_include_directories(ozviewer_recycle_delete_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/viewer)
+target_compile_features(ozviewer_recycle_delete_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_recycle_delete_tests COMMAND ozviewer_recycle_delete_tests)
+
 # Stage 9.6B MUST_FIX async enum-worker slot lifecycle tests (dependency-free
 # header-only seam; real std::jthread replacement/stop/reap contract, no GUI).
 add_executable(ozviewer_async_worker_slot_tests async_worker_slot_tests.cpp)
@@ -115,6 +122,7 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/modern_dialogs.cpp
                     ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
+                    ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
                     ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
                     ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_input.cpp
                     ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
@@ -141,6 +149,7 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
 
     target_sources(ozviewer_core_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
+        ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
         ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
         ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp)
     target_link_libraries(ozviewer_core_tests PRIVATE shell32)
@@ -151,7 +160,6 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
         # Stage 7 UI command state, layout, SVG icon cache, and modern dialogs are linked for focused unit testing.
         target_sources(ozviewer_core_tests PRIVATE
             ${CMAKE_SOURCE_DIR}/src/viewer/edit_controller.cpp
-            ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
             ${CMAKE_SOURCE_DIR}/src/viewer/ui_command_state.cpp
             ${CMAKE_SOURCE_DIR}/src/viewer/ui_layout.cpp
             ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp

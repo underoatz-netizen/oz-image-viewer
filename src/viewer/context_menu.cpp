@@ -86,6 +86,16 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     open_loc_item.checked = false;
     plan.items.push_back(std::move(open_loc_item));
 
+    // 8. Delete (ID 109): Recycle Bin only, same file-backed/modal gating
+    const auto delete_st = derive_command_state(ui_command_id::file_delete, ctx);
+    context_menu_item delete_item;
+    delete_item.type = context_menu_item_type::command;
+    delete_item.command_id = static_cast<int>(ui_command_id::file_delete);
+    delete_item.text = L"Delete\tDel";
+    delete_item.enabled = delete_st.enabled;
+    delete_item.checked = false;
+    plan.items.push_back(std::move(delete_item));
+
     return plan;
 }
 

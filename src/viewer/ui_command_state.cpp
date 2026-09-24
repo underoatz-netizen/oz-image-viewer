@@ -44,6 +44,7 @@ ui_item_state derive_command_state(ui_command_id id, const ui_command_context& c
         case ui_command_id::file_open_location:
         case ui_command_id::file_copy:
         case ui_command_id::file_copy_path:
+        case ui_command_id::file_delete:
             // File operations require a successfully presented image, committed document, valid file path, and not modal
             state.enabled = ctx.have_image && ctx.has_document && ctx.has_file_path && not_modal;
             break;

@@ -15,6 +15,7 @@
 #include "../src/viewer/shortcut_routing.hpp"
 #include "../src/viewer/modern_dialogs.hpp"
 #include "../src/viewer/shell_integration.hpp"
+#include "../src/viewer/source_identity.hpp"
 #include "../src/viewer/svg_icon_cache.hpp"
 #include "../src/viewer/ui_chrome.hpp"
 #include "../src/viewer/ui_command_state.hpp"
@@ -215,6 +216,50 @@ void test_ui_command_state() {
         const auto r16_9_st = derive_command_state(ui_command_id::crop_ratio_16x9, ctx);
         CHECK(r16_9_st.enabled);
         CHECK(r16_9_st.checked);
+    }
+
+    // 7. File Delete (Stage 9.7): Recycle Bin gating mirrors file operations
+    {
+        ui_command_context ctx{};
+        ctx.have_image = true;
+        ctx.has_document = true;
+        ctx.has_file_path = true;
+
+        const auto del_st = derive_command_state(ui_command_id::file_delete, ctx);
+        CHECK(del_st.enabled);
+        CHECK(del_st.visible);
+
+        // Benchmark mode disables and hides Delete: no shell/delete work.
+        ctx.benchmark_mode = true;
+        const auto bench_st = derive_command_state(ui_command_id::file_delete, ctx);
+        CHECK(!bench_st.enabled);
+        CHECK(!bench_st.visible);
+        ctx.benchmark_mode = false;
+
+        // Pathless clipboard document: disabled (dirty state alone never enables it).
+        ctx.has_file_path = false;
+        ctx.is_dirty = true;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+        ctx.has_file_path = true;
+        ctx.is_dirty = false;
+
+        // Modal/busy documents: disabled (crop/save/resize/copy).
+        ctx.crop_active = true;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+        ctx.crop_active = false;
+        ctx.save_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+        ctx.save_busy = false;
+        ctx.resize_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+        ctx.resize_busy = false;
+        ctx.copy_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+        ctx.copy_busy = false;
+
+        // No presented image: disabled.
+        ctx.have_image = false;
+        CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
     }
 }
 
@@ -1095,6 +1140,133 @@ void test_shell_integration() {
         std::error_code ec;
         std::filesystem::remove(temp_path, ec);
     }
+
+    // 7. Stage 9.7 recycle boundary: validation order and invoker seam.
+    {
+        // Empty path: invalid, invoker never runs.
+        bool invoked = false;
+        auto never = [&](const wchar_t*) -> HRESULT {
+            invoked = true;
+            return S_OK;
+        };
+        const auto empty_res = recycle_file_to_bin(std::filesystem::path{}, 0, 0, never);
+        CHECK(!empty_res.ok());
+        CHECK(empty_res.status == recycle_status::invalid_path);
+        CHECK(!invoked);
+
+        // Missing path: not_found, invoker never runs.
+        const auto missing_res = recycle_file_to_bin(
+            std::filesystem::path{L"C:\\nonexistent_dir_12345\\nonexistent_file_67890.png"},
+            0, 0, never);
+        CHECK(!missing_res.ok());
+        CHECK(missing_res.status == recycle_status::not_found);
+        CHECK(!invoked);
+
+        // Directory: rejected, invoker never runs.
+        const auto dir_res =
+            recycle_file_to_bin(std::filesystem::temp_directory_path(), 0, 0, never);
+        CHECK(!dir_res.ok());
+        CHECK(dir_res.status == recycle_status::is_directory);
+        CHECK(!invoked);
+    }
+
+    // 8. Recycle success/failure/identity with safe temp fixtures only.
+    //    The mock seam never touches the real file: every fixture still
+    //    exists afterwards and is removed explicitly.
+    {
+        const auto temp_path = std::filesystem::temp_directory_path() / L"oz_test_shell_recycle.tmp";
+        {
+            FILE* f = nullptr;
+            _wfopen_s(&f, temp_path.c_str(), L"wb");
+            if (f) {
+                std::fputs("recycle-me", f);
+                std::fclose(f);
+            }
+        }
+        CHECK(std::filesystem::exists(temp_path));
+        std::uint64_t snap_size = 0;
+        std::uint64_t snap_write = 0;
+        CHECK(oz::viewer::verify_source_file_metadata(temp_path, 0, 0, &snap_size, &snap_write));
+        CHECK(snap_size != 0 && snap_write != 0);
+
+        std::wstring invoked_path;
+        auto ok_invoker = [&](const wchar_t* p) -> HRESULT {
+            invoked_path = p ? p : L"";
+            return S_OK;
+        };
+        const auto ok_res = recycle_file_to_bin(temp_path, snap_size, snap_write, ok_invoker);
+        CHECK(ok_res.ok());
+        CHECK(ok_res.status == recycle_status::success);
+        CHECK(!invoked_path.empty());
+        CHECK(std::filesystem::exists(temp_path));
+
+        auto fail_invoker = [&](const wchar_t*) -> HRESULT {
+            return E_FAIL;
+        };
+        const auto fail_res = recycle_file_to_bin(temp_path, snap_size, snap_write, fail_invoker);
+        CHECK(!fail_res.ok());
+        CHECK(fail_res.status == recycle_status::recycle_failed);
+
+        auto throw_invoker = [&](const wchar_t*) -> HRESULT {
+            throw std::runtime_error("seam failure");
+        };
+        const auto throw_res = recycle_file_to_bin(temp_path, snap_size, snap_write, throw_invoker);
+        CHECK(!throw_res.ok());
+        CHECK(throw_res.status == recycle_status::recycle_failed);
+
+        // Shell abort is a quiet cancel, not a failure.
+        auto abort_invoker = [&](const wchar_t*) -> HRESULT {
+            return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        };
+        const auto abort_res = recycle_file_to_bin(temp_path, snap_size, snap_write, abort_invoker);
+        CHECK(!abort_res.ok());
+        CHECK(abort_res.status == recycle_status::cancelled);
+
+        // Stale identity (wrong size expectation) never reaches the invoker.
+        bool stale_invoked = false;
+        auto guard = [&](const wchar_t*) -> HRESULT {
+            stale_invoked = true;
+            return S_OK;
+        };
+        const auto stale_res = recycle_file_to_bin(temp_path, snap_size + 1, snap_write, guard);
+        CHECK(!stale_res.ok());
+        CHECK(stale_res.status == recycle_status::identity_mismatch);
+        CHECK(!stale_invoked);
+
+        std::error_code ec;
+        std::filesystem::remove(temp_path, ec);
+    }
+
+    // 9. Unicode fixture path round-trips through the seam untouched.
+    {
+        const auto uni_path =
+            std::filesystem::temp_directory_path() / L"oz_\u65e5\u672c\u8a9e_\U0001f600.tmp";
+        {
+            FILE* f = nullptr;
+            _wfopen_s(&f, uni_path.c_str(), L"wb");
+            if (f) {
+                std::fputs("x", f);
+                std::fclose(f);
+            }
+        }
+        // Exotic names may be refused by policy: skip quietly when absent.
+        std::error_code exists_ec;
+        if (std::filesystem::exists(uni_path, exists_ec)) {
+            std::uint64_t uni_size = 0;
+            std::uint64_t uni_write = 0;
+            CHECK(oz::viewer::verify_source_file_metadata(uni_path, 0, 0, &uni_size, &uni_write));
+            std::wstring invoked_path;
+            auto ok_invoker = [&](const wchar_t* p) -> HRESULT {
+                invoked_path = p ? p : L"";
+                return S_OK;
+            };
+            const auto uni_res = recycle_file_to_bin(uni_path, uni_size, uni_write, ok_invoker);
+            CHECK(uni_res.ok());
+            CHECK(invoked_path.find(L"\u65e5\u672c\u8a9e") != std::wstring::npos);
+            std::error_code ec;
+            std::filesystem::remove(uni_path, ec);
+        }
+    }
 }
 
 void test_context_menu_seam() {
@@ -1136,7 +1308,7 @@ void test_context_menu_seam() {
 
         const auto plan = build_canvas_context_menu_plan(ctx);
         CHECK(plan.visible);
-        CHECK(plan.items.size() == 7);
+        CHECK(plan.items.size() == 8);
 
         // Item 0: Fit to Window (302)
         CHECK(plan.items[0].type == context_menu_item_type::command);
@@ -1183,10 +1355,17 @@ void test_context_menu_seam() {
         CHECK(!plan.items[6].checked);
         CHECK(plan.items[6].text.find(L"Open File Location") != std::wstring::npos);
 
+        // Item 7: Delete (109, Recycle Bin only)
+        CHECK(plan.items[7].type == context_menu_item_type::command);
+        CHECK(plan.items[7].command_id == 109);
+        CHECK(plan.items[7].enabled);
+        CHECK(!plan.items[7].checked);
+        CHECK(plan.items[7].text.find(L"Delete") != std::wstring::npos);
+
         // Absence of edit commands (no rotate, flip, crop, resize, undo, redo, save)
         for (const auto& it : plan.items) {
             if (it.type == context_menu_item_type::command) {
-                CHECK(it.command_id == 302 || it.command_id == 301 || it.command_id == 108 || it.command_id == 106 || it.command_id == 107 || it.command_id == 105);
+                CHECK(it.command_id == 302 || it.command_id == 301 || it.command_id == 108 || it.command_id == 106 || it.command_id == 107 || it.command_id == 105 || it.command_id == 109);
                 CHECK(it.command_id != static_cast<int>(ui_command_id::file_save));
                 CHECK(it.command_id != static_cast<int>(ui_command_id::file_save_as));
                 CHECK(it.command_id != static_cast<int>(ui_command_id::edit_rotate_left));
@@ -1212,7 +1391,7 @@ void test_context_menu_seam() {
 
         const auto plan = build_canvas_context_menu_plan(ctx);
         CHECK(plan.visible);
-        CHECK(plan.items.size() == 7);
+        CHECK(plan.items.size() == 8);
         CHECK(plan.items[0].command_id == 302);
         CHECK(!plan.items[0].checked);
         CHECK(plan.items[1].command_id == 301);
@@ -1221,7 +1400,7 @@ void test_context_menu_seam() {
         CHECK(!(plan.items[0].checked && plan.items[1].checked));
     }
 
-    // 5. Open File Location, Copy File, Copy File Path respect missing file path
+    // 5. Open File Location, Copy File, Copy File Path, Delete respect missing file path
     {
         ui_command_context ctx{};
         ctx.benchmark_mode = false;
@@ -1231,7 +1410,7 @@ void test_context_menu_seam() {
 
         const auto plan = build_canvas_context_menu_plan(ctx);
         CHECK(plan.visible);
-        CHECK(plan.items.size() == 7);
+        CHECK(plan.items.size() == 8);
         CHECK(plan.items[3].command_id == 108);
         CHECK(!plan.items[3].enabled); // Copy Image must be disabled
         CHECK(plan.items[4].command_id == 106);
@@ -1240,9 +1419,11 @@ void test_context_menu_seam() {
         CHECK(!plan.items[5].enabled); // Copy File Path must be disabled
         CHECK(plan.items[6].command_id == 105);
         CHECK(!plan.items[6].enabled); // Open location must be disabled
+        CHECK(plan.items[7].command_id == 109);
+        CHECK(!plan.items[7].enabled); // Delete must be disabled without a file path
     }
 
-    // 6. Open File Location, Copy File, Copy File Path respect modal / busy state
+    // 6. Open File Location, Copy File, Copy File Path, Delete respect modal / busy state
     {
         // Crop active
         {
@@ -1255,7 +1436,7 @@ void test_context_menu_seam() {
 
             const auto plan = build_canvas_context_menu_plan(ctx);
             CHECK(plan.visible);
-            CHECK(plan.items.size() == 7);
+            CHECK(plan.items.size() == 8);
             CHECK(plan.items[3].command_id == 108);
             CHECK(!plan.items[3].enabled); // Copy Image disabled during crop
             CHECK(plan.items[4].command_id == 106);
@@ -1264,6 +1445,8 @@ void test_context_menu_seam() {
             CHECK(!plan.items[5].enabled); // Copy File Path disabled during crop
             CHECK(plan.items[6].command_id == 105);
             CHECK(!plan.items[6].enabled); // Open location disabled during crop
+            CHECK(plan.items[7].command_id == 109);
+            CHECK(!plan.items[7].enabled); // Delete disabled during crop
         }
         // Save busy
         {
@@ -1276,7 +1459,7 @@ void test_context_menu_seam() {
 
             const auto plan = build_canvas_context_menu_plan(ctx);
             CHECK(plan.visible);
-            CHECK(plan.items.size() == 7);
+            CHECK(plan.items.size() == 8);
             CHECK(plan.items[3].command_id == 108);
             CHECK(!plan.items[3].enabled); // Copy Image disabled during save
             CHECK(plan.items[4].command_id == 106);
@@ -1285,6 +1468,8 @@ void test_context_menu_seam() {
             CHECK(!plan.items[5].enabled); // Copy File Path disabled during save
             CHECK(plan.items[6].command_id == 105);
             CHECK(!plan.items[6].enabled); // Open location disabled during save
+            CHECK(plan.items[7].command_id == 109);
+            CHECK(!plan.items[7].enabled); // Delete disabled during save
         }
         // Resize busy
         {
@@ -1297,7 +1482,7 @@ void test_context_menu_seam() {
 
             const auto plan = build_canvas_context_menu_plan(ctx);
             CHECK(plan.visible);
-            CHECK(plan.items.size() == 7);
+            CHECK(plan.items.size() == 8);
             CHECK(plan.items[3].command_id == 108);
             CHECK(!plan.items[3].enabled); // Copy Image disabled during resize
             CHECK(plan.items[4].command_id == 106);
@@ -1306,6 +1491,8 @@ void test_context_menu_seam() {
             CHECK(!plan.items[5].enabled); // Copy File Path disabled during resize
             CHECK(plan.items[6].command_id == 105);
             CHECK(!plan.items[6].enabled); // Open location disabled during resize
+            CHECK(plan.items[7].command_id == 109);
+            CHECK(!plan.items[7].enabled); // Delete disabled during resize
         }
         // Copy busy
         {
@@ -1318,11 +1505,13 @@ void test_context_menu_seam() {
 
             const auto plan = build_canvas_context_menu_plan(ctx);
             CHECK(plan.visible);
-            CHECK(plan.items.size() == 7);
+            CHECK(plan.items.size() == 8);
             CHECK(plan.items[3].command_id == 108);
             CHECK(!plan.items[3].enabled); // Copy Image disabled during copy busy
             CHECK(plan.items[4].command_id == 106);
             CHECK(!plan.items[4].enabled); // Copy File disabled during copy busy
+            CHECK(plan.items[7].command_id == 109);
+            CHECK(!plan.items[7].enabled); // Delete disabled during copy busy
         }
     }
 }

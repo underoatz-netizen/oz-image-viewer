@@ -19,6 +19,7 @@ enum class ui_command_id : int {
     file_copy = 106,
     file_copy_path = 107,
     file_copy_image = 108,
+    file_delete = 109,
 
     edit_rotate_left = 201,
     edit_rotate_right = 202,

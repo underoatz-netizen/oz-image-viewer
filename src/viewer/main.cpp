@@ -55,6 +55,7 @@
 #include "copy_controller.hpp"
 #include "drop_classify.hpp"
 #include "drop_flow.hpp"
+#include "recycle_delete.hpp"
 #include "enum_worker_slot.hpp"
 #include "shortcut_routing.hpp"
 #include "shell_integration.hpp"
@@ -126,6 +127,7 @@ constexpr int kIdFileOpenLocation = 105;
 constexpr int kIdFileCopy = 106;
 constexpr int kIdFileCopyPath = 107;
 constexpr int kIdFileCopyImage = 108;
+constexpr int kIdFileDelete = 109;
 
 #if OZVIEWER_ENABLE_EDITING
 constexpr int kIdEditRotateLeft  = 201;
@@ -165,6 +167,8 @@ static void report_drop_rejection(app_state& app, const oz::viewer::drop_reject_
 static void handle_dropped_paths(app_state& app, HDROP hDrop);
 static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& bitmap);
 static void start_paste_from_clipboard(app_state& app);
+static void start_recycle_delete(app_state& app);
+static void enter_recycle_blank_state(app_state& app);
 static void update_open_button_layout(app_state& app);
 static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app) noexcept;
 static oz::viewer::ui_layout_result current_ui_layout(const app_state& app) noexcept;
@@ -1700,6 +1704,10 @@ static void update_menu_command_state(app_state& app) {
         EnableMenuItem(app.hMenuFile, kIdFileOpenLocation,
                        MF_BYCOMMAND | (open_loc_st.enabled ? MF_ENABLED : MF_GRAYED));
 
+        const auto delete_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
+        EnableMenuItem(app.hMenuFile, kIdFileDelete,
+                       MF_BYCOMMAND | (delete_st.enabled ? MF_ENABLED : MF_GRAYED));
+
 #if OZVIEWER_ENABLE_EDITING
         if (app.image_doc) {
             const auto save_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_save, ctx);
@@ -3012,6 +3020,185 @@ static void start_paste_from_clipboard(app_state& app) {
     open_pasted_document(app, std::move(bitmap));
 }
 
+// Stage 9.7: clear every document/presentation/navigation artifact for the
+// blank state reached when a recycled file has no successor. The document
+// generation bumps exactly once (reset_to_empty), invalidating all in-flight
+// file workers; no decode is launched and no prompt is shown.
+static void enter_recycle_blank_state(app_state& app) {
+    // A delete replaces the document: abandon any staged drop list so a late
+    // folder listing or drop decode can never install over the blank state.
+    app.staged_drop.reset();
+
+    // Cooperative cancel of any pending background file work.
+    app.cancel_initial_decode.store(true, std::memory_order_relaxed);
+    app.cancel_enum.store(true, std::memory_order_relaxed);
+    app.work_queue.replace_plan(++app.current_epoch, {});
+    app.enum_workers.request_stop_all();
+    app.cancel_initial_decode.store(false, std::memory_order_relaxed);
+    app.cancel_enum.store(false, std::memory_order_relaxed);
+
+    // Single-generation commit to empty: document, navigation, display image,
+    // retained sources, and modal crop draft are released together.
+    app.doc.reset_to_empty();
+    app.nav = oz::viewer_core::navigation_list{};
+    app.desired_index = 0;
+    app.committed_index = 0;
+    app.current.reset();
+    app.have_image = false;
+#if OZVIEWER_ENABLE_EDITING
+    if (app.image_doc) {
+        app.image_doc->reset_to_empty();
+    }
+    app.full_res_source.reset();
+    app.crop.reset();
+#endif
+
+    oz::viewer::render_blank(app.renderer);
+    update_open_button_layout(app);
+    update_edit_menu_state(app);
+}
+
+// Stage 9.7: Delete the current file-backed document to the Shell Recycle Bin
+// (interactive Del / File -> Delete). Recycle Bin only: permanent deletion is
+// never used (the boundary's production invoker forces FOF_ALLOWUNDO).
+// Failure, stale-identity, missing-file, user-cancel (dirty discard or shell
+// abort), and benchmark/noninteractive paths all preserve the prior displayed
+// state, document, and navigation exactly. Success navigates deterministically
+// to the next image, else the previous at end, else the blank state above.
+static void start_recycle_delete(app_state& app) {
+    if (app.benchmark || app.nav_benchmark) return;
+    if (!app.have_image || !app.current || !app.doc.has_document) return;
+    if (app.doc.active_path.empty()) return;  // pathless clipboard document
+#if OZVIEWER_ENABLE_EDITING
+    if (app.crop.has_value() && app.crop->active) {
+        return;
+    }
+    if (app.resize_dlg != nullptr || app.pending_resize.has_value()) {
+        return;
+    }
+    if (app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active())) {
+        return;
+    }
+#endif
+    // A pending/in-flight Copy owns the clipboard handoff; deletion now would
+    // orphan its generation without user-visible benefit, so wait quietly.
+    if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+
+    // Command-state gate (defense in depth; mirrors the File menu and canvas
+    // context-menu enablement for pathless/modal/busy documents).
+    {
+        const auto ctx = current_ui_command_context(app);
+        const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
+        if (!st.enabled) {
+            return;
+        }
+    }
+
+    if (!check_dirty_discard_allowed(app)) {
+        return;  // User kept the current dirty document; nothing changes.
+    }
+
+    // Snapshot the source identity the boundary rechecks immediately before
+    // the shell operation. Editing-ON reuses the authoritative baseline when
+    // valid (exactly like the save/copy acquisition paths), else the document
+    // metadata; Editing-OFF (and any document without a domain record) reuses
+    // the retained decode's stored fingerprint.
+    const std::filesystem::path target = app.doc.active_path;
+    std::uint64_t expected_size = 0;
+    std::uint64_t expected_last_write = 0;
+#if OZVIEWER_ENABLE_EDITING
+    if (app.image_doc) {
+        const auto& baseline = app.image_doc->source_baseline();
+        if (baseline.valid && baseline.path == target) {
+            expected_size = baseline.file_size;
+            expected_last_write = baseline.last_write_time;
+        } else {
+            expected_size = app.image_doc->metadata().file_size;
+            expected_last_write = app.image_doc->metadata().last_write_time;
+        }
+    } else if (app.current) {
+        expected_size = app.current->source_file_size;
+        expected_last_write = app.current->source_last_write_time;
+    }
+#else
+    if (app.current) {
+        expected_size = app.current->source_file_size;
+        expected_last_write = app.current->source_last_write_time;
+    }
+#endif
+
+    const auto res = oz::viewer::recycle_file_to_bin(target, expected_size, expected_last_write);
+    if (!res.ok()) {
+        if (res.status == oz::viewer::recycle_status::cancelled) {
+            return;  // Shell-side abort: quiet, everything preserved.
+        }
+        const wchar_t* headline = L"Unable to move the file to the Recycle Bin.";
+        const wchar_t* detail =
+            L"Nothing was deleted. The current image is retained.";
+        if (res.status == oz::viewer::recycle_status::identity_mismatch) {
+            headline = L"The file changed on disk since it was opened.";
+        } else if (res.status == oz::viewer::recycle_status::not_found) {
+            headline = L"The file is no longer present on disk.";
+        } else if (res.status == oz::viewer::recycle_status::is_directory ||
+                   res.status == oz::viewer::recycle_status::invalid_path) {
+            headline = L"The current document is not a recyclable file.";
+        }
+        static_cast<void>(oz::viewer::show_prompt(
+            app.hwnd, L"Delete", headline, detail, MB_OK, MB_ICONWARNING));
+        return;
+    }
+
+    // Success: deterministic successor from the pre-delete navigation
+    // snapshot (the shell operation never touches navigation state).
+    const std::vector<std::filesystem::path> items = app.nav.items();
+    std::optional<std::size_t> deleted_index;
+    if (app.nav.active_index().has_value()) {
+        const std::filesystem::path* nav_current = app.nav.current();
+        if (nav_current && *nav_current == target) {
+            deleted_index = app.nav.active_index();
+        }
+    }
+    if (!deleted_index.has_value()) {
+        deleted_index = oz::viewer::find_recycled_index(items, target);
+    }
+
+    oz::viewer::recycle_successor successor;
+    if (deleted_index.has_value()) {
+        successor = oz::viewer::decide_recycle_successor(items, *deleted_index);
+    } else if (!items.empty()) {
+        // Navigation does not reference the recycled file: fall back to the
+        // clamped desired entry so a committed document is still displayed.
+        const std::size_t fallback =
+            (app.desired_index < items.size()) ? app.desired_index : items.size() - 1;
+        const std::filesystem::path* fallback_path = app.nav.at(fallback);
+        if (fallback_path) {
+            successor.has_successor = true;
+            successor.path = *fallback_path;
+        }
+    }
+
+    if (successor.has_successor) {
+        // Reuses the standard open lifecycle (generation, staging, cancel,
+        // decode, present, enumeration, error prompts); the prior image stays
+        // displayed until the successor presents.
+        if (!open_new_document(app, successor.path)) {
+            // The file is already recycled but no decode will ever complete
+            // this transition: report, then clear rather than display a
+            // document whose source no longer exists.
+            static_cast<void>(oz::viewer::show_prompt(
+                app.hwnd, L"Delete",
+                L"The file was moved to the Recycle Bin, but the next image could not be opened.",
+                L"The viewer is busy finishing previous work. The current view was cleared.",
+                MB_OK, MB_ICONWARNING));
+            enter_recycle_blank_state(app);
+        }
+        return;
+    }
+    enter_recycle_blank_state(app);
+}
+
 // Commit an already-validated clipboard bitmap as the active temporary
 // document. The complete install - display image, pathless domain document,
 // and the payload-sized retained source used by Copy Image - is staged by
@@ -3458,6 +3645,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
                 return 0;
             }
+            if (id == kIdFileDelete) {
+                if (!noninteractive_mode(*app)) {
+                    const auto ctx = current_ui_command_context(*app);
+                    const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
+                    if (st.enabled) {
+                        start_recycle_delete(*app);
+                    }
+                }
+                return 0;
+            }
             if (id == 302) { // View Fit
                 if (app->have_image && app->current) {
                     const auto layout = current_ui_layout(*app);
@@ -3802,6 +3999,22 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             // Ctrl+O: Open file dialog
             if (wparam == 'O' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 start_open_file_dialog(*app);
+                return 0;
+            }
+
+            // Del: move the current file-backed document to the Recycle Bin
+            // (Stage 9.7; plain key only, no modifiers). Modal/busy/benchmark
+            // gating reuses the File Delete command state; pathless clipboard
+            // documents and failure paths preserve all state inside
+            // start_recycle_delete.
+            if (wparam == VK_DELETE && !ctrl_down && !shift_down && !alt_down) {
+                if (!noninteractive_mode(*app)) {
+                    const auto ctx = current_ui_command_context(*app);
+                    const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
+                    if (st.enabled) {
+                        start_recycle_delete(*app);
+                    }
+                }
                 return 0;
             }
 
@@ -4821,6 +5034,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyImage, L"Copy &Image\tCtrl+C");
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopy, L"Copy &File");
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyPath, L"Copy File &Path");
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileDelete, L"&Delete\tDel");
 #if OZVIEWER_ENABLE_EDITING
         // Save/Save As exist only in interactive editing mode; benchmark mode
         // creates no menu at all.
