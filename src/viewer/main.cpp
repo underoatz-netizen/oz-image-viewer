@@ -53,6 +53,8 @@
 #include "clipboard_input.hpp"
 #include "paste_install.hpp"
 #include "copy_controller.hpp"
+#include "print_controller.hpp"
+#include "print_job.hpp"
 #include "drop_classify.hpp"
 #include "drop_flow.hpp"
 #include "recycle_delete.hpp"
@@ -117,6 +119,7 @@ constexpr UINT kMsgEditComplete   = WM_APP + 3;
 constexpr UINT kMsgSaveComplete   = WM_APP + 4;
 #endif
 constexpr UINT kMsgCopyComplete   = WM_APP + 5;
+constexpr UINT kMsgPrintComplete  = WM_APP + 6;
 constexpr UINT_PTR kNavBenchTimerId = 1001;
 
 constexpr int kIdFileOpen = 101;
@@ -128,6 +131,7 @@ constexpr int kIdFileCopy = 106;
 constexpr int kIdFileCopyPath = 107;
 constexpr int kIdFileCopyImage = 108;
 constexpr int kIdFileDelete = 109;
+constexpr int kIdFilePrint = 110;
 
 #if OZVIEWER_ENABLE_EDITING
 constexpr int kIdEditRotateLeft  = 201;
@@ -154,6 +158,8 @@ constexpr int kIdCropRatioASeries  = 229;
 
 // Forward declaration
 struct app_state;
+[[nodiscard]] static bool is_print_active(const app_state& app);
+static std::wstring widen_bounded_error(const std::string& text, const wchar_t* fallback);
 static void schedule_navigation_plan(app_state& app);
 static void start_open_file_dialog(app_state& app);
 [[nodiscard]] static bool open_new_document(app_state& app, const std::filesystem::path& path);
@@ -316,6 +322,21 @@ struct app_state {
         std::uint64_t document_generation = 0;
     };
     std::optional<pending_copy_state> pending_copy;
+
+    // Stage 9.8: Lazy, single-flight Print worker & controller (interactive
+    // only; never created in benchmark modes, so startup performs no printer
+    // discovery). At most one pending/in-flight print; the worker owns the
+    // transferred printer DC and never touches the renderer, history, dirty
+    // state, or the save checkpoint.
+    std::unique_ptr<oz::viewer::print_controller> print_ctrl;
+    bool print_ctrl_started = false;
+    struct pending_print_state {
+        std::uint64_t request_id = 0;
+        std::uint64_t document_instance_id = 0;
+        std::uint64_t diagnostic_revision = 0;
+        std::uint64_t document_generation = 0;
+    };
+    std::optional<pending_print_state> pending_print;
 
     // Stage 4 ViewState and interaction tracking
     oz::viewer_core::view_state view;
@@ -1601,6 +1622,7 @@ static oz::viewer::ui_command_context current_ui_command_context(const app_state
     ctx.has_source = app.have_image && (app.current != nullptr);
 #endif
     ctx.copy_busy = app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active());
+    ctx.print_busy = app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active());
 
     ctx.is_fit_mode = (app.view.mode == oz::viewer_core::view_mode::fit);
     ctx.is_fullscreen = app.is_fullscreen;
@@ -1654,6 +1676,8 @@ static void update_chrome_status(app_state& app) {
             info.state_label = L"Crop mode";
         } else if (app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active())) {
             info.state_label = L"Saving...";
+        } else if (app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active())) {
+            info.state_label = L"Printing...";
         } else if (app.pending_resize.has_value() || app.resize_dlg != nullptr) {
             info.state_label = L"Resizing...";
         } else if (app.image_doc && app.image_doc->is_dirty()) {
@@ -1707,6 +1731,10 @@ static void update_menu_command_state(app_state& app) {
         const auto delete_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
         EnableMenuItem(app.hMenuFile, kIdFileDelete,
                        MF_BYCOMMAND | (delete_st.enabled ? MF_ENABLED : MF_GRAYED));
+
+        const auto print_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_print, ctx);
+        EnableMenuItem(app.hMenuFile, kIdFilePrint,
+                       MF_BYCOMMAND | (print_st.enabled ? MF_ENABLED : MF_GRAYED));
 
 #if OZVIEWER_ENABLE_EDITING
         if (app.image_doc) {
@@ -1832,6 +1860,9 @@ static bool apply_edit_command(app_state& app, const oz::viewer_core::edit_comma
     if (edit_transition_blocked(app)) {
         return false;  // A pending/in-flight Save owns the document.
     }
+    if (is_print_active(app)) {
+        return false;  // A pending/in-flight Print owns the command state.
+    }
 
     // Try push command into history
     if (!app.image_doc->history().push_command(cmd)) {
@@ -1899,20 +1930,6 @@ static bool adopt_acquired_source(app_state& app, const oz::viewer::edit_source_
         return false;
     }
     return true;
-}
-
-// Bounded wide rendering of a worker error detail. Pipeline details are ASCII
-// engineering strings; anything longer is truncated before it reaches the UI.
-static std::wstring widen_bounded_error(const std::string& text, const wchar_t* fallback) {
-    constexpr std::size_t kMaxChars = 120;
-    if (text.empty()) {
-        return fallback;
-    }
-    std::wstring wide(text.begin(), text.end());
-    if (wide.size() > kMaxChars) {
-        wide.resize(kMaxChars);
-    }
-    return wide;
 }
 
 // Verifies that a completion for the pending Resize validation was produced
@@ -2059,6 +2076,9 @@ static bool submit_resize_validation(app_state& app, HWND dialog,
     if (edit_transition_blocked(app)) {
         return false;  // A pending/in-flight Save owns the document.
     }
+    if (is_print_active(app)) {
+        return false;  // A pending/in-flight Print owns the command state.
+    }
     if (app.pending_resize.has_value()) {
         return false;  // At most one in-flight validation request/completion.
     }
@@ -2130,6 +2150,9 @@ static void apply_undo(app_state& app) {
     if (edit_transition_blocked(app)) {
         return;  // A pending/in-flight Save owns the document.
     }
+    if (is_print_active(app)) {
+        return;  // A pending/in-flight Print owns the command state.
+    }
     if (!app.image_doc->history().can_undo()) {
         return;
     }
@@ -2162,6 +2185,9 @@ static void apply_redo(app_state& app) {
     if (edit_transition_blocked(app)) {
         return;  // A pending/in-flight Save owns the document.
     }
+    if (is_print_active(app)) {
+        return;  // A pending/in-flight Print owns the command state.
+    }
     if (!app.image_doc->history().can_redo()) {
         return;
     }
@@ -2189,7 +2215,7 @@ static void apply_redo(app_state& app) {
 
 static void begin_crop_mode(app_state& app) {
     if (!app.have_image || !app.current || !app.image_doc || app.benchmark || app.nav_benchmark ||
-        edit_transition_blocked(app) ||
+        edit_transition_blocked(app) || is_print_active(app) ||
         (app.crop.has_value() && app.crop->active)) {
         return;
     }
@@ -2282,6 +2308,9 @@ static void open_resize_modal_dialog(app_state& app) {
     }
     if (edit_transition_blocked(app)) {
         return;  // A pending/in-flight Save owns the document.
+    }
+    if (is_print_active(app)) {
+        return;  // A pending/in-flight Print owns the command state.
     }
     if (app.crop.has_value() && app.crop->active) {
         return;  // Crop mode owns the canvas until applied or cancelled.
@@ -2419,6 +2448,9 @@ static void start_save(app_state& app, bool save_as) {
     }
     if (edit_transition_blocked(app) || app.pending_save.has_value()) {
         return;  // One pending/in-flight save at a time.
+    }
+    if (is_print_active(app)) {
+        return;  // A pending/in-flight Print owns the command state.
     }
     if (app.crop.has_value() && app.crop->active) {
         return;  // Crop mode owns the canvas until applied or cancelled.
@@ -2880,6 +2912,15 @@ static void start_open_file_dialog(app_state& app) {
     }
 }
 
+// True while a Print is pending/in flight (or its completion has not been
+// consumed): interactive commands stay disabled until it settles. Print is
+// read-only, so in-flight document switches remain safe; the completion is
+// still accepted only for the matching request/document. Unconditional so
+// both Editing-ON and Editing-OFF paths can gate on it.
+static bool is_print_active(const app_state& app) {
+    return app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active());
+}
+
 // Launch start_copy_image
 static void start_copy_image(app_state& app) {
     if (app.benchmark || app.nav_benchmark) return;
@@ -2898,6 +2939,9 @@ static void start_copy_image(app_state& app) {
     }
 #endif
     if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+    if (is_print_active(app)) {
         return;
     }
 
@@ -2983,6 +3027,254 @@ static void start_copy_image(app_state& app) {
     update_edit_menu_state(app);
 }
 
+// Bounded wide rendering of a worker error detail. Worker details are ASCII
+// engineering strings; anything longer is truncated before it reaches the UI.
+// Unconditional: shared by the Editing-ON save path and the Stage 9.8 print
+// path (which ships in both Editing configurations).
+static std::wstring widen_bounded_error(const std::string& text, const wchar_t* fallback) {
+    constexpr std::size_t kMaxChars = 120;
+    if (text.empty()) {
+        return fallback;
+    }
+    std::wstring wide(text.begin(), text.end());
+    if (wide.size() > kMaxChars) {
+        wide.resize(kMaxChars);
+    }
+    return wide;
+}
+
+// Bounded user-facing message for a print outcome taxonomy value. `detail`
+// is a worker ASCII diagnostic and is truncated before display. Success,
+// user cancellation, and dialog dismissal are quiet (empty message).
+static std::wstring print_error_ui_message(oz::viewer::print_error error,
+                                           const std::string& detail) {
+    const wchar_t* head = nullptr;
+    switch (error) {
+        case oz::viewer::print_error::none:
+        case oz::viewer::print_error::cancelled:
+        case oz::viewer::print_error::dialog_cancelled:
+            return {};
+        case oz::viewer::print_error::invalid_request:
+            head = L"The print request was not valid. Nothing was printed.";
+            break;
+        case oz::viewer::print_error::admission_denied:
+            head = L"The image is too large to prepare for printing. Nothing was printed.";
+            break;
+        case oz::viewer::print_error::acquire_failed:
+            head = L"The source image could not be read for printing. Nothing was printed.";
+            break;
+        case oz::viewer::print_error::materialize_failed:
+            head = L"The edited image could not be prepared for printing. Nothing was printed.";
+            break;
+        case oz::viewer::print_error::invalid_caps:
+            head = L"The printer reported an unusable page size. Nothing was printed.";
+            break;
+        case oz::viewer::print_error::spool_failed:
+            head = L"The printer did not accept the page. Check the printer queue; "
+                   L"the document is unchanged.";
+            break;
+    }
+    std::wstring message(head);
+    if (!detail.empty()) {
+        message += L"\n\n";
+        message += widen_bounded_error(detail, L"");
+    }
+    return message;
+}
+
+// Stage 9.8: Print the current file-backed document (interactive File ->
+// Print / Ctrl+P). Validates state and captures the document identity, the
+// copied active commands, and the immutable source/baseline exactly like the
+// copy path, then presents PrintDlgExW with PD_RETURNDC on the UI thread.
+// Dialog cancellation (dwResultAction != PD_RESULT_PRINT) is quiet: no spool
+// call, no state change. On explicit Print the HDC transfers exclusively to
+// the single-flight worker, which materializes once and spools a single
+// fit-to-page page. Never mutates source, history, dirty state, or the save
+// checkpoint. Benchmark and navigation-benchmark modes never reach here
+// (guarded at every caller and at entry).
+static void start_print(app_state& app) {
+    if (app.benchmark || app.nav_benchmark) return;
+    if (!app.have_image || !app.current || !app.doc.has_document) return;
+    if (app.doc.active_path.empty()) return;  // pathless clipboard document
+#if OZVIEWER_ENABLE_EDITING
+    if (app.crop.has_value() && app.crop->active) {
+        return;
+    }
+    if (app.resize_dlg != nullptr || app.pending_resize.has_value()) {
+        return;
+    }
+    if (app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active())) {
+        return;
+    }
+#endif
+    if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+    if (is_print_active(app)) {
+        return;  // Single-flight: at most one pending/in-flight print.
+    }
+
+    // Command-state gate (defense in depth; mirrors the File menu
+    // enablement for missing source/path, pathless, and modal/busy docs).
+    {
+        const auto ctx = current_ui_command_context(app);
+        const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_print, ctx);
+        if (!st.enabled) {
+            return;
+        }
+    }
+
+    oz::viewer::print_work_request req;
+    req.document_generation = app.doc.generation;
+
+#if OZVIEWER_ENABLE_EDITING
+    if (app.image_doc) {
+        req.document_instance_id = app.image_doc->instance_id();
+        req.diagnostic_revision = app.image_doc->edit_revision();
+
+        const bool has_retained_source =
+            app.full_res_source && app.full_res_source->is_valid() &&
+            app.full_res_source->document_instance_id == app.image_doc->instance_id();
+
+        if (has_retained_source) {
+            req.existing_source = app.full_res_source;
+        } else {
+            // Must acquire stable full-resolution source.
+            req.needs_source_acquisition = true;
+            req.source_path = app.image_doc->metadata().source_path;
+            const auto& baseline = app.image_doc->source_baseline();
+            if (baseline.valid) {
+                req.expected_file_size = baseline.file_size;
+                req.expected_last_write_time = baseline.last_write_time;
+            } else {
+                req.expected_file_size = app.image_doc->metadata().file_size;
+                req.expected_last_write_time = app.image_doc->metadata().last_write_time;
+            }
+            req.expected_dimensions = app.image_doc->metadata().source_dimensions;
+        }
+
+        const auto active_cmds = app.image_doc->history().active_commands();
+        req.commands.assign(active_cmds.begin(), active_cmds.end());
+    } else
+#endif
+    {
+        // Editing OFF (or no domain record): full-resolution source with
+        // orientation applied. The document generation is the OFF-mode
+        // document identity; it is nonzero and stable for the current
+        // document, so the immutable source passes
+        // edit_source_buffer::is_valid() without weakening the
+        // generation-based stale-completion check.
+        req.document_instance_id = app.doc.generation;
+        req.diagnostic_revision = 0;
+
+        if (app.current->scale_den == 1) {
+            auto buf = std::make_shared<oz::viewer::edit_source_buffer>();
+            buf->document_instance_id = req.document_instance_id;
+            buf->source_path = app.doc.active_path;
+            buf->dimensions = {app.current->width, app.current->height};
+            buf->stride = app.current->stride;
+            buf->pixels = app.current->pixels;
+            req.existing_source = std::move(buf);
+        } else {
+            req.needs_source_acquisition = true;
+            req.source_path = app.doc.active_path;
+        }
+    }
+
+    // The Editing-OFF print path never submits edit commands, so the worker
+    // never consumes the budget there; keep the value zero to avoid linking
+    // the edit-pipeline budget helper into Editing-OFF builds (the worker
+    // falls back to its local admission policy instead).
+#if OZVIEWER_ENABLE_EDITING
+    req.memory_budget = oz::viewer_core::get_system_edit_admission_budget();
+#else
+    req.memory_budget = 0;
+#endif
+
+    // Explicit Print dialog with PD_RETURNDC. Cancellation is
+    // dwResultAction != PD_RESULT_PRINT. Dialog, devmode, devnames, and DC
+    // ownership are always released here; only an explicitly printed HDC
+    // leaves this scope, and then solely into the worker submit below.
+    PRINTDLGEXW pdx{};
+    pdx.lStructSize = sizeof(pdx);
+    pdx.hwndOwner = app.hwnd;
+    pdx.Flags = PD_RETURNDC | PD_NOPAGENUMS | PD_NOSELECTION;
+    pdx.nStartPage = START_PAGE_GENERAL;
+    const HRESULT dlg_hr = PrintDlgExW(&pdx);
+    HDC print_hdc = nullptr;
+    if (SUCCEEDED(dlg_hr) && pdx.dwResultAction == PD_RESULT_PRINT) {
+        print_hdc = pdx.hDC;
+        pdx.hDC = nullptr;
+    }
+    if (pdx.hDevMode) {
+        GlobalFree(pdx.hDevMode);
+        pdx.hDevMode = nullptr;
+    }
+    if (pdx.hDevNames) {
+        GlobalFree(pdx.hDevNames);
+        pdx.hDevNames = nullptr;
+    }
+    if (pdx.hDC) {
+        DeleteDC(pdx.hDC);
+        pdx.hDC = nullptr;
+    }
+    if (print_hdc == nullptr) {
+        return;  // Dialog cancel or dialog failure: quiet, everything preserved.
+    }
+
+    // Lazy creation on the first explicit Print: startup and benchmark modes
+    // perform no printer discovery and allocate no print worker.
+    if (!app.print_ctrl) {
+        app.print_ctrl = std::make_unique<oz::viewer::print_controller>();
+        app.print_ctrl->start(app.hwnd, kMsgPrintComplete);
+        app.print_ctrl_started = true;
+    }
+
+    app_state::pending_print_state pending;
+    pending.document_instance_id = req.document_instance_id;
+    pending.diagnostic_revision = req.diagnostic_revision;
+    pending.document_generation = app.doc.generation;
+    req.printer_dc = print_hdc;
+    print_hdc = nullptr;
+    pending.request_id = app.print_ctrl->submit_request(std::move(req));
+    if (pending.request_id == 0) {
+        return;  // Rejected (no DC supplied or raced busy): HDC already released.
+    }
+    app.pending_print = pending;
+
+    update_edit_menu_state(app);
+}
+
+// Stage 9.8 print completion (UI thread). Accepted only for the matching
+// request and document; stale completions are discarded quietly. Never
+// mutates source, history, dirty state, or the save checkpoint: success and
+// cancellation are quiet, failures prompt with the bounded outcome message.
+static void handle_print_completion(app_state& app,
+                                    const oz::viewer::print_completion_msg& comp) {
+    const std::uint64_t pending_id =
+        app.pending_print.has_value() ? app.pending_print->request_id : 0;
+    if (!oz::viewer::print_completion_is_for_pending(app.pending_print.has_value(),
+                                                     pending_id,
+                                                     comp.request_id)) {
+        return;  // Stale or replaced request.
+    }
+    const auto pending = *app.pending_print;
+    app.pending_print.reset();
+
+    if (comp.document_generation != app.doc.generation ||
+        comp.document_instance_id != pending.document_instance_id) {
+        return;  // Stale document: report nothing for a document that moved on.
+    }
+
+    const std::wstring message =
+        print_error_ui_message(comp.error, comp.detail);
+    if (!message.empty() && !noninteractive_mode(app)) {
+        static_cast<void>(oz::viewer::show_prompt(
+            app.hwnd, L"Print", message.c_str(),
+            L"The document is unchanged.", MB_OK, MB_ICONWARNING));
+    }
+}
+
 // Stage 9.5: Paste Image from the Windows clipboard (interactive Ctrl+V).
 // Reads a valid clipboard DIB-family image and opens it as an in-memory
 // temporary document. Any clipboard or bitmap failure is quiet: no prompt,
@@ -3004,6 +3296,9 @@ static void start_paste_from_clipboard(app_state& app) {
     // A pending/in-flight Copy owns the clipboard handoff; pasting now would
     // orphan its generation without user-visible benefit, so wait quietly.
     if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+    if (is_print_active(app)) {
         return;
     }
 
@@ -3083,6 +3378,9 @@ static void start_recycle_delete(app_state& app) {
     // A pending/in-flight Copy owns the clipboard handoff; deletion now would
     // orphan its generation without user-visible benefit, so wait quietly.
     if (app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active())) {
+        return;
+    }
+    if (is_print_active(app)) {
         return;
     }
 
@@ -3655,6 +3953,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
                 return 0;
             }
+            if (id == kIdFilePrint) {
+                if (!noninteractive_mode(*app)) {
+                    const auto ctx = current_ui_command_context(*app);
+                    const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_print, ctx);
+                    if (st.enabled) {
+                        start_print(*app);
+                    }
+                }
+                return 0;
+            }
             if (id == 302) { // View Fit
                 if (app->have_image && app->current) {
                     const auto layout = current_ui_layout(*app);
@@ -4013,6 +4321,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
                     if (st.enabled) {
                         start_recycle_delete(*app);
+                    }
+                }
+                return 0;
+            }
+
+            // Print: Ctrl+P (exact modifiers only; no text-input diversion is
+            // needed because the viewer owns no text entry, and the modal
+            // Resize dialog keeps ownership via the prefilter below).
+            // Disabled command state consumes quietly with no printer work.
+            if ((wparam == 'P' || wparam == 'p') && ctrl_down && !shift_down && !alt_down) {
+                if (!noninteractive_mode(*app)) {
+                    const auto ctx = current_ui_command_context(*app);
+                    const auto st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_print, ctx);
+                    if (st.enabled) {
+                        start_print(*app);
                     }
                 }
                 return 0;
@@ -4725,6 +5048,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             update_edit_menu_state(*app);
             return 0;
         }
+        case kMsgPrintComplete: {
+            if (!app || app->benchmark || app->nav_benchmark || !app->print_ctrl) {
+                return 0;
+            }
+            auto comps = app->print_ctrl->pop_completions();
+            for (auto& comp : comps) {
+                handle_print_completion(*app, comp);
+            }
+            update_edit_menu_state(*app);
+            return 0;
+        }
         case WM_TIMER: {
             if (wparam == kNavBenchTimerId && app && app->nav_benchmark) {
                 auto& session = app->nav_bench_session;
@@ -5035,6 +5369,8 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopy, L"Copy &File");
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyPath, L"Copy File &Path");
         AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileDelete, L"&Delete\tDel");
+        AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFilePrint, L"&Print...\tCtrl+P");
 #if OZVIEWER_ENABLE_EDITING
         // Save/Save As exist only in interactive editing mode; benchmark mode
         // creates no menu at all.
@@ -5256,6 +5592,23 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
                     }
                 }
 
+                // The modal Resize dialog owns Ctrl+P while it (or a child
+                // control) has focus; otherwise the key forwards to the main
+                // window, where the WM_KEYDOWN handler gates it on the Print
+                // command state (benchmark modes never print).
+                if ((msg.wParam == 'P' || msg.wParam == 'p') && ctrl_down && !shift_down && !alt_down) {
+                    HWND resize_hwnd = nullptr;
+#if OZVIEWER_ENABLE_EDITING
+                    resize_hwnd = app.resize_dlg;
+#endif
+                    if (resize_hwnd != nullptr &&
+                        (focused == resize_hwnd || ::IsChild(resize_hwnd, focused))) {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                        continue;
+                    }
+                }
+
                 SendMessageW(app.hwnd, WM_KEYDOWN, msg.wParam, msg.lParam);
                 continue;
             }
@@ -5344,6 +5697,12 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
     if (app.copy_ctrl_started && app.copy_ctrl) {
         app.copy_ctrl->stop();
         app.copy_ctrl_started = false;
+    }
+    if (app.print_ctrl_started && app.print_ctrl) {
+        // Cooperative cancel plus join: a job that already started spooling
+        // is aborted by the worker before it exits.
+        app.print_ctrl->stop();
+        app.print_ctrl_started = false;
     }
     app.cancel_initial_decode.store(true, std::memory_order_relaxed);
     app.cancel_enum.store(true, std::memory_order_relaxed);

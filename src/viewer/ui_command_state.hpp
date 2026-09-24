@@ -20,6 +20,7 @@ enum class ui_command_id : int {
     file_copy_path = 107,
     file_copy_image = 108,
     file_delete = 109,
+    file_print = 110,
 
     edit_rotate_left = 201,
     edit_rotate_right = 202,
@@ -81,6 +82,7 @@ struct ui_command_context {
     bool resize_busy = false;
     bool save_busy = false;
     bool copy_busy = false;
+    bool print_busy = false;
 
     // View / Navigation state
     bool can_navigate_prev = false;
@@ -98,7 +100,7 @@ struct ui_command_context {
 
 // Helper to determine if general editing commands (rotate, flip, crop, resize) can be invoked.
 [[nodiscard]] inline bool can_edit(const ui_command_context& ctx) noexcept {
-    return ctx.have_image && ctx.has_document && !ctx.crop_active && !ctx.resize_busy && !ctx.save_busy && !ctx.copy_busy;
+    return ctx.have_image && ctx.has_document && !ctx.crop_active && !ctx.resize_busy && !ctx.save_busy && !ctx.copy_busy && !ctx.print_busy;
 }
 
 }  // namespace oz::viewer

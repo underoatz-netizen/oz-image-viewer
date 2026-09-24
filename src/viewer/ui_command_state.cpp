@@ -16,7 +16,7 @@ ui_item_state derive_command_state(ui_command_id id, const ui_command_context& c
     }
 
     const bool doc_ready = ctx.have_image && ctx.has_document;
-    const bool not_modal = !ctx.crop_active && !ctx.resize_busy && !ctx.save_busy && !ctx.copy_busy;
+    const bool not_modal = !ctx.crop_active && !ctx.resize_busy && !ctx.save_busy && !ctx.copy_busy && !ctx.print_busy;
     const bool edit_allowed = doc_ready && not_modal;
 
     switch (id) {
@@ -52,6 +52,12 @@ ui_item_state derive_command_state(ui_command_id id, const ui_command_context& c
         case ui_command_id::file_copy_image:
             // Copy Image requires committed document/image, adequate source or file path to acquire, and not modal
             state.enabled = ctx.have_image && ctx.has_document && (ctx.has_source || ctx.has_file_path) && not_modal;
+            break;
+
+        case ui_command_id::file_print:
+            // Print requires committed document/image, a usable source AND a
+            // file path (pathless clipboard documents are ineligible), and not modal.
+            state.enabled = ctx.have_image && ctx.has_document && ctx.has_source && ctx.has_file_path && not_modal;
             break;
 
         case ui_command_id::edit_rotate_left:
