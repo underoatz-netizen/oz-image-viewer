@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "packageName": "ozviewer",
+  "version": "0.1.0",
+  "platform": "win-x64",
+  "entrypoint": "ozviewer.exe",
+  "requiredRuntimeDlls": [
+    "heif.dll",
+    "libde265.dll"
+  ],
+  "vcRuntimePrefixes": [
+    "msvcp",
+    "vcruntime",
+    "concrt",
+    "vccorlib"
+  ],
+  "systemDependencyPrefixes": [
+    "api-ms-win-",
+    "ext-ms-"
+  ],
+  "knownImageExtensions": [
+    "jpg",
+    "jpeg",
+    "png",
+    "webp",
+    "avif",
+    "heic",
+    "heif",
+    "bmp",
+    "gif",
+    "tif",
+    "tiff",
+    "ico",
+    "cur",
+    "tga"
+  ],
+  "licenseFiles": [
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "excludedExtensions": [
+    ".pdb",
+    ".lib",
+    ".obj",
+    ".exp",
+    ".ilk",
+    ".iobj",
+    ".ipdb",
+    ".map",
+    ".idb",
+    ".pch",
+    ".tlog",
+    ".log",
+    ".res",
+    ".tmp",
+    ".xml",
+    ".manifest"
+  ],
+  "excludedNameFragments": [
+    "cmakefiles",
+    "test",
+    "fixture",
+    "benchmark"
+  ],
+  "runInstructions": [
+    "1. Extract this ZIP anywhere, for example C:\\Tools\\ozviewer.",
+    "2. Double-click ozviewer.exe, or run it from a command prompt with an image path.",
+    "3. No installer is run and no file associations, registry keys, shortcuts,",
+    "   services, or other system settings are created or changed.",
+    "",
+    "Usage:",
+    "  ozviewer.exe                     open an empty viewer window (Open / Ctrl+O / drag and drop)",
+    "  ozviewer.exe <image>             open an image and keep the window open",
+    "  ozviewer.exe --benchmark <image> emit timing JSONL after the first present, then exit"
+  ]
+}

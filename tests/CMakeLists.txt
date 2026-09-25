@@ -430,3 +430,25 @@ if(TARGET ozviewer)
         set_tests_properties(ozviewer_save_ui_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     endif()
 endif()
+
+# Stage 9.9 portable packaging boundary: focused script tests (staging,
+# deterministic ZIP, fail-closed on missing/ambiguous dependencies, exclusion
+# of build artifacts) and an isolated smoke run of the staged package with a
+# scrubbed PATH. Both skip (77) when the payload/desktop is unavailable; the
+# smoke is a host test, not a clean-machine validation.
+if(TARGET ozviewer)
+    add_test(NAME package_portable_script_tests
+             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                     -File ${CMAKE_SOURCE_DIR}/packaging/test-portable-script.ps1
+                     -PayloadDir $<TARGET_FILE_DIR:ozviewer>
+                     -WorkDir ${CMAKE_BINARY_DIR}/package-portable-script-tests)
+    set_tests_properties(package_portable_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+
+    add_test(NAME package_portable_smoke
+             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                     -File ${CMAKE_SOURCE_DIR}/packaging/smoke-portable.ps1
+                     -PayloadDir $<TARGET_FILE_DIR:ozviewer>
+                     -WorkDir ${CMAKE_BINARY_DIR}/package-portable-smoke
+                     -AllowSkipNoDesktop)
+    set_tests_properties(package_portable_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()

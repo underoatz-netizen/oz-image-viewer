@@ -220,3 +220,24 @@
   an encoder; see `tests/data/phaseb/README.md` for SHA-256/provenance); no
   redistributable license, attribution, or notice applies. No
   vcpkg/baseline/triplet/dependency change and no runtime network behavior.
+
+## Microsoft Visual C++ Redistributable — app-local CRT (Stage 9.9 portable package)
+
+- **Files**: `MSVCP140.dll`, `MSVCP140_ATOMIC_WAIT.dll`, `VCRUNTIME140.dll`,
+  `VCRUNTIME140_1.dll`.
+- **Source**: the Visual Studio 2022 Build Tools toolset redistribution folder
+  `VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT`, matching the PE linker
+  version (`14.44`) of the packaged `ozviewer.exe`. The packaging script
+  auto-discovers the matching folder (or accepts `-RuntimeDir`).
+- **Linkage**: these are the dynamic C++/CRT runtime dependencies of
+  `ozviewer.exe` and of the dynamically loaded `heif.dll`/`libde265.dll`
+  (the viewer builds with `VCPKG_CRT_LINKAGE dynamic`, i.e. `/MD`). They are
+  bundled app-local so the portable package runs without a separate
+  redistributable installation.
+- **License**: redistributed under the Microsoft Visual Studio license terms,
+  which permit app-local redistribution of the runtime for build-output
+  produced with a licensed Visual Studio installation. Copyright (c) Microsoft
+  Corporation. See https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files
+- The package is unsigned. This section adds no installer, service, registry,
+  association, or shortcut behavior.
+
