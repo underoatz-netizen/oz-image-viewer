@@ -1,0 +1,11 @@
+scenario,marker,count,median_ns,p95_ns,p99_ns,convention
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,ProcessStart,30,1600,2100,2400,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,RendererReady,30,43598200,51615400,63379100,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,FileOpened,30,89044200,101922500,114995000,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,CodecDetected,30,89075300,101934600,115004600,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,HeaderParsed,30,89143500,101981400,115049200,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,DecodeStart,30,89149500,101984700,115052600,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,DecodeComplete,30,96227500,109230500,121037800,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,GpuUploadStart,30,96338000,110196700,121588900,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,GpuUploadComplete,30,126839400,144587600,153109700,nearest-rank
+stage10.5-baseline-ozviewer|warm|E:/Projects/OZ image viewer/benchmark/evidence/stage10.5-baseline-20260925-080011/corpus/jpeg-2mp.jpg,FirstPresent,30,126868000,144615800,153122200,nearest-rank

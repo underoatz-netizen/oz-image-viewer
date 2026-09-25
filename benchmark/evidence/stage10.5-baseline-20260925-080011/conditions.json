@@ -1,0 +1,173 @@
+﻿{
+    "schema":  "oz.stage10.5.conditions.v1",
+    "purpose":  "Stage 10.5 regression benchmark baseline for the current main build; same-host/same-build-config comparisons only.",
+    "generated_utc":  "2026-09-25T08:03:09.7648149Z",
+    "evidence_dir":  "E:\\Projects\\OZ image viewer\\benchmark\\evidence\\stage10.5-baseline-20260925-080011",
+    "git":  {
+                "branch":  "main",
+                "head_commit":  "dad976a7d66130ab613b6db15edd76d5b2c44cac",
+                "head_subject":  "feat(viewer): externalize UI strings for localization readiness",
+                "head_commit_time":  "2026-09-25 14:27:07 +0700",
+                "upstream":  "origin/main",
+                "ahead_of_upstream":  "11",
+                "tracked_working_tree_clean":  true,
+                "untracked_artifacts_preserved":  [
+                                                      "dimprint.obj",
+                                                      "gen_webp_fixtures.obj",
+                                                      "pngprobe.obj",
+                                                      "test viewer/"
+                                                  ],
+                "note":  "Binary was linked after the last tracked source modification and the tracked working tree equals HEAD; no tracked source/test/CMake changes were made for this baseline."
+            },
+    "host":  {
+                 "manufacturer":  "HP",
+                 "model":  "Victus by HP Laptop 16-e1xxx",
+                 "system_type":  "x64-based PC",
+                 "timezone":  "SE Asia Standard Time"
+             },
+    "os":  {
+               "caption":  "Microsoft Windows 11 Home Single Language",
+               "version":  "10.0.22631",
+               "build":  "22631",
+               "architecture":  "64-bit"
+           },
+    "cpu":  {
+                "name":  "AMD Ryzen 5 6600H with Radeon Graphics",
+                "cores":  6,
+                "logical_processors":  12,
+                "max_clock_mhz":  3301
+            },
+    "memory":  {
+                   "total_physical_gb":  15.19
+               },
+    "gpu":  [
+                {
+                    "name":  "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+                    "driver_version":  "32.0.16.1088",
+                    "driver_date":  "2026-07-22",
+                    "adapter_ram_bytes":  4293918720,
+                    "current_h_resolution":  null,
+                    "current_v_resolution":  null,
+                    "current_refresh_hz":  null,
+                    "video_mode":  null
+                },
+                {
+                    "name":  "AMD Radeon(TM) Graphics",
+                    "driver_version":  "31.0.12044.3",
+                    "driver_date":  "2022-10-25",
+                    "adapter_ram_bytes":  536870912,
+                    "current_h_resolution":  1920,
+                    "current_v_resolution":  1080,
+                    "current_refresh_hz":  144,
+                    "video_mode":  "1920 x 1080 x 4294967296 colors"
+                }
+            ],
+    "gpu_selection_note":  "Hybrid-GPU laptop (NVIDIA RTX 3050 Ti + AMD Radeon iGPU). The benchmark path creates a D3D11 renderer but the exact adapter selected per run was NOT directly measured; do not attribute results to a specific GPU.",
+    "display":  {
+                    "monitors":  [
+                                     {
+                                         "device":  "\\\\.\\DISPLAY1",
+                                         "bounds":  "{X=0,Y=0,Width=1920,Height=1080}",
+                                         "primary":  true
+                                     }
+                                 ],
+                    "note":  "Single primary display reported at 1920x1080; DPI-awareness/scale was not separately recorded."
+                },
+    "power":  {
+                  "ac_line_status":  2,
+                  "battery_percent":  100,
+                  "note":  "Win32_Battery BatteryStatus=2 means AC-connected. AC power was connected; no thermal or clock telemetry was captured."
+              },
+    "binaries":  {
+                     "subject":  {
+                                     "path":  "E:\\Projects\\OZ image viewer\\build\\off-link-verify\\src\\viewer\\Release\\ozviewer.exe",
+                                     "size_bytes":  3392512,
+                                     "sha256":  "e449259fdcb6bf743e2ef7ca1e05a5997a196b6f46ee38f05386ef3cb526c6ac",
+                                     "build_config":  {
+                                                          "generator":  "Visual Studio 17 2022",
+                                                          "platform":  "x64",
+                                                          "config":  "Release",
+                                                          "triplet":  "oz-x64-windows-static-md",
+                                                          "OZVIEWER_ENABLE_EDITING":  "OFF",
+                                                          "OZVIEWER_ENABLE_WEBP":  "ON",
+                                                          "OZVIEWER_ENABLE_WEBP_ENCODER":  "ON",
+                                                          "OZVIEWER_ENABLE_AVIF":  "ON",
+                                                          "OZVIEWER_ENABLE_HEIC":  "ON"
+                                                      }
+                                 },
+                     "runner":  {
+                                    "path":  "E:\\Projects\\OZ image viewer\\build\\off-link-verify\\src\\runner\\Release\\ozbench.exe",
+                                    "size_bytes":  286720,
+                                    "sha256":  "071b0a0ad1365f251c38e7cd5a6f91aa7f5027fceb49b2da904a52978c792b9e"
+                                },
+                     "fixture_generator":  {
+                                               "path":  "E:\\Projects\\OZ image viewer\\build\\off-link-verify\\tests\\Release\\ozviewer_make_jpeg.exe",
+                                               "size_bytes":  495616,
+                                               "sha256":  "53822634553bc9667b48dd97cf4c55279dac7a39caba9a76dbbceeaac5f13226"
+                                           }
+                 },
+    "corpus":  [
+                   {
+                       "alias":  "jpeg-2mp",
+                       "file":  "corpus/jpeg-2mp.jpg",
+                       "width":  2000,
+                       "height":  1000,
+                       "size_bytes":  88804,
+                       "sha256":  "c56d14c822da282d6611a1fd20404f429b1854f3afdc61184f2d9c3dc765a85c",
+                       "generation":  "ozviewer_make_jpeg.exe \u003cfile\u003e 2000 1000"
+                   },
+                   {
+                       "alias":  "jpeg-12mp",
+                       "file":  "corpus/jpeg-12mp.jpg",
+                       "width":  4000,
+                       "height":  3000,
+                       "size_bytes":  329796,
+                       "sha256":  "17d89c99d5079dea431a755c207744067e3815b3962ee18b88050687d7270a57",
+                       "generation":  "ozviewer_make_jpeg.exe \u003cfile\u003e 4000 3000"
+                   },
+                   {
+                       "alias":  "jpeg-24mp",
+                       "file":  "corpus/jpeg-24mp.jpg",
+                       "width":  6000,
+                       "height":  4000,
+                       "size_bytes":  583828,
+                       "sha256":  "52791a02861950b337fcc360909dac485e60e16efb9db7ae44e852f50d861939",
+                       "generation":  "ozviewer_make_jpeg.exe \u003cfile\u003e 6000 4000"
+                   }
+               ],
+    "protocol":  {
+                     "collector":  "markers",
+                     "adapter":  "oz_markers",
+                     "endpoint":  "FirstPresent (relative_ns, ProcessStart-\u003eFirstPresent, internal marker only)",
+                     "cache_label":  "warm",
+                     "warmups_per_scenario":  3,
+                     "measured_per_scenario":  30,
+                     "scenarios":  [
+                                       "jpeg-2mp",
+                                       "jpeg-12mp",
+                                       "jpeg-24mp"
+                                   ],
+                     "total_measured_launches":  90,
+                     "order":  "jpeg-2mp, then jpeg-12mp, then jpeg-24mp; each scenario is 3 warmups followed by 30 measured fresh-process launches",
+                     "summarize":  "ozbench summarize (nearest-rank median/p95/p99)",
+                     "notes":  "warm means the OS/app cache was left as-is; no cache purging was performed. cache is a protocol label only."
+                 },
+    "exact_commands":  [
+                           "build\\off-link-verify\\tests\\Release\\ozviewer_make_jpeg.exe \u003cevidence\u003e\\corpus\\jpeg-2mp.jpg 2000 1000",
+                           "build\\off-link-verify\\tests\\Release\\ozviewer_make_jpeg.exe \u003cevidence\u003e\\corpus\\jpeg-12mp.jpg 4000 3000",
+                           "build\\off-link-verify\\tests\\Release\\ozviewer_make_jpeg.exe \u003cevidence\u003e\\corpus\\jpeg-24mp.jpg 6000 4000",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe validate \u003cevidence\u003e\\plans\\plan-stage10.5-baseline.json",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe run \u003cevidence\u003e\\plans\\plan-stage10.5-baseline.json --scenario jpeg-2mp  --warmups 3 --repetitions 30 --out \u003cevidence\u003e\\raw\\jpeg-2mp.jsonl",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe run \u003cevidence\u003e\\plans\\plan-stage10.5-baseline.json --scenario jpeg-12mp --warmups 3 --repetitions 30 --out \u003cevidence\u003e\\raw\\jpeg-12mp.jsonl",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe run \u003cevidence\u003e\\plans\\plan-stage10.5-baseline.json --scenario jpeg-24mp --warmups 3 --repetitions 30 --out \u003cevidence\u003e\\raw\\jpeg-24mp.jsonl",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe summarize \u003cevidence\u003e\\raw\\\u003cscenario\u003e.jsonl --format json --out \u003cevidence\u003e\\summaries\\\u003cscenario\u003e-summary.json",
+                           "build\\off-link-verify\\src\\runner\\Release\\ozbench.exe summarize \u003cevidence\u003e\\raw\\\u003cscenario\u003e.jsonl --format csv  --out \u003cevidence\u003e\\summaries\\\u003cscenario\u003e-summary.csv"
+                       ],
+    "limitations":  [
+                        "Single session, single host, single build config (editing OFF static-md). Not a cross-machine or cross-session baseline.",
+                        "GPU adapter selection, GPU clocks, thermal state, and DPI scaling were not directly measured.",
+                        "FirstPresent is an internal presentation-submission marker; it is not desktop-composed visibility and no interactive UI latency was measured.",
+                        "15.19 GB RAM laptop; background OS activity was not isolated or monitored.",
+                        "IrfanView/XnView competitor templates exist but are disabled and were not run."
+                    ]
+}
