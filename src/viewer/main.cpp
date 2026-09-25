@@ -47,6 +47,8 @@
 #include "oz/viewer_core/work_queue.hpp"
 #include "renderer.hpp"
 #include "modern_dialogs.hpp"
+#include "viewer_strings.hpp"
+#include "ozviewer_resources.h"
 #include "crop_strip.hpp"
 #include "context_menu.hpp"
 #include "clipboard_output.hpp"
@@ -170,7 +172,12 @@ static void start_open_file_dialog(app_state& app);
 static void open_dropped_file_list(app_state& app,
                                    std::vector<std::filesystem::path>&& ordered_supported);
 static void schedule_dropped_folder(app_state& app, const std::filesystem::path& folder);
-static void report_drop_rejection(app_state& app, const oz::viewer::drop_reject_text& text);
+// Stage 10.3: the dependency-free drop_flow policy seam owns the drop verdict;
+// the viewer resolves its presentation ids and loads the localized text here at
+// the presentation boundary. Returns false for outcomes that never prompt.
+static bool drop_rejection_ids(oz::viewer::drop_classify_status status,
+                               UINT& headline_id, UINT& detail_id) noexcept;
+static void report_drop_rejection(app_state& app, UINT headline_id, UINT detail_id);
 static void handle_dropped_paths(app_state& app, HDROP hDrop);
 static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& bitmap);
 static void start_paste_from_clipboard(app_state& app);
@@ -494,9 +501,10 @@ static void update_crop_window_title(app_state& app) {
         return;
     }
     const bool active = app.crop.has_value() && app.crop->active;
-    SetWindowTextW(app.hwnd, active
-        ? L"OZ Image Viewer — Crop (Enter: Apply, Esc: Cancel)"
-        : L"OZ Image Viewer");
+    const std::wstring title =
+        active ? oz::viewer::viewer_string(IDS_APP_TITLE_CROP)
+               : oz::viewer::viewer_string(IDS_APP_TITLE);
+    SetWindowTextW(app.hwnd, title.c_str());
 }
 
 static std::optional<oz::viewer::crop_overlay> current_crop_overlay(
@@ -1512,15 +1520,25 @@ static bool check_dirty_discard_allowed(app_state& app) {
     const bool crop_active = app.crop.has_value() && app.crop->active;
     const bool document_dirty = app.image_doc && app.image_doc->is_dirty();
     if (crop_active || document_dirty) {
+        const UINT head_id = (crop_active && !document_dirty)
+                                 ? IDS_DISCARD_HEAD_CROP
+                                 : IDS_DISCARD_HEAD_DIRTY;
+        const UINT body_id = (crop_active && !document_dirty)
+                                 ? IDS_DISCARD_BODY_CROP
+                                 : IDS_DISCARD_BODY_DIRTY;
+        // Fail-closed destructive invariant: required confirmation text must
+        // be available and nonempty, otherwise default safely to cancel.
+        if (!oz::viewer::viewer_confirm_texts_available({IDS_APP_TITLE, head_id, body_id})) {
+            return false;
+        }
+        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        const std::wstring head = oz::viewer::viewer_string(head_id);
+        const std::wstring body = oz::viewer::viewer_string(body_id);
         const auto prompt_rc = oz::viewer::show_prompt(
             app.hwnd,
-            L"OZ Image Viewer",
-            crop_active && !document_dirty
-                ? L"A crop selection is in progress."
-                : L"You have unsaved edits in this document.",
-            crop_active && !document_dirty
-                ? L"Cancel crop and continue?"
-                : L"Discard edits and continue?",
+            title.c_str(),
+            head.c_str(),
+            body.c_str(),
             MB_OKCANCEL,
             MB_ICONWARNING);
         if (prompt_rc != oz::viewer::prompt_result::ok) {
@@ -1647,46 +1665,41 @@ static void update_chrome_status(app_state& app) {
         } else if (!app.initial_path.empty()) {
             info.file_name = app.initial_path.filename().wstring();
         } else {
-            info.file_name = L"Image";
+            info.file_name = oz::viewer::viewer_string(IDS_FALLBACK_IMAGE_NAME);
         }
 
         const auto dims = active_view_dimensions(app);
         if (dims.is_valid()) {
-            wchar_t dim_buf[64];
-            swprintf_s(dim_buf, L"%d × %d", dims.width, dims.height);
-            info.dimensions = dim_buf;
+            info.dimensions = oz::viewer::format_status_dimensions(dims.width, dims.height);
         }
 
         const double zoom_pct = (app.view.scale * 100.0);
-        wchar_t zoom_buf[64];
         if (app.view.mode == oz::viewer_core::view_mode::fit) {
-            swprintf_s(zoom_buf, L"Fit (%.0f%%)", zoom_pct);
+            info.zoom = oz::viewer::format_zoom_fit(zoom_pct);
         } else {
-            swprintf_s(zoom_buf, L"%.0f%%", zoom_pct);
+            info.zoom = oz::viewer::format_zoom_percent(zoom_pct);
         }
-        info.zoom = zoom_buf;
 
         if (!app.nav.empty() && app.nav.active_index().has_value()) {
-            wchar_t nav_buf[64];
-            swprintf_s(nav_buf, L"%zu / %zu", (*app.nav.active_index()) + 1, app.nav.size());
-            info.navigation = nav_buf;
+            info.navigation = oz::viewer::format_nav_position(
+                (*app.nav.active_index()) + 1, app.nav.size());
         }
 
 #if OZVIEWER_ENABLE_EDITING
         if (app.crop.has_value() && app.crop->active) {
-            info.state_label = L"Crop mode";
+            info.state_label = oz::viewer::viewer_string(IDS_STATE_CROP_MODE);
         } else if (app.pending_save.has_value() || (app.save_ctrl && app.save_ctrl->is_active())) {
-            info.state_label = L"Saving...";
+            info.state_label = oz::viewer::viewer_string(IDS_STATE_SAVING);
         } else if (app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active())) {
-            info.state_label = L"Printing...";
+            info.state_label = oz::viewer::viewer_string(IDS_STATE_PRINTING);
         } else if (app.pending_resize.has_value() || app.resize_dlg != nullptr) {
-            info.state_label = L"Resizing...";
+            info.state_label = oz::viewer::viewer_string(IDS_STATE_RESIZING);
         } else if (app.image_doc && app.image_doc->is_dirty()) {
-            info.state_label = L"Modified";
+            info.state_label = oz::viewer::viewer_string(IDS_STATE_MODIFIED);
         }
 #endif
     } else {
-        info.file_name = L"No image open";
+        info.file_name = oz::viewer::viewer_string(IDS_STATUS_NO_IMAGE);
     }
     app.chrome->update_status(info);
 }
@@ -2036,17 +2049,18 @@ static void handle_pending_resize_completion(app_state& app,
     const bool token_matches = comp.request_id == pending.request_id;
 
     if (!token_matches || !document_matches || !revision_matches) {
-        error = L"Resize validation was superseded; no changes were applied.";
+        error = oz::viewer::viewer_string(IDS_RESIZE_ERR_SUPERSEDED);
     } else if (!completion_source_identity_matches(app, pending, comp)) {
-        error = L"The source image changed during resize validation; no changes were applied.";
+        error = oz::viewer::viewer_string(IDS_RESIZE_ERR_SOURCE_CHANGED);
     } else if (!comp.ok) {
-        error = widen_bounded_error(comp.error_detail, L"Resize validation failed.");
+        const std::wstring fallback_err = oz::viewer::viewer_string(IDS_RESIZE_FAILED_GENERIC);
+        error = widen_bounded_error(comp.error_detail, fallback_err.c_str());
     } else if (!comp.result.dimensions.is_valid() || comp.result.dimensions != pending.target) {
-        error = L"Resize validation produced unexpected dimensions; no changes were applied.";
+        error = oz::viewer::viewer_string(IDS_RESIZE_ERR_UNEXPECTED_DIMS);
     } else {
         committed = commit_validated_resize(app, pending, comp);
         if (!committed) {
-            error = L"Resize could not be presented; history was left unchanged.";
+            error = oz::viewer::viewer_string(IDS_RESIZE_ERR_PRESENT_FAILED);
         }
     }
 
@@ -2336,8 +2350,8 @@ static void open_resize_modal_dialog(app_state& app) {
         if (!submit_resize_validation(app, dialog, target)) {
             // Local state changed under the dialog; report through the same
             // two-phase channel instead of leaving Apply pending forever.
-            oz::viewer::notify_resize_dialog_result(
-                dialog, false, L"Resize request could not be submitted.");
+            const std::wstring err = oz::viewer::viewer_string(IDS_RESIZE_ERR_SUBMIT_FAILED);
+            oz::viewer::notify_resize_dialog_result(dialog, false, err);
         }
     };
 
@@ -2364,63 +2378,54 @@ static bool edit_transition_blocked(app_state& app) {
 // worker ASCII diagnostic and is truncated before display.
 static std::wstring save_error_ui_message(oz::viewer_core::save_error error,
                                           const std::string& detail) {
-    const wchar_t* head =
-        L"The image could not be saved. The destination was left unchanged.";
+    UINT head_id = IDS_SAVE_ERR_GENERIC;
     switch (error) {
         case oz::viewer_core::save_error::none:
             return {};
         case oz::viewer_core::save_error::cancelled:
-            head = L"The save was cancelled. No file was written.";
+            head_id = IDS_SAVE_ERR_CANCELLED;
             break;
         case oz::viewer_core::save_error::invalid_request:
-            head = L"The save request was not valid. No file was written.";
+            head_id = IDS_SAVE_ERR_INVALID;
             break;
         case oz::viewer_core::save_error::stale_source:
-            head = L"The source image changed while saving. No file was written.";
+            head_id = IDS_SAVE_ERR_STALE;
             break;
         case oz::viewer_core::save_error::destination_conflict:
-            head = L"The destination file changed or appeared after the save began. "
-                   L"No file was written.";
+            head_id = IDS_SAVE_ERR_CONFLICT;
             break;
         case oz::viewer_core::save_error::materialization_failed:
-            head = L"The edited image could not be prepared for saving. No file was written.";
+            head_id = IDS_SAVE_ERR_MATERIAL;
             break;
         case oz::viewer_core::save_error::alpha_not_supported:
-            head = L"The selected format does not support transparency.\n\n"
-                   L"Use File -> Save As and choose PNG, WebP, or TIFF to keep the alpha channel.";
+            head_id = IDS_SAVE_ERR_ALPHA;
             break;
         case oz::viewer_core::save_error::encoder_unavailable:
-            head = L"The requested image encoder is not available on this system. "
-                   L"No file was written.";
+            head_id = IDS_SAVE_ERR_ENCODER_UNAVAILABLE;
             break;
         case oz::viewer_core::save_error::encoder_configuration_failed:
-            head = L"The image encoder rejected the requested format or quality. "
-                   L"No file was written.";
+            head_id = IDS_SAVE_ERR_ENCODER_CONFIG;
             break;
         case oz::viewer_core::save_error::encode_failed:
-            head = L"Encoding the image failed. No file was written.";
+            head_id = IDS_SAVE_ERR_ENCODE;
             break;
         case oz::viewer_core::save_error::temp_create_failed:
-            head = L"A temporary file could not be created next to the destination. "
-                   L"No file was written.";
+            head_id = IDS_SAVE_ERR_TEMP;
             break;
         case oz::viewer_core::save_error::flush_failed:
-            head = L"The encoded file could not be flushed to disk. No file was written.";
+            head_id = IDS_SAVE_ERR_FLUSH;
             break;
         case oz::viewer_core::save_error::replace_failed:
-            head = L"The encoded file could not be put in place. The destination was left "
-                   L"unchanged.";
+            head_id = IDS_SAVE_ERR_REPLACE;
             break;
         case oz::viewer_core::save_error::commit_state_uncertain:
-            head = L"The save could not be confirmed.\n\n"
-                   L"The destination may have been partially replaced. The document remains "
-                   L"modified; verify the file before continuing.";
+            head_id = IDS_SAVE_ERR_UNCERTAIN;
             break;
         case oz::viewer_core::save_error::cleanup_failed:
-            head = L"The save failed and its temporary file could not be removed.";
+            head_id = IDS_SAVE_ERR_CLEANUP;
             break;
     }
-    std::wstring message(head);
+    std::wstring message = oz::viewer::viewer_string(head_id);
     if (!detail.empty()) {
         message += L"\n\n";
         message += widen_bounded_error(detail, L"");
@@ -2494,22 +2499,25 @@ static void start_save(app_state& app, bool save_as) {
         if (!extension.empty()) {
             const auto selected = oz::viewer_core::save_format_for_extension(extension);
             if (!selected.has_value()) {
+                const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+                const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_EXT_HEAD);
+                const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_EXT_BODY);
                 static_cast<void>(oz::viewer::show_prompt(
                     app.hwnd,
-                    L"OZ Image Viewer",
-                    L"Unsupported output extension.",
-                    L"Supported formats are PNG (.png), JPEG (.jpg/.jpeg), "
-                    L"WebP (.webp), TIFF (.tif/.tiff), and BMP (.bmp).",
+                    title.c_str(),
+                    head.c_str(),
+                    body.c_str(),
                     MB_OK,
                     MB_ICONWARNING));
                 return;  // Never write bytes that do not match the typed extension.
             }
             if (*selected == oz::viewer_core::save_format::webp &&
                 !oz::viewer_core::webp_encoder_available()) {
+                const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
                 const std::wstring msg = save_error_ui_message(
                     oz::viewer_core::save_error::encoder_unavailable,
                     "WebP encoder is not available in this build");
-                static_cast<void>(oz::viewer::show_prompt(app.hwnd, L"OZ Image Viewer", msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
+                static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
                 return;
             }
             format = *selected;
@@ -2521,11 +2529,14 @@ static void start_save(app_state& app, bool save_as) {
         same_source = destination_is_current_source(app, destination);
         if (same_source) {
             if (metadata.codec == oz::viewer_core::codec_id::tiff_wic) {
+                const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+                const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_TIFF_HEAD);
+                const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_TIFF_BODY);
                 static_cast<void>(oz::viewer::show_prompt(
                     app.hwnd,
-                    L"OZ Image Viewer",
-                    L"The selected destination is the current TIFF source file.",
-                    L"TIFF is supported for Save As export copies only. Choose a different file name.",
+                    title.c_str(),
+                    head.c_str(),
+                    body.c_str(),
                     MB_OK,
                     MB_ICONWARNING));
                 return;
@@ -2533,11 +2544,14 @@ static void start_save(app_state& app, bool save_as) {
             const auto source_routing =
                 oz::viewer_core::route_save_request(metadata.codec, true, false);
             if (!source_routing.source_supports_in_place || format != source_routing.format) {
+                const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+                const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_SAMESRC_HEAD);
+                const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_SAMESRC_BODY);
                 static_cast<void>(oz::viewer::show_prompt(
                     app.hwnd,
-                    L"OZ Image Viewer",
-                    L"The selected destination is the current source file.",
-                    L"Choose a different file name or keep the source format.",
+                    title.c_str(),
+                    head.c_str(),
+                    body.c_str(),
                     MB_OK,
                     MB_ICONWARNING));
                 return;
@@ -2549,11 +2563,14 @@ static void start_save(app_state& app, bool save_as) {
         oz::viewer_core::query_file_fingerprint(destination);
     if (same_source) {
         if (!destination_fingerprint.exists) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+            const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_SRCGONE_HEAD);
+            const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_SRCGONE_BODY);
             static_cast<void>(oz::viewer::show_prompt(
                 app.hwnd,
-                L"OZ Image Viewer",
-                L"The source file no longer exists at its recorded location.",
-                L"Use File -> Save As to write a copy.",
+                title.c_str(),
+                head.c_str(),
+                body.c_str(),
                 MB_OK,
                 MB_ICONERROR));
             return;
@@ -2562,10 +2579,11 @@ static void start_save(app_state& app, bool save_as) {
         // occurred after open/last-save before materializing or overwriting.
         const auto& baseline = app.image_doc->source_baseline();
         if (!oz::viewer_core::save_pre_submit_eligible(baseline, destination_fingerprint)) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
             const std::wstring msg = save_error_ui_message(
                 oz::viewer_core::save_error::stale_source,
                 "source file modified or inaccessible on disk before saving");
-            static_cast<void>(oz::viewer::show_prompt(app.hwnd, L"OZ Image Viewer", msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
+            static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
             return;
         }
     }
@@ -2587,11 +2605,14 @@ static void start_save(app_state& app, bool save_as) {
         request.existing_source = app.full_res_source;
     } else {
         if (metadata.source_path.empty()) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+            const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_NOSOURCE_HEAD);
+            const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_NOSOURCE_BODY);
             static_cast<void>(oz::viewer::show_prompt(
                 app.hwnd,
-                L"OZ Image Viewer",
-                L"No source file is available for this image.",
-                L"The image must be opened from a file before it can be saved.",
+                title.c_str(),
+                head.c_str(),
+                body.c_str(),
                 MB_OK,
                 MB_ICONERROR));
             return;
@@ -2599,10 +2620,12 @@ static void start_save(app_state& app, bool save_as) {
         const auto acquisition_fingerprint =
             oz::viewer_core::query_file_fingerprint(metadata.source_path);
         if (!acquisition_fingerprint.exists) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+            const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_SRCGONE_HEAD);
             static_cast<void>(oz::viewer::show_prompt(
                 app.hwnd,
-                L"OZ Image Viewer",
-                L"The source file no longer exists at its recorded location.",
+                title.c_str(),
+                head.c_str(),
                 nullptr,
                 MB_OK,
                 MB_ICONERROR));
@@ -2612,10 +2635,11 @@ static void start_save(app_state& app, bool save_as) {
         if (baseline.valid &&
             (acquisition_fingerprint.file_size != baseline.file_size ||
              acquisition_fingerprint.last_write_time != baseline.last_write_time)) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
             const std::wstring msg = save_error_ui_message(
                 oz::viewer_core::save_error::stale_source,
                 "source file modified or inaccessible on disk before acquisition");
-            static_cast<void>(oz::viewer::show_prompt(app.hwnd, L"OZ Image Viewer", msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
+            static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), msg.c_str(), nullptr, MB_OK, MB_ICONWARNING));
             return;
         }
         request.needs_source_acquisition = true;
@@ -2694,12 +2718,21 @@ static bool resolve_active_save_for_action(app_state& app) {
         return true;
     }
 
+    // Fail-closed invariant for active save resolution: prompt strings must be
+    // present and nonempty, otherwise safely cancel the in-flight save.
+    if (!oz::viewer::viewer_confirm_texts_available({IDS_APP_TITLE, IDS_SAVE_PROMPT_BUSY_HEAD, IDS_SAVE_PROMPT_BUSY_BODY})) {
+        app.save_ctrl->request_cancel();
+        return false;
+    }
+    const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+    const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_BUSY_HEAD);
+    const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_BUSY_BODY);
+
     const auto prompt_rc = oz::viewer::show_prompt(
         app.hwnd,
-        L"OZ Image Viewer",
-        L"A save is still in progress.",
-        L"OK waits for the save to finish before continuing.\n"
-        L"Cancel stops the save. If the replacement step has already begun it cannot be revoked.",
+        title.c_str(),
+        head.c_str(),
+        body.c_str(),
         MB_OKCANCEL,
         MB_ICONWARNING);
     if (prompt_rc == oz::viewer::prompt_result::cancel) {
@@ -2732,11 +2765,14 @@ static bool resolve_active_save_for_action(app_state& app) {
     EnableWindow(app.hwnd, TRUE);
     SetForegroundWindow(app.hwnd);
     if (timed_out) {
+        const std::wstring timeout_title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        const std::wstring timeout_head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_TIMEOUT_HEAD);
+        const std::wstring timeout_body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_TIMEOUT_BODY);
         static_cast<void>(oz::viewer::show_prompt(
             app.hwnd,
-            L"OZ Image Viewer",
-            L"The save did not finish in time.",
-            L"The requested action was not started.",
+            timeout_title.c_str(),
+            timeout_head.c_str(),
+            timeout_body.c_str(),
             MB_OK,
             MB_ICONWARNING));
         return false;
@@ -2782,27 +2818,35 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
         app.image_doc->mark_saved_with_baseline(comp.committed_fingerprint.file_size,
                                                 comp.committed_fingerprint.last_write_time);
         return;
-    case oz::viewer_core::save_completion_action::saved_unverified_baseline:
+    case oz::viewer_core::save_completion_action::saved_unverified_baseline: {
+        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_UNVERIFIED_HEAD);
+        const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_UNVERIFIED_BODY);
         static_cast<void>(oz::viewer::show_prompt(
             app.hwnd,
-            L"OZ Image Viewer",
-            L"The image was saved, but the committed file baseline could not be verified.",
-            L"The document remains modified.",
+            title.c_str(),
+            head.c_str(),
+            body.c_str(),
             MB_OK,
             MB_ICONWARNING));
         return;
-    case oz::viewer_core::save_completion_action::saved_commands_changed:
+    }
+    case oz::viewer_core::save_completion_action::saved_commands_changed: {
         // Defensive: conflicting edits are disabled while saving, so
         // this cannot normally happen. The file was written from the
         // captured snapshot; the document must stay modified.
+        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_DOCCANGED_HEAD);
+        const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_DOCCANGED_BODY);
         static_cast<void>(oz::viewer::show_prompt(
             app.hwnd,
-            L"OZ Image Viewer",
-            L"The image was saved, but the document changed during the save.",
-            L"The document remains modified.",
+            title.c_str(),
+            head.c_str(),
+            body.c_str(),
             MB_OK,
             MB_ICONWARNING));
         return;
+    }
     case oz::viewer_core::save_completion_action::saved_silent:
         return;  // Save As copy is silent and remains dirty.
     case oz::viewer_core::save_completion_action::none:
@@ -2815,7 +2859,8 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
 
     const std::wstring message = save_error_ui_message(comp.error, comp.detail);
     if (!message.empty()) {
-        static_cast<void>(oz::viewer::show_prompt(app.hwnd, L"OZ Image Viewer", message.c_str(), nullptr, MB_OK, MB_ICONWARNING));
+        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), message.c_str(), nullptr, MB_OK, MB_ICONWARNING));
     }
 }
 #endif
@@ -3049,33 +3094,32 @@ static std::wstring widen_bounded_error(const std::string& text, const wchar_t* 
 // user cancellation, and dialog dismissal are quiet (empty message).
 static std::wstring print_error_ui_message(oz::viewer::print_error error,
                                            const std::string& detail) {
-    const wchar_t* head = nullptr;
+    UINT head_id = 0;
     switch (error) {
         case oz::viewer::print_error::none:
         case oz::viewer::print_error::cancelled:
         case oz::viewer::print_error::dialog_cancelled:
             return {};
         case oz::viewer::print_error::invalid_request:
-            head = L"The print request was not valid. Nothing was printed.";
+            head_id = IDS_PRINT_ERR_INVALID;
             break;
         case oz::viewer::print_error::admission_denied:
-            head = L"The image is too large to prepare for printing. Nothing was printed.";
+            head_id = IDS_PRINT_ERR_ADMISSION;
             break;
         case oz::viewer::print_error::acquire_failed:
-            head = L"The source image could not be read for printing. Nothing was printed.";
+            head_id = IDS_PRINT_ERR_ACQUIRE;
             break;
         case oz::viewer::print_error::materialize_failed:
-            head = L"The edited image could not be prepared for printing. Nothing was printed.";
+            head_id = IDS_PRINT_ERR_MATERIALIZE;
             break;
         case oz::viewer::print_error::invalid_caps:
-            head = L"The printer reported an unusable page size. Nothing was printed.";
+            head_id = IDS_PRINT_ERR_CAPS;
             break;
         case oz::viewer::print_error::spool_failed:
-            head = L"The printer did not accept the page. Check the printer queue; "
-                   L"the document is unchanged.";
+            head_id = IDS_PRINT_ERR_SPOOL;
             break;
     }
-    std::wstring message(head);
+    std::wstring message = oz::viewer::viewer_string(head_id);
     if (!detail.empty()) {
         message += L"\n\n";
         message += widen_bounded_error(detail, L"");
@@ -3270,9 +3314,11 @@ static void handle_print_completion(app_state& app,
     const std::wstring message =
         print_error_ui_message(comp.error, comp.detail);
     if (!message.empty() && !noninteractive_mode(app)) {
+        const std::wstring title = oz::viewer::viewer_string(IDS_PRINT_TITLE);
+        const std::wstring content = oz::viewer::viewer_string(IDS_PRINT_UNCHANGED);
         static_cast<void>(oz::viewer::show_prompt(
-            app.hwnd, L"Print", message.c_str(),
-            L"The document is unchanged.", MB_OK, MB_ICONWARNING));
+            app.hwnd, title.c_str(), message.c_str(),
+            content.c_str(), MB_OK, MB_ICONWARNING));
     }
 }
 
@@ -3433,19 +3479,21 @@ static void start_recycle_delete(app_state& app) {
         if (res.status == oz::viewer::recycle_status::cancelled) {
             return;  // Shell-side abort: quiet, everything preserved.
         }
-        const wchar_t* headline = L"Unable to move the file to the Recycle Bin.";
-        const wchar_t* detail =
-            L"Nothing was deleted. The current image is retained.";
+        UINT head_id = IDS_DELETE_HEAD_GENERIC;
+        const UINT detail_id = IDS_DELETE_DETAIL_GENERIC;
         if (res.status == oz::viewer::recycle_status::identity_mismatch) {
-            headline = L"The file changed on disk since it was opened.";
+            head_id = IDS_DELETE_HEAD_IDENTITY;
         } else if (res.status == oz::viewer::recycle_status::not_found) {
-            headline = L"The file is no longer present on disk.";
+            head_id = IDS_DELETE_HEAD_NOTFOUND;
         } else if (res.status == oz::viewer::recycle_status::is_directory ||
                    res.status == oz::viewer::recycle_status::invalid_path) {
-            headline = L"The current document is not a recyclable file.";
+            head_id = IDS_DELETE_HEAD_NOTRECYCLABLE;
         }
+        const std::wstring title = oz::viewer::viewer_string(IDS_DELETE_TITLE);
+        const std::wstring headline = oz::viewer::viewer_string(head_id);
+        const std::wstring detail = oz::viewer::viewer_string(detail_id);
         static_cast<void>(oz::viewer::show_prompt(
-            app.hwnd, L"Delete", headline, detail, MB_OK, MB_ICONWARNING));
+            app.hwnd, title.c_str(), headline.c_str(), detail.c_str(), MB_OK, MB_ICONWARNING));
         return;
     }
 
@@ -3486,10 +3534,13 @@ static void start_recycle_delete(app_state& app) {
             // The file is already recycled but no decode will ever complete
             // this transition: report, then clear rather than display a
             // document whose source no longer exists.
+            const std::wstring title = oz::viewer::viewer_string(IDS_DELETE_TITLE);
+            const std::wstring head = oz::viewer::viewer_string(IDS_DELETE_HEAD_NEXT_FAILED);
+            const std::wstring detail = oz::viewer::viewer_string(IDS_DELETE_DETAIL_NEXT_FAILED);
             static_cast<void>(oz::viewer::show_prompt(
-                app.hwnd, L"Delete",
-                L"The file was moved to the Recycle Bin, but the next image could not be opened.",
-                L"The viewer is busy finishing previous work. The current view was cleared.",
+                app.hwnd, title.c_str(),
+                head.c_str(),
+                detail.c_str(),
                 MB_OK, MB_ICONWARNING));
             enter_recycle_blank_state(app);
         }
@@ -3650,12 +3701,49 @@ static bool open_pasted_document(app_state& app, oz::viewer::clipboard_bitmap&& 
 // current document and its navigation are retained. Benchmark modes never
 // reach here (the WM_DROPFILES handler returns before any drop work), with
 // a shared-predicate guard for defense in depth.
-static void report_drop_rejection(app_state& app, const oz::viewer::drop_reject_text& text) {
+// Stage 10.3: map the dependency-free drop verdict to presentation string ids.
+// These ids resolve through the English STRINGTABLE, falling back to the
+// compiled-in table exactly like every other viewer-owned string. Returns false
+// for outcomes that never prompt (nothing was dropped).
+static bool drop_rejection_ids(oz::viewer::drop_classify_status status,
+                               UINT& headline_id, UINT& detail_id) noexcept {
+    switch (status) {
+        case oz::viewer::drop_classify_status::invalid_entry:
+            headline_id = IDS_DROP_HEAD_INVALID;
+            detail_id = IDS_DROP_DETAIL_INVALID;
+            return true;
+        case oz::viewer::drop_classify_status::mixed:
+            headline_id = IDS_DROP_HEAD_MIXED;
+            detail_id = IDS_DROP_DETAIL_MIXED;
+            return true;
+        case oz::viewer::drop_classify_status::multiple_folders:
+            headline_id = IDS_DROP_HEAD_MULTIFOLDER;
+            detail_id = IDS_DROP_DETAIL_MULTIFOLDER;
+            return true;
+        case oz::viewer::drop_classify_status::overflow:
+            headline_id = IDS_DROP_HEAD_OVERFLOW;
+            detail_id = IDS_DROP_DETAIL_OVERFLOW;
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Owning locals: show_prompt consumes title/headline/detail synchronously; no
+// loaded c_str() pointer is retained past this call.
+static void report_drop_rejection(app_state& app, UINT headline_id, UINT detail_id) {
     if (noninteractive_mode(app)) {
         return;
     }
+    const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+    const std::wstring headline = oz::viewer::viewer_string(headline_id);
+    std::wstring detail;
+    if (detail_id != 0) {
+        detail = oz::viewer::viewer_string(detail_id);
+    }
     static_cast<void>(oz::viewer::show_prompt(
-        app.hwnd, text.title, text.headline, text.detail, MB_OK, MB_ICONWARNING));
+        app.hwnd, title.c_str(), headline.c_str(),
+        detail_id != 0 ? detail.c_str() : nullptr, MB_OK, MB_ICONWARNING));
 }
 
 // Stage 9.6B: open the first supported item of a multi-file drop behind a
@@ -3692,7 +3780,7 @@ static void open_dropped_file_list(app_state& app,
         // complete this stage, so release it and report. The current document
         // and its navigation stay exactly as they were.
         app.staged_drop.reset();
-        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+        report_drop_rejection(app, IDS_DROP_HEAD_BUSY, IDS_DROP_DETAIL_BUSY);
     }
 }
 
@@ -3715,7 +3803,7 @@ static void open_dropped_file_list(app_state& app,
 // reports the same way; the displayed document is retained.
 static void schedule_dropped_folder(app_state& app, const std::filesystem::path& folder) {
     if (!app.enum_workers.can_accept_launch()) {
-        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+        report_drop_rejection(app, IDS_DROP_HEAD_BUSY, IDS_DROP_DETAIL_BUSY);
         return;
     }
 
@@ -3748,7 +3836,7 @@ static void schedule_dropped_folder(app_state& app, const std::filesystem::path&
         // ever complete this stage, so release it and report. The current
         // document and its navigation stay exactly as they were.
         app.staged_drop.reset();
-        report_drop_rejection(app, oz::viewer::describe_drop_overload());
+        report_drop_rejection(app, IDS_DROP_HEAD_BUSY, IDS_DROP_DETAIL_BUSY);
     }
 }
 
@@ -3765,8 +3853,7 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
     }
     if (static_cast<std::size_t>(count) > oz::viewer::kMaxDropEntries) {
         DragFinish(hDrop);
-        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
-            oz::viewer::drop_classify_status::overflow));
+        report_drop_rejection(app, IDS_DROP_HEAD_OVERFLOW, IDS_DROP_DETAIL_OVERFLOW);
         return;
     }
 
@@ -3787,8 +3874,7 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
     }
     DragFinish(hDrop);
     if (!capture_ok) {
-        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
-            oz::viewer::drop_classify_status::invalid_entry));
+        report_drop_rejection(app, IDS_DROP_HEAD_INVALID, IDS_DROP_DETAIL_INVALID);
         return;
     }
 
@@ -3814,8 +3900,10 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
 
         const oz::viewer::drop_classify_result verdict = oz::viewer::classify_drop_paths(entries);
         if (!verdict.ok()) {
-            if (oz::viewer::is_promptable_drop_rejection(verdict.status)) {
-                report_drop_rejection(app, oz::viewer::describe_drop_rejection(verdict.status));
+            UINT drop_head_id = 0;
+            UINT drop_detail_id = 0;
+            if (drop_rejection_ids(verdict.status, drop_head_id, drop_detail_id)) {
+                report_drop_rejection(app, drop_head_id, drop_detail_id);
             }
             return;
         }
@@ -3826,7 +3914,7 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
                     return;
                 }
                 if (!open_new_document(app, verdict.files.front())) {
-                    report_drop_rejection(app, oz::viewer::describe_drop_overload());
+                    report_drop_rejection(app, IDS_DROP_HEAD_BUSY, IDS_DROP_DETAIL_BUSY);
                 }
                 return;
             }
@@ -3834,7 +3922,7 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
                 auto supported = oz::viewer::select_supported_in_drop_order(
                     verdict.files, oz::viewer_core::is_supported_image_extension);
                 if (supported.empty()) {
-                    report_drop_rejection(app, oz::viewer::describe_no_supported_images(false));
+                    report_drop_rejection(app, IDS_DROP_HEAD_FILES_NONE, IDS_DROP_DETAIL_NOTHING);
                     return;
                 }
                 if (!check_dirty_discard_allowed(app)) {
@@ -3854,8 +3942,7 @@ static void handle_dropped_paths(app_state& app, HDROP hDrop) {
                 return;
         }
     } catch (...) {
-        report_drop_rejection(app, oz::viewer::describe_drop_rejection(
-            oz::viewer::drop_classify_status::overflow));
+        report_drop_rejection(app, IDS_DROP_HEAD_OVERFLOW, IDS_DROP_DETAIL_OVERFLOW);
     }
 }
 
@@ -3894,11 +3981,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     if (st.enabled && !app->doc.active_path.empty()) {
                         const auto res = oz::viewer::reveal_file_in_explorer(app->doc.active_path);
                         if (!res.ok() && !noninteractive_mode(*app)) {
+                            // Owning locals: show_prompt copies synchronously.
+                            const std::wstring title = oz::viewer::viewer_string(IDS_OPEN_LOCATION_TITLE);
+                            const std::wstring head = oz::viewer::viewer_string(IDS_OPEN_LOCATION_ERR_HEAD);
+                            const std::wstring body = oz::viewer::viewer_string(IDS_OPEN_LOCATION_ERR_BODY);
                             static_cast<void>(oz::viewer::show_prompt(
                                 app->hwnd,
-                                L"Open File Location",
-                                L"Unable to reveal file in Explorer.",
-                                L"The file may have been moved, renamed, or deleted.",
+                                title.c_str(),
+                                head.c_str(),
+                                body.c_str(),
                                 MB_OK,
                                 MB_ICONWARNING));
                         }
@@ -3913,11 +4004,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     if (st.enabled && !app->doc.active_path.empty()) {
                         const auto res = oz::viewer::copy_file_to_clipboard(app->hwnd, app->doc.active_path);
                         if (!res.ok() && !noninteractive_mode(*app)) {
+                            const std::wstring title = oz::viewer::viewer_string(IDS_COPY_FILE_TITLE);
+                            const std::wstring head = oz::viewer::viewer_string(IDS_COPY_FILE_ERR_HEAD);
+                            const std::wstring body = oz::viewer::viewer_string(IDS_COPY_FILE_ERR_BODY);
                             static_cast<void>(oz::viewer::show_prompt(
                                 app->hwnd,
-                                L"Copy File",
-                                L"Unable to copy file to the clipboard.",
-                                L"The file may have been moved, renamed, deleted, or the clipboard could not be opened.",
+                                title.c_str(),
+                                head.c_str(),
+                                body.c_str(),
                                 MB_OK,
                                 MB_ICONWARNING));
                         }
@@ -3932,11 +4026,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     if (st.enabled && !app->doc.active_path.empty()) {
                         const auto res = oz::viewer::copy_file_path_to_clipboard(app->hwnd, app->doc.active_path);
                         if (!res.ok() && !noninteractive_mode(*app)) {
+                            const std::wstring title = oz::viewer::viewer_string(IDS_COPY_PATH_TITLE);
+                            const std::wstring head = oz::viewer::viewer_string(IDS_COPY_PATH_ERR_HEAD);
+                            const std::wstring body = oz::viewer::viewer_string(IDS_COPY_PATH_ERR_BODY);
                             static_cast<void>(oz::viewer::show_prompt(
                                 app->hwnd,
-                                L"Copy File Path",
-                                L"Unable to copy file path to the clipboard.",
-                                L"The file may have been moved, renamed, deleted, or the clipboard could not be opened.",
+                                title.c_str(),
+                                head.c_str(),
+                                body.c_str(),
                                 MB_OK,
                                 MB_ICONWARNING));
                         }
@@ -4640,13 +4737,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 app->staged_drop->generation == enum_gen) {
                 if (!list || list->empty()) {
                     app->staged_drop.reset();
-                    report_drop_rejection(*app, oz::viewer::describe_no_supported_images(true));
+                    report_drop_rejection(*app, IDS_DROP_HEAD_FOLDER_EMPTY, IDS_DROP_DETAIL_NOTHING);
                     return 0;
                 }
                 const std::filesystem::path* first_item = list->at(0);
                 if (first_item == nullptr) {
                     app->staged_drop.reset();
-                    report_drop_rejection(*app, oz::viewer::describe_no_supported_images(true));
+                    report_drop_rejection(*app, IDS_DROP_HEAD_FOLDER_EMPTY, IDS_DROP_DETAIL_NOTHING);
                     return 0;
                 }
                 const std::filesystem::path first_path = *first_item;
@@ -4671,7 +4768,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     // ever complete this stage, so release it and report. The
                     // current document and its navigation stay as they were.
                     app->staged_drop.reset();
-                    report_drop_rejection(*app, oz::viewer::describe_drop_overload());
+                    report_drop_rejection(*app, IDS_DROP_HEAD_BUSY, IDS_DROP_DETAIL_BUSY);
                 }
                 return 0;
             }
@@ -4737,11 +4834,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         PostQuitMessage(1);
                         return 0;
                     } else {
+                        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+                        const std::wstring head = oz::viewer::viewer_string(IDS_OPEN_IMAGE_ERR_HEAD);
+                        const std::wstring body = oz::viewer::viewer_string(IDS_OPEN_IMAGE_ERR_BODY);
                         static_cast<void>(oz::viewer::show_prompt(
                             hwnd,
-                            L"OZ Image Viewer",
-                            L"Unable to open image.",
-                            L"Unsupported or corrupted image format.",
+                            title.c_str(),
+                            head.c_str(),
+                            body.c_str(),
                             MB_OK,
                             MB_ICONERROR));
                         // If we already had an image, keep it! Do not quit or destroy existing state.
@@ -4789,10 +4889,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                             PostQuitMessage(1);
                             return 0;
                         } else {
+                            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+                            const std::wstring head = oz::viewer::viewer_string(IDS_DISPLAY_IMAGE_ERR_HEAD);
                             static_cast<void>(oz::viewer::show_prompt(
                                 hwnd,
-                                L"OZ Image Viewer",
-                                L"Unable to display image.",
+                                title.c_str(),
+                                head.c_str(),
                                 nullptr,
                                 MB_OK,
                                 MB_ICONERROR));
@@ -5047,11 +5149,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
                 if (!comp.ok) {
                     if (!noninteractive_mode(*app)) {
+                        const std::wstring title = oz::viewer::viewer_string(IDS_COPY_IMAGE_TITLE);
+                        const std::wstring head = oz::viewer::viewer_string(IDS_COPY_IMAGE_ERR_HEAD);
+                        const std::wstring body = oz::viewer::viewer_string(IDS_COPY_IMAGE_ERR_BODY_DECODE);
                         static_cast<void>(oz::viewer::show_prompt(
                             app->hwnd,
-                            L"Copy Image",
-                            L"Unable to copy image to the clipboard.",
-                            L"The source image could not be decoded or materialized.",
+                            title.c_str(),
+                            head.c_str(),
+                            body.c_str(),
                             MB_OK,
                             MB_ICONWARNING));
                     }
@@ -5064,11 +5169,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         comp.dimensions.height,
                         comp.stride);
                     if (!res.ok() && !noninteractive_mode(*app)) {
+                        const std::wstring title = oz::viewer::viewer_string(IDS_COPY_IMAGE_TITLE);
+                        const std::wstring head = oz::viewer::viewer_string(IDS_COPY_IMAGE_ERR_HEAD);
+                        const std::wstring body = oz::viewer::viewer_string(IDS_COPY_IMAGE_ERR_BODY_CLIPBOARD);
                         static_cast<void>(oz::viewer::show_prompt(
                             app->hwnd,
-                            L"Copy Image",
-                            L"Unable to copy image to the clipboard.",
-                            L"The clipboard could not be opened or memory allocation failed.",
+                            title.c_str(),
+                            head.c_str(),
+                            body.c_str(),
                             MB_OK,
                             MB_ICONWARNING));
                     }
@@ -5315,14 +5423,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         benchmark = true;
         path_str = argv[2];
     } else {
-        MessageBoxW(nullptr, L"usage: ozviewer.exe [image]\n"
-                             L"       ozviewer.exe --benchmark <image>\n"
-                             L"       ozviewer.exe --navigation-benchmark --corpus <dir> --out <file.jsonl> [options]\n"
-                             L"Supported: JPEG (.jpg/.jpeg), PNG (.png), static WebP (.webp) when enabled,\n"
-                             L"static AVIF (.avif) when enabled, static HEIC/HEIF (.heic/.heif) when enabled/loaded,\n"
-                             L"Phase A: BMP (.bmp), static GIF (.gif), classic TIFF page 0 (.tif/.tiff), ICO (.ico),\n"
-                             L"Phase B: CUR (.cur), TGA (.tga).",
-                    L"OZ Image Viewer", MB_OK | MB_ICONINFORMATION);
+        const std::wstring usage_body = oz::viewer::viewer_string(IDS_USAGE_BODY);
+        const std::wstring usage_title = oz::viewer::viewer_string(IDS_APP_TITLE);
+        MessageBoxW(nullptr, usage_body.c_str(), usage_title.c_str(), MB_OK | MB_ICONINFORMATION);
         LocalFree(argv);
         return 2;
     }
@@ -5390,56 +5493,92 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
 #endif
     if (!benchmark && !nav_benchmark) {
         hFileMenu = CreatePopupMenu();
-        AppendMenuW(hFileMenu, MF_STRING, kIdFileOpen, L"&Open...\tCtrl+O");
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileOpenLocation,
-                    L"Open File &Location");
+        const std::wstring m_open = oz::viewer::viewer_string(IDS_MENU_FILE_OPEN);
+        const std::wstring m_open_loc = oz::viewer::viewer_string(IDS_MENU_FILE_OPEN_LOCATION);
+        const std::wstring m_copy_img = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_IMAGE);
+        const std::wstring m_copy_file = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_FILE);
+        const std::wstring m_copy_path = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_PATH);
+        const std::wstring m_delete = oz::viewer::viewer_string(IDS_MENU_FILE_DELETE);
+        const std::wstring m_print = oz::viewer::viewer_string(IDS_MENU_FILE_PRINT);
+
+        AppendMenuW(hFileMenu, MF_STRING, kIdFileOpen, m_open.c_str());
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileOpenLocation, m_open_loc.c_str());
         AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyImage, L"Copy &Image\tCtrl+C");
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopy, L"Copy &File");
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyPath, L"Copy File &Path");
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileDelete, L"&Delete\tDel");
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyImage, m_copy_img.c_str());
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopy, m_copy_file.c_str());
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyPath, m_copy_path.c_str());
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileDelete, m_delete.c_str());
         AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFilePrint, L"&Print...\tCtrl+P");
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFilePrint, m_print.c_str()); // kIdFilePrint, L"&Print...\tCtrl+P"
 #if OZVIEWER_ENABLE_EDITING
         // Save/Save As exist only in interactive editing mode; benchmark mode
         // creates no menu at all.
+        const std::wstring m_save = oz::viewer::viewer_string(IDS_MENU_FILE_SAVE);
+        const std::wstring m_save_as = oz::viewer::viewer_string(IDS_MENU_FILE_SAVE_AS);
         AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSave, L"&Save\tCtrl+S");
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSaveAs,
-                    L"Save &As...\tCtrl+Shift+S");
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSave, m_save.c_str());
+        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSaveAs, m_save_as.c_str());
 #endif
         hMenu = CreateMenu();
-        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hFileMenu), L"&File");
+        const std::wstring m_file_popup = oz::viewer::viewer_string(IDS_MENU_FILE_POPUP);
+        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hFileMenu), m_file_popup.c_str());
 
 #if OZVIEWER_ENABLE_EDITING
         hEditMenu = CreatePopupMenu();
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditUndo, L"&Undo\tCtrl+Z");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRedo, L"&Redo\tCtrl+Y");
+        const std::wstring m_undo = oz::viewer::viewer_string(IDS_MENU_EDIT_UNDO);
+        const std::wstring m_redo = oz::viewer::viewer_string(IDS_MENU_EDIT_REDO);
+        const std::wstring m_rot_l = oz::viewer::viewer_string(IDS_MENU_EDIT_ROTATE_LEFT);
+        const std::wstring m_rot_r = oz::viewer::viewer_string(IDS_MENU_EDIT_ROTATE_RIGHT);
+        const std::wstring m_flip_h = oz::viewer::viewer_string(IDS_MENU_EDIT_FLIP_H);
+        const std::wstring m_flip_v = oz::viewer::viewer_string(IDS_MENU_EDIT_FLIP_V);
+        const std::wstring m_crop = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP);
+        const std::wstring m_resize = oz::viewer::viewer_string(IDS_MENU_EDIT_RESIZE);
+        const std::wstring m_crop_apply = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_APPLY);
+        const std::wstring m_crop_cancel = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_CANCEL);
+        const std::wstring m_crop_reset = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_RESET);
+
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditUndo, m_undo.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRedo, m_redo.c_str());
         AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateLeft, L"Rotate &Left\tCtrl+L");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateRight, L"Rotate &Right\tCtrl+R");
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateLeft, m_rot_l.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateRight, m_rot_r.c_str());
         AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipH, L"Flip &Horizontal\tCtrl+Shift+H");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipV, L"Flip &Vertical\tCtrl+Shift+V");
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipH, m_flip_h.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipV, m_flip_v.c_str());
         AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCrop, L"&Crop...\tC");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditResize, L"&Resize...\tCtrl+Alt+R");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropApply, L"Apply Crop\tEnter");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropCancel, L"Cancel Crop\tEsc");
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropReset, L"Reset Crop\tR");
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCrop, m_crop.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditResize, m_resize.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropApply, m_crop_apply.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropCancel, m_crop_cancel.c_str());
+        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropReset, m_crop_reset.c_str());
+
         hCropRatioMenu = CreatePopupMenu();
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioFree, L"&Free");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioOriginal, L"&Original");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio1x1, L"1:&1");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio3x2, L"3:2");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio4x3, L"4:3");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio5x4, L"5:4");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio16x9, L"16:9");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio9x16, L"9:16");
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioASeries, L"A-series");
+        const std::wstring m_r_free = oz::viewer::viewer_string(IDS_MENU_RATIO_FREE);
+        const std::wstring m_r_orig = oz::viewer::viewer_string(IDS_MENU_RATIO_ORIGINAL);
+        const std::wstring m_r_1x1 = oz::viewer::viewer_string(IDS_MENU_RATIO_1X1);
+        const std::wstring m_r_3x2 = oz::viewer::viewer_string(IDS_MENU_RATIO_3X2);
+        const std::wstring m_r_4x3 = oz::viewer::viewer_string(IDS_MENU_RATIO_4X3);
+        const std::wstring m_r_5x4 = oz::viewer::viewer_string(IDS_MENU_RATIO_5X4);
+        const std::wstring m_r_16x9 = oz::viewer::viewer_string(IDS_MENU_RATIO_16X9);
+        const std::wstring m_r_9x16 = oz::viewer::viewer_string(IDS_MENU_RATIO_9X16);
+        const std::wstring m_r_aseries = oz::viewer::viewer_string(IDS_MENU_RATIO_ASERIES);
+
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioFree, m_r_free.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioOriginal, m_r_orig.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio1x1, m_r_1x1.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio3x2, m_r_3x2.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio4x3, m_r_4x3.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio5x4, m_r_5x4.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio16x9, m_r_16x9.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio9x16, m_r_9x16.c_str());
+        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioASeries, m_r_aseries.c_str());
+
+        const std::wstring m_ratio_popup = oz::viewer::viewer_string(IDS_MENU_EDIT_RATIO_POPUP);
         AppendMenuW(hEditMenu, MF_POPUP | MF_GRAYED,
-                    reinterpret_cast<UINT_PTR>(hCropRatioMenu), L"Crop &Ratio");
-        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hEditMenu), L"&Edit");
+                    reinterpret_cast<UINT_PTR>(hCropRatioMenu), m_ratio_popup.c_str());
+
+        const std::wstring m_edit_popup = oz::viewer::viewer_string(IDS_MENU_EDIT_POPUP);
+        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hEditMenu), m_edit_popup.c_str());
 #endif
     }
 
@@ -5456,7 +5595,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         app.initial_path = std::filesystem::path(path_str);
     }
 
-    app.hwnd = CreateWindowExW(0, kClassName, L"OZ Image Viewer", WS_OVERLAPPEDWINDOW,
+    // CreateWindowExW copies the title synchronously, so the owning local is sufficient.
+    const std::wstring initial_title = oz::viewer::viewer_string(IDS_APP_TITLE);
+    app.hwnd = CreateWindowExW(0, kClassName, initial_title.c_str(), WS_OVERLAPPEDWINDOW,
                                CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, nullptr, hMenu,
                                wc.hInstance, &app);
 
@@ -5472,7 +5613,8 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         DragAcceptFiles(app.hwnd, TRUE);
 
         // Minimal native Open button for zero-arg / no-image window
-        app.btn_open = CreateWindowExW(0, L"BUTTON", L"Open Image...",
+        const std::wstring btn_open_text = oz::viewer::viewer_string(IDS_OPEN_BUTTON);
+        app.btn_open = CreateWindowExW(0, L"BUTTON", btn_open_text.c_str(),
                                        WS_CHILD | BS_PUSHBUTTON,
                                        0, 0, 160, 44,
                                        app.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnOpen)),

@@ -1,6 +1,8 @@
 // oz/viewer/modern_dialogs.cpp - Native modern file and task dialog adapters implementation.
 #include "modern_dialogs.hpp"
 
+#include "viewer_strings.hpp"
+
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shobjidl.h>
@@ -28,27 +30,28 @@ std::vector<open_filter_entry> get_supported_open_filters() noexcept {
 #endif
     all_spec += L";*.bmp;*.gif;*.tif;*.tiff;*.ico;*.cur;*.tga";
 
-    filters.push_back({L"All Supported Images", all_spec});
+    filters.push_back({viewer_string(IDS_FILTER_ALL_SUPPORTED), all_spec});
 
-    // Individual format categories
-    filters.push_back({L"JPEG Images (*.jpg;*.jpeg)", L"*.jpg;*.jpeg"});
-    filters.push_back({L"PNG Images (*.png)", L"*.png"});
+    // Individual format categories (display names are localized presentation;
+    // specs/patterns stay fixed non-display literals).
+    filters.push_back({viewer_string(IDS_FILTER_JPEG_OPEN), L"*.jpg;*.jpeg"});
+    filters.push_back({viewer_string(IDS_FILTER_PNG_OPEN), L"*.png"});
 #if OZVIEWER_HAVE_WEBP
-    filters.push_back({L"WebP Images (*.webp)", L"*.webp"});
+    filters.push_back({viewer_string(IDS_FILTER_WEBP_OPEN), L"*.webp"});
 #endif
 #if OZVIEWER_HAVE_AVIF
-    filters.push_back({L"AVIF Images (*.avif)", L"*.avif"});
+    filters.push_back({viewer_string(IDS_FILTER_AVIF_OPEN), L"*.avif"});
 #endif
 #if OZVIEWER_HAVE_HEIC
-    filters.push_back({L"HEIC Images (*.heic;*.heif)", L"*.heic;*.heif"});
+    filters.push_back({viewer_string(IDS_FILTER_HEIC_OPEN), L"*.heic;*.heif"});
 #endif
-    filters.push_back({L"BMP Images (*.bmp)", L"*.bmp"});
-    filters.push_back({L"GIF Images (*.gif)", L"*.gif"});
-    filters.push_back({L"TIFF Images (*.tif;*.tiff)", L"*.tif;*.tiff"});
-    filters.push_back({L"Icon Files (*.ico)", L"*.ico"});
-    filters.push_back({L"Cursor Files (*.cur)", L"*.cur"});
-    filters.push_back({L"TGA Images (*.tga)", L"*.tga"});
-    filters.push_back({L"All Files (*.*)", L"*.*"});
+    filters.push_back({viewer_string(IDS_FILTER_BMP_OPEN), L"*.bmp"});
+    filters.push_back({viewer_string(IDS_FILTER_GIF_OPEN), L"*.gif"});
+    filters.push_back({viewer_string(IDS_FILTER_TIFF_OPEN), L"*.tif;*.tiff"});
+    filters.push_back({viewer_string(IDS_FILTER_ICO_OPEN), L"*.ico"});
+    filters.push_back({viewer_string(IDS_FILTER_CUR_OPEN), L"*.cur"});
+    filters.push_back({viewer_string(IDS_FILTER_TGA_OPEN), L"*.tga"});
+    filters.push_back({viewer_string(IDS_FILTER_ALL_FILES), L"*.*"});
 
     return filters;
 }
@@ -140,17 +143,25 @@ save_as_dialog_result show_legacy_save_dialog(
         filter.push_back(L'\0');
     };
 
-    append_filter(L"PNG (*.png)", L"*.png");
+    // Owning locals: append_filter copies each display/spec pair
+    // synchronously into the double-null-terminated buffer.
+    const std::wstring legacy_png = viewer_string(IDS_SAVE_FILTER_PNG);
+    const std::wstring legacy_jpeg = viewer_string(IDS_SAVE_FILTER_JPEG);
+    const std::wstring legacy_webp = viewer_string(IDS_SAVE_FILTER_WEBP);
+    const std::wstring legacy_tiff = viewer_string(IDS_SAVE_FILTER_TIFF);
+    const std::wstring legacy_bmp = viewer_string(IDS_SAVE_FILTER_BMP);
+
+    append_filter(legacy_png.c_str(), L"*.png");
     filter_formats.push_back(oz::viewer_core::save_format::png);
-    append_filter(L"JPEG (*.jpg;*.jpeg)", L"*.jpg;*.jpeg");
+    append_filter(legacy_jpeg.c_str(), L"*.jpg;*.jpeg");
     filter_formats.push_back(oz::viewer_core::save_format::jpeg);
     if (webp_encoder_available) {
-        append_filter(L"WebP (*.webp)", L"*.webp");
+        append_filter(legacy_webp.c_str(), L"*.webp");
         filter_formats.push_back(oz::viewer_core::save_format::webp);
     }
-    append_filter(L"TIFF (*.tif;*.tiff)", L"*.tif;*.tiff");
+    append_filter(legacy_tiff.c_str(), L"*.tif;*.tiff");
     filter_formats.push_back(oz::viewer_core::save_format::tiff);
-    append_filter(L"BMP (*.bmp)", L"*.bmp");
+    append_filter(legacy_bmp.c_str(), L"*.bmp");
     filter_formats.push_back(oz::viewer_core::save_format::bmp);
     filter.push_back(L'\0');
 
@@ -218,7 +229,8 @@ std::optional<std::filesystem::path> show_open_image_dialog(HWND parent) {
 
     dialog->SetFileTypes(static_cast<UINT>(specs.size()), specs.data());
     dialog->SetFileTypeIndex(1);
-    dialog->SetTitle(L"Open Image");
+    const std::wstring open_title = viewer_string(IDS_OPEN_TITLE);
+    dialog->SetTitle(open_title.c_str());
 
     hr = dialog->Show(parent);
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
@@ -285,21 +297,30 @@ save_as_dialog_result show_save_as_dialog(
     std::vector<COMDLG_FILTERSPEC> filters;
     std::vector<oz::viewer_core::save_format> filter_formats;
 
-    filters.push_back({L"PNG Image (*.png)", L"*.png"});
+    // Display names are localized presentation; specs stay fixed literals.
+    // Owning locals: COMDLG_FILTERSPEC only borrows the pointers for the
+    // synchronous SetFileTypes call below.
+    const std::wstring save_png = viewer_string(IDS_SAVE_IMAGE_FILTER_PNG);
+    const std::wstring save_jpeg = viewer_string(IDS_SAVE_IMAGE_FILTER_JPEG);
+    const std::wstring save_webp = viewer_string(IDS_SAVE_IMAGE_FILTER_WEBP);
+    const std::wstring save_tiff = viewer_string(IDS_SAVE_IMAGE_FILTER_TIFF);
+    const std::wstring save_bmp = viewer_string(IDS_SAVE_IMAGE_FILTER_BMP);
+
+    filters.push_back({save_png.c_str(), L"*.png"});
     filter_formats.push_back(oz::viewer_core::save_format::png);
 
-    filters.push_back({L"JPEG Image (*.jpg;*.jpeg)", L"*.jpg;*.jpeg"});
+    filters.push_back({save_jpeg.c_str(), L"*.jpg;*.jpeg"});
     filter_formats.push_back(oz::viewer_core::save_format::jpeg);
 
     if (webp_encoder_available) {
-        filters.push_back({L"WebP Image (*.webp)", L"*.webp"});
+        filters.push_back({save_webp.c_str(), L"*.webp"});
         filter_formats.push_back(oz::viewer_core::save_format::webp);
     }
 
-    filters.push_back({L"TIFF Image (*.tif;*.tiff)", L"*.tif;*.tiff"});
+    filters.push_back({save_tiff.c_str(), L"*.tif;*.tiff"});
     filter_formats.push_back(oz::viewer_core::save_format::tiff);
 
-    filters.push_back({L"BMP Image (*.bmp)", L"*.bmp"});
+    filters.push_back({save_bmp.c_str(), L"*.bmp"});
     filter_formats.push_back(oz::viewer_core::save_format::bmp);
 
     dialog->SetFileTypes(static_cast<UINT>(filters.size()), filters.data());
@@ -311,7 +332,8 @@ save_as_dialog_result show_save_as_dialog(
         dialog->SetFileName(stem.c_str());
     }
 
-    dialog->SetTitle(L"Save Image As");
+    const std::wstring save_title = viewer_string(IDS_SAVE_TITLE);
+    dialog->SetTitle(save_title.c_str());
 
     hr = dialog->Show(parent);
     save_as_dialog_result res{};
@@ -380,10 +402,13 @@ prompt_result show_prompt(
             GetProcAddress(hComCtl, "TaskDialogIndirect"));
 
         if (pfnTaskDialogIndirect) {
+            // The dialog manager copies title/instruction/content
+            // synchronously, so owning locals cover this call.
+            const std::wstring fallback_title = viewer_string(IDS_APP_TITLE);
             TASKDIALOGCONFIG tc{sizeof(TASKDIALOGCONFIG)};
             tc.hwndParent = parent;
             tc.hInstance = GetModuleHandleW(nullptr);
-            tc.pszWindowTitle = title ? title : L"OZ Image Viewer";
+            tc.pszWindowTitle = title ? title : fallback_title.c_str();
             tc.pszMainInstruction = main_instruction;
             tc.pszContent = content;
 
@@ -436,10 +461,11 @@ prompt_result show_prompt(
         combined = content;
     }
 
+    const std::wstring msg_title = viewer_string(IDS_APP_TITLE);
     const int msg_rc = MessageBoxW(
         parent,
         combined.c_str(),
-        title ? title : L"OZ Image Viewer",
+        title ? title : msg_title.c_str(),
         buttons | icon);
 
     switch (msg_rc) {

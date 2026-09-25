@@ -1,6 +1,8 @@
 // oz/viewer/context_menu.cpp - testable pure context-menu plan seam implementation (Stage 9.2).
 #include "context_menu.hpp"
 
+#include "viewer_strings.hpp"
+
 namespace oz::viewer {
 
 context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) {
@@ -20,7 +22,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item fit_item;
     fit_item.type = context_menu_item_type::command;
     fit_item.command_id = static_cast<int>(ui_command_id::view_fit);
-    fit_item.text = L"Fit to Window\tF";
+    fit_item.text = viewer_string(IDS_CTX_FIT);
     fit_item.enabled = fit_st.enabled;
     fit_item.checked = fit_st.checked;
     plan.items.push_back(std::move(fit_item));
@@ -30,7 +32,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item actual_item;
     actual_item.type = context_menu_item_type::command;
     actual_item.command_id = static_cast<int>(ui_command_id::view_actual_size);
-    actual_item.text = L"Actual Size\t1";
+    actual_item.text = viewer_string(IDS_CTX_ACTUAL);
     actual_item.enabled = actual_st.enabled;
     actual_item.checked = actual_st.checked;
     plan.items.push_back(std::move(actual_item));
@@ -51,7 +53,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item copy_img_item;
     copy_img_item.type = context_menu_item_type::command;
     copy_img_item.command_id = static_cast<int>(ui_command_id::file_copy_image);
-    copy_img_item.text = L"Copy Image\tCtrl+C";
+    copy_img_item.text = viewer_string(IDS_CTX_COPY_IMAGE);
     copy_img_item.enabled = copy_img_st.enabled;
     copy_img_item.checked = false;
     plan.items.push_back(std::move(copy_img_item));
@@ -61,7 +63,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item copy_file_item;
     copy_file_item.type = context_menu_item_type::command;
     copy_file_item.command_id = static_cast<int>(ui_command_id::file_copy);
-    copy_file_item.text = L"Copy File";
+    copy_file_item.text = viewer_string(IDS_CTX_COPY_FILE);
     copy_file_item.enabled = copy_file_st.enabled;
     copy_file_item.checked = false;
     plan.items.push_back(std::move(copy_file_item));
@@ -71,7 +73,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item copy_path_item;
     copy_path_item.type = context_menu_item_type::command;
     copy_path_item.command_id = static_cast<int>(ui_command_id::file_copy_path);
-    copy_path_item.text = L"Copy File Path";
+    copy_path_item.text = viewer_string(IDS_CTX_COPY_PATH);
     copy_path_item.enabled = copy_path_st.enabled;
     copy_path_item.checked = false;
     plan.items.push_back(std::move(copy_path_item));
@@ -81,7 +83,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item open_loc_item;
     open_loc_item.type = context_menu_item_type::command;
     open_loc_item.command_id = static_cast<int>(ui_command_id::file_open_location);
-    open_loc_item.text = L"Open File Location";
+    open_loc_item.text = viewer_string(IDS_CTX_OPEN_LOCATION);
     open_loc_item.enabled = open_loc_st.enabled;
     open_loc_item.checked = false;
     plan.items.push_back(std::move(open_loc_item));
@@ -91,7 +93,7 @@ context_menu_plan build_canvas_context_menu_plan(const ui_command_context& ctx) 
     context_menu_item delete_item;
     delete_item.type = context_menu_item_type::command;
     delete_item.command_id = static_cast<int>(ui_command_id::file_delete);
-    delete_item.text = L"Delete\tDel";
+    delete_item.text = viewer_string(IDS_CTX_DELETE);
     delete_item.enabled = delete_st.enabled;
     delete_item.checked = false;
     plan.items.push_back(std::move(delete_item));

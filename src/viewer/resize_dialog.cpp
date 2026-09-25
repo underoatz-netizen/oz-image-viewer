@@ -14,6 +14,7 @@
 //   target or nullopt; the dialog never mutates edit history or image state.
 #include "resize_dialog.hpp"
 #include "ui_theme.hpp"
+#include "viewer_strings.hpp"
 
 #include <windowsx.h>  // Button_SetCheck / Button_GetCheck
 
@@ -297,9 +298,8 @@ void update_dialog_state(dialog_state& st, int driver_ctrl_id, bool emit_preview
     st.calculated = result;
 
     if (result.has_value()) {
-        wchar_t out[64]{};
-        swprintf_s(out, L"Output: %d \u00D7 %d", result->width, result->height);
-        SetWindowTextW(st.txt_output, out);
+        const std::wstring out = format_output_dimensions(result->width, result->height);
+        SetWindowTextW(st.txt_output, out.c_str());
         EnableWindow(st.btn_apply, st.pending ? FALSE : TRUE);
         if (emit_preview && st.preview_cb) {
             if (*result == st.initial) {
@@ -309,7 +309,8 @@ void update_dialog_state(dialog_state& st, int driver_ctrl_id, bool emit_preview
             }
         }
     } else {
-        SetWindowTextW(st.txt_output, L"Output: invalid");
+        const std::wstring out_invalid = viewer_string(IDS_OUTPUT_INVALID);
+        SetWindowTextW(st.txt_output, out_invalid.c_str());
         EnableWindow(st.btn_apply, FALSE);
     }
 
@@ -351,12 +352,12 @@ void handle_apply(dialog_state& st) {
         return;
     }
     if (!st.apply_cb) {
-        set_status_text(st, L"Resize is unavailable in this build.", true);
+        set_status_text(st, viewer_string(IDS_RESIZE_UNAVAILABLE), true);
         return;
     }
 
     st.pending = true;
-    set_status_text(st, L"Validating resize...", false);
+    set_status_text(st, viewer_string(IDS_RESIZE_VALIDATING), false);
     set_pending_controls(st, true);
     // The displayed draft must match the single in-flight validation target.
     if (st.preview_cb) {
@@ -396,49 +397,62 @@ INT_PTR CALLBACK resize_dialog_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), FALSE);
             }
 
-            create_control(hwnd, L"BUTTON", L"Unit", BS_GROUPBOX,
+            const std::wstring s_unit = viewer_string(IDS_RESIZE_UNIT);
+            const std::wstring s_pixels = viewer_string(IDS_RESIZE_PIXELS);
+            const std::wstring s_percent = viewer_string(IDS_RESIZE_PERCENT);
+            const std::wstring s_dims = viewer_string(IDS_RESIZE_DIMENSIONS);
+            const std::wstring s_width = viewer_string(IDS_RESIZE_WIDTH);
+            const std::wstring s_height = viewer_string(IDS_RESIZE_HEIGHT);
+            const std::wstring s_scale = viewer_string(IDS_RESIZE_SCALE);
+            const std::wstring s_aspect = viewer_string(IDS_RESIZE_ASPECT);
+            const std::wstring s_out_dash = viewer_string(IDS_OUTPUT_DASH);
+            const std::wstring s_apply = viewer_string(IDS_RESIZE_APPLY);
+            const std::wstring s_cancel = viewer_string(IDS_RESIZE_CANCEL);
+            const std::wstring s_reset = viewer_string(IDS_RESIZE_RESET);
+
+            create_control(hwnd, L"BUTTON", s_unit.c_str(), BS_GROUPBOX,
                            7, 5, 193, 27, 0);
-            st->rb_pixels = create_control(hwnd, L"BUTTON", L"&Pixels",
+            st->rb_pixels = create_control(hwnd, L"BUTTON", s_pixels.c_str(),
                                            BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,
                                            13, 16, 52, 12, kIdRadioPixels);
-            st->rb_percent = create_control(hwnd, L"BUTTON", L"Per&cent",
+            st->rb_percent = create_control(hwnd, L"BUTTON", s_percent.c_str(),
                                             BS_AUTORADIOBUTTON | WS_TABSTOP,
                                             72, 16, 64, 12, kIdRadioPercent);
 
-            create_control(hwnd, L"BUTTON", L"Dimensions", BS_GROUPBOX,
+            create_control(hwnd, L"BUTTON", s_dims.c_str(), BS_GROUPBOX,
                            7, 36, 193, 64, 0);
-            create_control(hwnd, L"STATIC", L"&Width:", SS_RIGHT,
+            create_control(hwnd, L"STATIC", s_width.c_str(), SS_RIGHT,
                            10, 47, 40, 10, 0);
             st->edit_w = create_control(hwnd, L"EDIT", L"",
                                         WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL | ES_LEFT,
                                         53, 45, 52, 13, kIdEditWidth);
-            create_control(hwnd, L"STATIC", L"&Height:", SS_RIGHT,
+            create_control(hwnd, L"STATIC", s_height.c_str(), SS_RIGHT,
                            109, 47, 32, 10, 0);
             st->edit_h = create_control(hwnd, L"EDIT", L"",
                                         WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL | ES_LEFT,
                                         144, 45, 52, 13, kIdEditHeight);
-            create_control(hwnd, L"STATIC", L"Scale %:", SS_RIGHT,
+            create_control(hwnd, L"STATIC", s_scale.c_str(), SS_RIGHT,
                            10, 63, 40, 10, 0);
             // No ES_NUMBER here: the parser accepts fractional percentages.
             st->edit_pct = create_control(hwnd, L"EDIT", L"",
                                           WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
                                           53, 61, 52, 13, kIdEditPercent);
-            st->chk_aspect = create_control(hwnd, L"BUTTON", L"Maintain &aspect ratio",
+            st->chk_aspect = create_control(hwnd, L"BUTTON", s_aspect.c_str(),
                                             BS_AUTOCHECKBOX | WS_TABSTOP,
                                             13, 80, 170, 11, kIdCheckAspect);
 
-            st->txt_output = create_control(hwnd, L"STATIC", L"Output: -",
+            st->txt_output = create_control(hwnd, L"STATIC", s_out_dash.c_str(),
                                             SS_LEFT, 13, 104, 180, 10, kIdStaticOutput);
             st->txt_status = create_control(hwnd, L"STATIC", L"",
                                             SS_LEFT, 13, 118, 180, 20, kIdStaticStatus);
 
-            st->btn_apply = create_control(hwnd, L"BUTTON", L"Apply",
+            st->btn_apply = create_control(hwnd, L"BUTTON", s_apply.c_str(),
                                            BS_DEFPUSHBUTTON | WS_TABSTOP,
                                            207, 12, 60, 14, IDOK);
-            st->btn_cancel = create_control(hwnd, L"BUTTON", L"Cancel",
+            st->btn_cancel = create_control(hwnd, L"BUTTON", s_cancel.c_str(),
                                             BS_PUSHBUTTON | WS_TABSTOP,
                                             207, 30, 60, 14, IDCANCEL);
-            st->btn_reset = create_control(hwnd, L"BUTTON", L"&Reset",
+            st->btn_reset = create_control(hwnd, L"BUTTON", s_reset.c_str(),
                                            BS_PUSHBUTTON | WS_TABSTOP,
                                            207, 48, 60, 14, kIdBtnReset);
 
@@ -541,9 +555,10 @@ INT_PTR CALLBACK resize_dialog_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 EndDialog(hwnd, IDOK);
                 return TRUE;
             }
+            const std::wstring generic_failed = viewer_string(IDS_RESIZE_FAILED_GENERIC);
             set_status_text(*st, error != nullptr && !error->empty()
                                      ? std::wstring_view(*error)
-                                     : std::wstring_view(L"Resize validation failed."),
+                                     : std::wstring_view(generic_failed),
                             true);
             // The caller already reverted the canvas draft; restore the
             // controls and refresh output without re-emitting the failed
@@ -670,7 +685,8 @@ resize_dialog_result show_resize_dialog(
     tmpl.dlg.cy = static_cast<short>(kDlgHeightDlu);
     tmpl.menu = 0;
     tmpl.window_class = 0;
-    wcscpy_s(tmpl.title, L"Resize Image");
+    const std::wstring title_str = viewer_string(IDS_RESIZE_TITLE);
+    wcsncpy_s(tmpl.title, title_str.c_str(), _TRUNCATE);
 
     const INT_PTR rc = DialogBoxIndirectParamW(
         GetModuleHandleW(nullptr),

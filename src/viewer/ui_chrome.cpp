@@ -1,6 +1,8 @@
 // oz/viewer/ui_chrome.cpp - modular native Win32 toolbar and status bar chrome implementation.
 #include "ui_chrome.hpp"
 
+#include "viewer_strings.hpp"
+
 #include <shellapi.h>
 #include <uxtheme.h>
 #include <commctrl.h>
@@ -15,21 +17,82 @@ namespace {
 constexpr int kToolbarControlId = 3001;
 constexpr int kStatusControlId  = 3002;
 
+constexpr std::size_t kToolbarButtonCount = 11;
+
+// Stable ownership for retained toolbar/tooltip/accessibility text (Stage
+// 10.3): the toolbar keeps raw const wchar_t* pointers (TBBUTTON iString and
+// TB_SETBUTTONINFOW pszText are consumed synchronously by SendMessageW), so
+// the pointed-to storage must outlive every use. These owning buffers are
+// initialized once from the string accessor and never mutated afterwards, so
+// no temporary c_str() is ever retained.
+struct toolbar_text_store {
+    std::wstring tooltip[kToolbarButtonCount]{};
+    std::wstring shortcut[kToolbarButtonCount]{};
+    std::wstring accessible[kToolbarButtonCount]{};
+};
+
+const toolbar_text_store& get_toolbar_text_store() noexcept {
+    static const toolbar_text_store s_store = [] {
+        toolbar_text_store store{};
+        try {
+            store.tooltip[0] = viewer_string(IDS_TB_TIP_OPEN);
+            store.tooltip[1] = viewer_string(IDS_TB_TIP_SAVE);
+            store.tooltip[2] = viewer_string(IDS_TB_TIP_UNDO);
+            store.tooltip[3] = viewer_string(IDS_TB_TIP_REDO);
+            store.tooltip[4] = viewer_string(IDS_TB_TIP_ROTATE_LEFT);
+            store.tooltip[5] = viewer_string(IDS_TB_TIP_ROTATE_RIGHT);
+            store.tooltip[6] = viewer_string(IDS_TB_TIP_CROP);
+            store.tooltip[7] = viewer_string(IDS_TB_TIP_RESIZE);
+            store.tooltip[8] = viewer_string(IDS_TB_TIP_FIT);
+            store.tooltip[9] = viewer_string(IDS_TB_TIP_ACTUAL);
+            store.tooltip[10] = viewer_string(IDS_TB_TIP_FULLSCREEN);
+            store.shortcut[0] = viewer_string(IDS_TB_SHORTCUT_OPEN);
+            store.shortcut[1] = viewer_string(IDS_TB_SHORTCUT_SAVE);
+            store.shortcut[2] = viewer_string(IDS_TB_SHORTCUT_UNDO);
+            store.shortcut[3] = viewer_string(IDS_TB_SHORTCUT_REDO);
+            store.shortcut[4] = viewer_string(IDS_TB_SHORTCUT_ROTATE_LEFT);
+            store.shortcut[5] = viewer_string(IDS_TB_SHORTCUT_ROTATE_RIGHT);
+            store.shortcut[6] = viewer_string(IDS_TB_SHORTCUT_CROP);
+            store.shortcut[7] = viewer_string(IDS_TB_SHORTCUT_RESIZE);
+            store.shortcut[8] = viewer_string(IDS_TB_SHORTCUT_FIT);
+            store.shortcut[9] = viewer_string(IDS_TB_SHORTCUT_ACTUAL);
+            store.shortcut[10] = viewer_string(IDS_TB_SHORTCUT_FULLSCREEN);
+            store.accessible[0] = viewer_string(IDS_TB_ACC_OPEN);
+            store.accessible[1] = viewer_string(IDS_TB_ACC_SAVE);
+            store.accessible[2] = viewer_string(IDS_TB_ACC_UNDO);
+            store.accessible[3] = viewer_string(IDS_TB_ACC_REDO);
+            store.accessible[4] = viewer_string(IDS_TB_ACC_ROTATE_LEFT);
+            store.accessible[5] = viewer_string(IDS_TB_ACC_ROTATE_RIGHT);
+            store.accessible[6] = viewer_string(IDS_TB_ACC_CROP);
+            store.accessible[7] = viewer_string(IDS_TB_ACC_RESIZE);
+            store.accessible[8] = viewer_string(IDS_TB_ACC_FIT);
+            store.accessible[9] = viewer_string(IDS_TB_ACC_ACTUAL);
+            store.accessible[10] = viewer_string(IDS_TB_ACC_FULLSCREEN);
+        } catch (...) {
+        }
+        return store;
+    }();
+    return s_store;
+}
+
 }  // namespace
 
 const std::vector<toolbar_button_desc>& get_toolbar_button_descriptors() noexcept {
+    // The text store is initialized before the descriptor vector (declaration
+    // order) so every retained pointer below refers to stable storage.
+    const toolbar_text_store& text = get_toolbar_text_store();
     static const std::vector<toolbar_button_desc> s_buttons = {
-        {ui_command_id::file_open,         101, icon_id::open,         L"Open",         L"Ctrl+O",        L"Open file"},
-        {ui_command_id::file_save,         103, icon_id::save,         L"Save",         L"Ctrl+S",        L"Save image"},
-        {ui_command_id::edit_undo,         205, icon_id::undo,         L"Undo",         L"Ctrl+Z",        L"Undo edit"},
-        {ui_command_id::edit_redo,         206, icon_id::redo,         L"Redo",         L"Ctrl+Y",        L"Redo edit"},
-        {ui_command_id::edit_rotate_left,  201, icon_id::rotate_left,  L"Rotate Left",  L"Ctrl+L",        L"Rotate left 90 degrees"},
-        {ui_command_id::edit_rotate_right, 202, icon_id::rotate_right, L"Rotate Right", L"Ctrl+R",        L"Rotate right 90 degrees"},
-        {ui_command_id::edit_crop,         207, icon_id::crop,         L"Crop",         L"C",             L"Crop mode"},
-        {ui_command_id::edit_resize,       211, icon_id::resize,       L"Resize",       L"Ctrl+Alt+R",    L"Resize image"},
-        {ui_command_id::view_fit,          302, icon_id::fit,          L"Fit to Window",L"F",             L"Fit image to window", true},
-        {ui_command_id::view_actual_size,  301, icon_id::one_to_one,   L"Actual Size",  L"1",             L"Zoom 100 percent",    true},
-        {ui_command_id::view_fullscreen,   309, icon_id::fullscreen,   L"Fullscreen",   L"F11",           L"Toggle fullscreen",   true}
+        {ui_command_id::file_open,         101, icon_id::open,         text.tooltip[0].c_str(),  text.shortcut[0].c_str(),  text.accessible[0].c_str()},
+        {ui_command_id::file_save,         103, icon_id::save,         text.tooltip[1].c_str(),  text.shortcut[1].c_str(),  text.accessible[1].c_str()},
+        {ui_command_id::edit_undo,         205, icon_id::undo,         text.tooltip[2].c_str(),  text.shortcut[2].c_str(),  text.accessible[2].c_str()},
+        {ui_command_id::edit_redo,         206, icon_id::redo,         text.tooltip[3].c_str(),  text.shortcut[3].c_str(),  text.accessible[3].c_str()},
+        {ui_command_id::edit_rotate_left,  201, icon_id::rotate_left,  text.tooltip[4].c_str(),  text.shortcut[4].c_str(),  text.accessible[4].c_str()},
+        {ui_command_id::edit_rotate_right, 202, icon_id::rotate_right, text.tooltip[5].c_str(),  text.shortcut[5].c_str(),  text.accessible[5].c_str()},
+        {ui_command_id::edit_crop,         207, icon_id::crop,         text.tooltip[6].c_str(),  text.shortcut[6].c_str(),  text.accessible[6].c_str()},
+        {ui_command_id::edit_resize,       211, icon_id::resize,       text.tooltip[7].c_str(),  text.shortcut[7].c_str(),  text.accessible[7].c_str()},
+        {ui_command_id::view_fit,          302, icon_id::fit,          text.tooltip[8].c_str(),  text.shortcut[8].c_str(),  text.accessible[8].c_str(), true},
+        {ui_command_id::view_actual_size,  301, icon_id::one_to_one,   text.tooltip[9].c_str(),  text.shortcut[9].c_str(),  text.accessible[9].c_str(), true},
+        {ui_command_id::view_fullscreen,   309, icon_id::fullscreen,   text.tooltip[10].c_str(), text.shortcut[10].c_str(), text.accessible[10].c_str(), true}
     };
     return s_buttons;
 }
@@ -48,10 +111,11 @@ bool ui_chrome::create(HWND parent, HINSTANCE instance, float dpi) {
 
     // 1. Create native toolbar
     // Using TBSTYLE_FLAT, TBSTYLE_TOOLTIPS, CCS_NORESIZE, CCS_NODIVIDER, WS_CHILD, WS_TABSTOP
+    const std::wstring toolbar_name = viewer_string(IDS_TOOLBAR_NAME);
     hwnd_toolbar_ = CreateWindowExW(
         0,
         TOOLBARCLASSNAMEW,
-        L"OZ Viewer Toolbar",
+        toolbar_name.c_str(),
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_NORESIZE | CCS_NODIVIDER,
         0, 0, 0, 0,
         parent_,
@@ -400,12 +464,14 @@ LRESULT ui_chrome::handle_notify(LPARAM lparam) noexcept {
         const auto& descs = get_toolbar_button_descriptors();
         for (const auto& desc : descs) {
             if (desc.command_int_id == cmd_id) {
+                // Bounded tooltip composition: inputs are concatenated, never
+                // interpreted as a format string.
                 static wchar_t s_tip[256];
-                if (desc.shortcut && desc.shortcut[0] != L'\0') {
-                    swprintf_s(s_tip, L"%s (%s)", desc.tooltip, desc.shortcut);
-                } else {
-                    swprintf_s(s_tip, L"%s", desc.tooltip);
-                }
+                const std::wstring tip_in(desc.tooltip ? desc.tooltip : L"");
+                const std::wstring shortcut_in(desc.shortcut ? desc.shortcut : L"");
+                const std::wstring composed =
+                    format_tooltip_with_shortcut(tip_in, shortcut_in);
+                wcsncpy_s(s_tip, composed.c_str(), _TRUNCATE);
                 disp->lpszText = s_tip;
                 return 0;
             }

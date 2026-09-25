@@ -1,20 +1,23 @@
 // oz/viewer/crop_strip.cpp - native contextual crop strip implementation.
 #include "crop_strip.hpp"
 
+#include "viewer_strings.hpp"
+
 namespace oz::viewer {
 
 namespace {
 
-constexpr const wchar_t* kRatioNames[] = {
-    L"Free",
-    L"Original",
-    L"1:1 Square",
-    L"3:2",
-    L"4:3",
-    L"5:4",
-    L"16:9",
-    L"9:16",
-    L"A-series"
+// Resource ids for the ratio combo entries, in preset order.
+constexpr UINT kRatioNameIds[] = {
+    IDS_CROP_RATIO_FREE,
+    IDS_CROP_RATIO_ORIGINAL,
+    IDS_CROP_RATIO_1X1,
+    IDS_CROP_RATIO_3X2,
+    IDS_CROP_RATIO_4X3,
+    IDS_CROP_RATIO_5X4,
+    IDS_CROP_RATIO_16X9,
+    IDS_CROP_RATIO_9X16,
+    IDS_CROP_RATIO_ASERIES,
 };
 
 constexpr oz::viewer_core::crop_ratio_preset kRatioPresets[] = {
@@ -57,8 +60,9 @@ bool crop_strip::create(HWND parent, HINSTANCE instance, float dpi) {
     }
 
     // Ratio label
+    const std::wstring aspect_label = viewer_string(IDS_CROP_ASPECT_LABEL);
     hwnd_lbl_ratio_ = CreateWindowExW(
-        0, L"STATIC", L"Aspect Ratio:",
+        0, L"STATIC", aspect_label.c_str(),
         WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
         0, 0, 0, 0,
         hwnd_strip_, nullptr, instance, nullptr);
@@ -71,38 +75,43 @@ bool crop_strip::create(HWND parent, HINSTANCE instance, float dpi) {
         hwnd_strip_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCropStripComboRatio)),
         instance, nullptr);
 
-    for (const auto* name : kRatioNames) {
-        SendMessageW(hwnd_combo_ratio_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+    for (const UINT name_id : kRatioNameIds) {
+        const std::wstring name = viewer_string(name_id);
+        SendMessageW(hwnd_combo_ratio_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
     }
     SendMessageW(hwnd_combo_ratio_, CB_SETCURSEL, 0, 0);
 
     // Read-only crop dimension summary
+    const std::wstring dim_initial = viewer_string(IDS_CROP_DIM_EMPTY);
     hwnd_txt_dim_ = CreateWindowExW(
-        0, L"STATIC", L"-",
+        0, L"STATIC", dim_initial.c_str(),
         WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
         0, 0, 0, 0,
         hwnd_strip_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCropStripStaticDim)),
         instance, nullptr);
 
     // Reset button
+    const std::wstring btn_reset = viewer_string(IDS_CROP_BTN_RESET);
     hwnd_btn_reset_ = CreateWindowExW(
-        0, WC_BUTTONW, L"Reset (R)",
+        0, WC_BUTTONW, btn_reset.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0,
         hwnd_strip_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCropStripBtnReset)),
         instance, nullptr);
 
     // Apply button
+    const std::wstring btn_apply = viewer_string(IDS_CROP_BTN_APPLY);
     hwnd_btn_apply_ = CreateWindowExW(
-        0, WC_BUTTONW, L"Apply (Enter)",
+        0, WC_BUTTONW, btn_apply.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         0, 0, 0, 0,
         hwnd_strip_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCropStripBtnApply)),
         instance, nullptr);
 
     // Cancel button
+    const std::wstring btn_cancel = viewer_string(IDS_CROP_BTN_CANCEL);
     hwnd_btn_cancel_ = CreateWindowExW(
-        0, WC_BUTTONW, L"Cancel (Esc)",
+        0, WC_BUTTONW, btn_cancel.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0,
         hwnd_strip_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCropStripBtnCancel)),
@@ -303,13 +312,14 @@ void crop_strip::sync_dimension_summary(const oz::viewer_core::crop_interaction_
         return;
     }
 
-    wchar_t buf[64];
-    if (crop_state->selection.is_valid()) {
-        swprintf_s(buf, L"%d × %d", crop_state->selection.width, crop_state->selection.height);
-    } else {
-        swprintf_s(buf, L"-");
-    }
-    SetWindowTextW(hwnd_txt_dim_, buf);
+    // Read-only current crop dimensions summary (typed bounded formatting;
+    // a malformed template yields the safe nonempty empty-dimensions text).
+    const std::wstring dim_text =
+        crop_state->selection.is_valid()
+            ? format_crop_dimensions(crop_state->selection.width,
+                                     crop_state->selection.height)
+            : viewer_string(IDS_CROP_DIM_EMPTY);
+    SetWindowTextW(hwnd_txt_dim_, dim_text.c_str());
 }
 
 HBRUSH crop_strip::handle_ctl_color(HDC hdc, HWND control) noexcept {

@@ -6,6 +6,7 @@
 #include "print_controller.hpp"
 
 #include "oz/viewer_core/codec.hpp"
+#include "viewer_strings.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -299,9 +300,12 @@ void print_controller::worker_loop() {
         bmi.bmiHeader.biBitCount = 24;
         bmi.bmiHeader.biCompression = BI_RGB;
 
+        // Owning local: StartDocW consumes lpszDocName synchronously, but the
+        // pointer is retained in DOCINFOW across the seam calls below.
+        const std::wstring doc_name = viewer_string(IDS_APP_TITLE);
         DOCINFOW doc_info{};
         doc_info.cbSize = sizeof(doc_info);
-        doc_info.lpszDocName = L"OZ Image Viewer";
+        doc_info.lpszDocName = doc_name.c_str();
 
         std::string fail_stage;
         print_spool_seam seam;

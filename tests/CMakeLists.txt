@@ -144,18 +144,31 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/crop_strip.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/modern_dialogs.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_input.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
-                    ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp)
+                   ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_input.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/viewer_strings.cpp)
     target_link_libraries(ozviewer_stage7_seam_tests PRIVATE ozviewer_core d2d1 comctl32 shell32)
     target_include_directories(ozviewer_stage7_seam_tests PRIVATE
                                ${CMAKE_CURRENT_SOURCE_DIR}
                                ${CMAKE_SOURCE_DIR}/src/viewer)
     target_compile_features(ozviewer_stage7_seam_tests PRIVATE cxx_std_23)
     add_test(NAME ozviewer_stage7_seam_tests COMMAND ozviewer_stage7_seam_tests)
+
+    # Stage 10.3 English localization readiness seam test with embedded resources
+    add_executable(ozviewer_localization_tests
+                   localization_readiness_tests.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/viewer_strings.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/ozviewer.rc)
+    target_link_libraries(ozviewer_localization_tests PRIVATE ozviewer_core)
+    target_include_directories(ozviewer_localization_tests PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR}
+                               ${CMAKE_SOURCE_DIR}/src/viewer)
+    target_compile_features(ozviewer_localization_tests PRIVATE cxx_std_23)
+    add_test(NAME ozviewer_localization_tests COMMAND ozviewer_localization_tests)
 endif()
 
 # The remaining Stage 1 tests decode real JPEGs with the TurboJPEG C API and
@@ -174,7 +187,8 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
         ${CMAKE_SOURCE_DIR}/src/viewer/shell_integration.cpp
         ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
         ${CMAKE_SOURCE_DIR}/src/viewer/clipboard_output.cpp
-        ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp)
+        ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
+        ${CMAKE_SOURCE_DIR}/src/viewer/viewer_strings.cpp)
     target_link_libraries(ozviewer_core_tests PRIVATE shell32)
 
     if(OZVIEWER_ENABLE_EDITING)
