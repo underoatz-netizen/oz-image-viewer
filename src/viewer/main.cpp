@@ -65,6 +65,7 @@
 #include "ui_command_state.hpp"
 #include "ui_layout.hpp"
 #include "ui_theme.hpp"
+#include "dpi_fullscreen.hpp"
 #include "ozviewer_resources.h"
 
 #if OZVIEWER_ENABLE_EDITING
@@ -4150,8 +4151,36 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
 #endif
                 const RECT* rc = reinterpret_cast<const RECT*>(lparam);
-                SetWindowPos(hwnd, nullptr, rc->left, rc->top, rc->right - rc->left,
-                             rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                // Stage 10.2: in borderless fullscreen the OS-suggested RECT
+                // preserves the window's DIP size rather than the monitor's
+                // physical bounds, so applying it directly would shrink the
+                // window while is_fullscreen stays true. Use the suggested
+                // RECT only to locate the destination monitor (MonitorFromRect
+                // handles negative coordinates) and re-assert that monitor's
+                // full physical rcMonitor. If the lookup fails, keep the
+                // previous safe behavior of applying the suggested RECT.
+                oz::viewer::dpi_monitor_bounds destination{};
+                if (app->is_fullscreen && rc) {
+                    HMONITOR hmon = MonitorFromRect(rc, MONITOR_DEFAULTTONEAREST);
+                    MONITORINFO mi{sizeof(mi)};
+                    if (hmon && GetMonitorInfoW(hmon, &mi)) {
+                        destination.found = true;
+                        destination.monitor = oz::viewer::ui_rect_physical{
+                            mi.rcMonitor.left, mi.rcMonitor.top,
+                            mi.rcMonitor.right - mi.rcMonitor.left,
+                            mi.rcMonitor.bottom - mi.rcMonitor.top};
+                    }
+                }
+                const oz::viewer::ui_rect_physical suggested = rc
+                    ? oz::viewer::ui_rect_physical{rc->left, rc->top,
+                                                   rc->right - rc->left,
+                                                   rc->bottom - rc->top}
+                    : oz::viewer::ui_rect_physical{};
+                const auto target = oz::viewer::resolve_dpi_changed_target(
+                    suggested, destination, app->is_fullscreen);
+                SetWindowPos(hwnd, nullptr, target.rect.x, target.rect.y,
+                             target.rect.width, target.rect.height,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
             }
             return 0;
         }

@@ -20,6 +20,7 @@
 #include "../src/viewer/ui_chrome.hpp"
 #include "../src/viewer/ui_command_state.hpp"
 #include "../src/viewer/ui_layout.hpp"
+#include "../src/viewer/dpi_fullscreen.hpp"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -2591,6 +2592,98 @@ void test_paste_install_staging_seam() {
 #endif
 }
 
+// Stage 10.2 fullscreen mixed-DPI seam: the WM_DPICHANGED target-rect decision.
+// Deterministic and hardware-independent; the real Win32 MonitorFromRect call
+// lives in main.cpp and only supplies `dpi_monitor_bounds`.
+void test_dpi_fullscreen_target() {
+    using namespace oz::viewer;
+
+    // A. Windowed: the OS-suggested RECT is honored exactly, whether or not a
+    //    destination monitor was resolved (windowed behavior is unchanged).
+    {
+        const ui_rect_physical suggested{120, 80, 900, 600};
+        dpi_monitor_bounds dest{};
+        dest.found = true;
+        dest.monitor = ui_rect_physical{0, 0, 1920, 1080};
+
+        const auto with_monitor = resolve_dpi_changed_target(suggested, dest, false);
+        CHECK(!with_monitor.used_monitor_rect);
+        CHECK(with_monitor.rect.x == 120 && with_monitor.rect.y == 80);
+        CHECK(with_monitor.rect.width == 900 && with_monitor.rect.height == 600);
+
+        const dpi_monitor_bounds missing{};
+        const auto no_monitor = resolve_dpi_changed_target(suggested, missing, false);
+        CHECK(!no_monitor.used_monitor_rect);
+        CHECK(no_monitor.rect.x == suggested.x && no_monitor.rect.y == suggested.y);
+        CHECK(no_monitor.rect.width == suggested.width &&
+              no_monitor.rect.height == suggested.height);
+    }
+
+    // B. Fullscreen + destination monitor at a different DPI. The suggested RECT
+    //    preserves the window's DIP size (here 1280x720 DIP becomes 1920x1080
+    //    physical at 144 DPI), which does not fill a 2560x1440 monitor; the
+    //    monitor's rcMonitor must win so true fullscreen still covers it.
+    {
+        const ui_rect_physical suggested_at_144{0, 0, 1920, 1080};
+        dpi_monitor_bounds dest{};
+        dest.found = true;
+        dest.monitor = ui_rect_physical{0, 0, 2560, 1440};
+
+        const auto target = resolve_dpi_changed_target(suggested_at_144, dest, true);
+        CHECK(target.used_monitor_rect);
+        CHECK(target.rect.x == 0 && target.rect.y == 0);
+        CHECK(target.rect.width == 2560 && target.rect.height == 1440);
+    }
+
+    // C. Fullscreen + a monitor left/above the primary (negative origin). The
+    //    suggested RECT carries negative coordinates for the lookup, and the
+    //    resulting rcMonitor keeps its negative x/y while filling the monitor.
+    {
+        const ui_rect_physical suggested{-1920, -300, 700, 800};
+        dpi_monitor_bounds dest{};
+        dest.found = true;
+        dest.monitor = ui_rect_physical{-2560, -200, 2560, 1440};
+
+        const auto target = resolve_dpi_changed_target(suggested, dest, true);
+        CHECK(target.used_monitor_rect);
+        CHECK(target.rect.x == -2560 && target.rect.y == -200);
+        CHECK(target.rect.width == 2560 && target.rect.height == 1440);
+        CHECK(target.rect.right() == 0);
+        CHECK(target.rect.bottom() == 1240);
+    }
+
+    // D. Fullscreen + failed lookup: safely fall back to the suggested RECT,
+    //    preserving its negative origin rather than moving to an unknown place.
+    {
+        const ui_rect_physical suggested{-100, 50, 500, 400};
+        const dpi_monitor_bounds missing{};  // found == false.
+        const auto target = resolve_dpi_changed_target(suggested, missing, true);
+        CHECK(!target.used_monitor_rect);
+        CHECK(target.rect.x == -100 && target.rect.y == 50);
+        CHECK(target.rect.width == 500 && target.rect.height == 400);
+
+        // A "found" but empty monitor rect must also fall back (defensive).
+        dpi_monitor_bounds empty{};
+        empty.found = true;
+        empty.monitor = ui_rect_physical{};
+        CHECK(!empty.usable());
+        const auto fallback = resolve_dpi_changed_target(suggested, empty, true);
+        CHECK(!fallback.used_monitor_rect);
+        CHECK(fallback.rect.width == 500 && fallback.rect.height == 400);
+    }
+
+    // E. Windowed negative-origin suggested RECT is still used verbatim (never
+    //    reinterpreted as a monitor rect).
+    {
+        const ui_rect_physical suggested{-800, -600, 700, 550};
+        const dpi_monitor_bounds missing{};
+        const auto target = resolve_dpi_changed_target(suggested, missing, false);
+        CHECK(!target.used_monitor_rect);
+        CHECK(target.rect.x == -800 && target.rect.y == -600);
+        CHECK(target.rect.width == 700 && target.rect.height == 550);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2606,6 +2699,7 @@ int main() {
     test_clipboard_input_seam();
     test_presentation_edit_suppression();
     test_paste_install_staging_seam();
+    test_dpi_fullscreen_target();
 
     std::printf("stage7_seam_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
