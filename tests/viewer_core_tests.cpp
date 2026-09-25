@@ -51,6 +51,7 @@
 #include "../src/viewer_core/avif.hpp"
 #include "../src/viewer_core/heic.hpp"
 #include "../src/viewer_core/heif_loader.hpp"
+#include "../src/viewer_core/png_wic.hpp"
 #include "../src/viewer_core/raster_wic.hpp"
 #include "../src/viewer_core/tga.hpp"
 
@@ -1314,6 +1315,157 @@ void test_png_reject_bad_inputs() {
     CHECK(oz::viewer_core::parse_image_header(
               &one, oz::viewer_core::kMaxEncodedBytes + 1, info) ==
           oz::viewer_core::codec_error::allocation_limit);
+}
+
+// Stage 10.1 hardening (central representative decode path): every truncation
+// of a valid PNG must fail safely at the registry boundary - a bounded
+// codec_error or a fully self-consistent full-size decode, never a malformed
+// success and never a crash/hang. A later failure must not corrupt a retained
+// successful result, and the intact buffer must still decode afterward
+// (valid-after-failure recovery).
+void test_png_truncation_sweep_and_recovery() {
+    const auto png = oz::test_png::make_rgb_png(8, 6, oz::test_png::gradient(8, 6));
+    CHECK(!png.empty());
+    if (png.empty()) {
+        return;
+    }
+
+    // Shorter than the 8-byte signature: unsupported, no decoder work.
+    for (std::size_t cut : {std::size_t{1}, std::size_t{4}, std::size_t{7}}) {
+        oz::viewer_core::image_info info;
+        CHECK(oz::viewer_core::parse_image_header(png.data(), cut, info) ==
+              oz::viewer_core::codec_error::unsupported);
+        CHECK(oz::viewer_core::decode_image(png.data(), cut, 1).error ==
+              oz::viewer_core::codec_error::unsupported);
+    }
+
+    // Signature present but IHDR incomplete: deterministic `truncated` before
+    // any COM/WIC work.
+    for (std::size_t cut : {std::size_t{8}, std::size_t{12}, std::size_t{16},
+                            std::size_t{20}, std::size_t{24}, std::size_t{28}}) {
+        oz::viewer_core::image_info info;
+        CHECK(oz::viewer_core::parse_image_header(png.data(), cut, info) ==
+              oz::viewer_core::codec_error::truncated);
+        CHECK(oz::viewer_core::decode_image(png.data(), cut, 1).error ==
+              oz::viewer_core::codec_error::truncated);
+    }
+
+    // Deeper cuts (header valid, pixel stream severed): WIC may reject or may
+    // complete a full-size decode, but it must never claim a malformed size,
+    // throw, or hang.
+    const std::size_t deeper[] = {33, 40, png.size() / 2, png.size() - 1};
+    for (std::size_t cut : deeper) {
+        if (cut == 0 || cut >= png.size()) {
+            continue;
+        }
+        std::vector<std::uint8_t> trunc(
+            png.begin(), png.begin() + static_cast<std::ptrdiff_t>(cut));
+        oz::viewer_core::image_info info;
+        const auto herr =
+            oz::viewer_core::parse_image_header(trunc.data(), trunc.size(), info);
+        if (herr == oz::viewer_core::codec_error::none) {
+            CHECK(info.src_width == 8 && info.src_height == 6);
+        } else {
+            CHECK(herr == oz::viewer_core::codec_error::truncated ||
+                  herr == oz::viewer_core::codec_error::invalid_header ||
+                  herr == oz::viewer_core::codec_error::decode_failed);
+        }
+        auto dr = oz::viewer_core::decode_image(trunc.data(), trunc.size(), 1);
+        if (dr.error == oz::viewer_core::codec_error::none) {
+            CHECK(dr.image.width == 8 && dr.image.height == 6);
+            CHECK(dr.image.pixels.size() == static_cast<std::size_t>(8 * 6 * 4));
+        } else {
+            CHECK(dr.error != oz::viewer_core::codec_error::none);
+        }
+    }
+
+    // Null/empty input stays bounded.
+    oz::viewer_core::image_info ni;
+    CHECK(oz::viewer_core::parse_image_header(nullptr, 0, ni) ==
+          oz::viewer_core::codec_error::unsupported);
+    CHECK(oz::viewer_core::decode_image(nullptr, 0, 1).error ==
+          oz::viewer_core::codec_error::unsupported);
+
+    // Retained-state guard: a successful result must survive later failed
+    // decodes byte-identically, then the intact buffer must still decode.
+    auto good = oz::viewer_core::decode_image(png.data(), png.size(), 1);
+    CHECK(good.error == oz::viewer_core::codec_error::none);
+    CHECK(good.image.width == 8 && good.image.height == 6);
+    CHECK(good.image.pixels.size() == static_cast<std::size_t>(8 * 6 * 4));
+    const auto retained = good.image.pixels;
+    for (std::size_t cut : {std::size_t{8}, std::size_t{20}, std::size_t{40}}) {
+        (void)oz::viewer_core::decode_image(png.data(), cut, 1);
+    }
+    CHECK(good.image.pixels == retained);
+    CHECK(good.image.width == 8 && good.image.height == 6);
+
+    // Valid-after-failure recovery through the same registry entry point.
+    auto recovered = oz::viewer_core::decode_image(png.data(), png.size(), 1);
+    CHECK(recovered.error == oz::viewer_core::codec_error::none);
+    CHECK(recovered.image.width == 8 && recovered.image.height == 6);
+    CHECK(recovered.image.pixels.size() == static_cast<std::size_t>(8 * 6 * 4));
+}
+
+// Stage 10.1 hardening (central representative decode path): the PNG eXIf
+// structural scan must never read past the end of the caller's buffer. The
+// buffer here ends exactly at a no-access guard page, so any over-read is an
+// immediate access violation. The crafted tail declares a 16-byte "eXIf"
+// chunk with no payload (8 trailing bytes); it must be treated as a truncated
+// chunk header, never scanned.
+void test_png_exif_scan_guard_page_no_overread() {
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+    auto* base = static_cast<std::uint8_t*>(
+        VirtualAlloc(nullptr, page * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    CHECK(base != nullptr);
+    if (base == nullptr) {
+        return;
+    }
+    DWORD old = 0;
+    CHECK(VirtualProtect(base + page, page, PAGE_NOACCESS, &old) != 0);
+
+    // Positive control: a complete PNG carrying eXIf orientation 6, ending
+    // exactly at the guard boundary, is still scanned correctly.
+    {
+        const auto png = oz::test_png::make_rgba_png(
+            3, 2, oz::test_png::gradient(3, 2), false, 6);
+        CHECK(png.size() <= page);
+        if (png.size() <= page) {
+            std::uint8_t* p = base + page - png.size();
+            std::memcpy(p, png.data(), png.size());
+            CHECK(oz::viewer_core::png_wic::read_exif_orientation(p, png.size()) == 6);
+        }
+    }
+
+    // Crafted truncated tail: signature + complete IHDR (8x6 RGB) + an 8-byte
+    // chunk header claiming an "eXIf" chunk of length 16 with no payload.
+    {
+        std::vector<std::uint8_t> crafted(41, 0);
+        const auto prefix = oz::test_png::make_rgb_png(8, 6, oz::test_png::gradient(8, 6));
+        CHECK(prefix.size() >= 33);
+        if (prefix.size() >= 33) {
+            std::memcpy(crafted.data(), prefix.data(), 33);
+        }
+        crafted[33] = 0x00;
+        crafted[34] = 0x00;
+        crafted[35] = 0x00;
+        crafted[36] = 0x10;  // declared payload length 16, none present
+        crafted[37] = 'e';
+        crafted[38] = 'X';
+        crafted[39] = 'I';
+        crafted[40] = 'f';
+        std::uint8_t* p = base + page - crafted.size();
+        std::memcpy(p, crafted.data(), crafted.size());
+        // Must not touch the guard page: no valid orientation is reported.
+        CHECK(oz::viewer_core::png_wic::read_exif_orientation(p, crafted.size()) == 0);
+        oz::viewer_core::image_info info;
+        CHECK(oz::viewer_core::parse_image_header(p, crafted.size(), info) ==
+              oz::viewer_core::codec_error::none);
+        CHECK(info.src_width == 8 && info.src_height == 6);
+    }
+
+    VirtualFree(base, 0, MEM_RELEASE);
 }
 
 // Invalid/unsupported ICC profiles fall back internally: decode succeeds.
@@ -6223,6 +6375,8 @@ int wmain() {
     test_png_gray_palette_interlaced();
     test_png_exif_orientations();
     test_png_reject_bad_inputs();
+    test_png_truncation_sweep_and_recovery();
+    test_png_exif_scan_guard_page_no_overread();
     test_png_icc_fallback_contract();
     test_png_scaling_denominator();
     test_supported_image_navigation();

@@ -261,6 +261,17 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
                      -DOUT_DIR=${CMAKE_BINARY_DIR}
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/check_viewer_png_benchmark.cmake)
 
+    # Stage 10.1 malformed-input hardening: a deterministically truncated PNG
+    # must fail safely in --benchmark mode (bounded non-zero exit, existing
+    # 'decode failed' diagnostic, no FirstPresent, no hang), and a valid PNG
+    # must still decode through FirstPresent afterward (recovery).
+    add_test(NAME ozviewer_decode_failure_isolation
+             COMMAND ${CMAKE_COMMAND}
+                     -DOZVIEWER=$<TARGET_FILE:ozviewer>
+                     -DMAKE_PNG=$<TARGET_FILE:ozviewer_make_png>
+                     -DOUT_DIR=${CMAKE_BINARY_DIR}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/check_viewer_decode_failure_isolation.cmake)
+
     # Stage 3.2 WebP integration benchmark: decode the checked-in
     # decoder-independent lossless WebP fixture (no test encoder),
     # assert the same canonical marker prefix through FirstPresent and

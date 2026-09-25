@@ -2,9 +2,12 @@
 // decoder-independent test-only mini writer (stored deflate, no codec libs).
 // Used by the Stage 3.1 PNG integration test to produce real PNG fixtures.
 //
-// Usage: ozviewer_make_png <output.png> [width] [height] [mode] [exif]
+// Usage: ozviewer_make_png <output.png> [width] [height] [mode] [exif] [keep_bytes]
 //   mode: rgb | rgba | gray | palette | interlaced   (default rgba)
 //   exif: 0 (none) or 1-8 orientation value (default 0)
+//   keep_bytes: 0 writes the full PNG (default); a positive value writes only
+//               the first N bytes, producing a deterministic truncated fixture
+//               for malformed-input regression tests.
 #include "png_mini_writer.hpp"
 
 #include <cstdio>
@@ -14,7 +17,7 @@
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: ozviewer_make_png <output.png> [width] [height] [mode] [exif]\n");
+        std::fprintf(stderr, "usage: ozviewer_make_png <output.png> [width] [height] [mode] [exif] [keep_bytes]\n");
         return 2;
     }
     int w = 64;
@@ -23,8 +26,13 @@ int wmain(int argc, wchar_t** argv) {
     if (argc >= 4) h = _wtoi(argv[3]);
     std::wstring mode = (argc >= 5) ? argv[4] : L"rgba";
     int exif = (argc >= 6) ? _wtoi(argv[5]) : 0;
+    int keep_bytes = (argc >= 7) ? _wtoi(argv[6]) : 0;
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
         std::fprintf(stderr, "invalid dimensions\n");
+        return 2;
+    }
+    if (keep_bytes < 0) {
+        std::fprintf(stderr, "invalid keep_bytes\n");
         return 2;
     }
 
@@ -60,7 +68,11 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "cannot open output\n");
         return 1;
     }
-    std::fwrite(png.data(), 1, png.size(), f);
+    std::size_t write_len = png.size();
+    if (keep_bytes > 0 && static_cast<std::size_t>(keep_bytes) < write_len) {
+        write_len = static_cast<std::size_t>(keep_bytes);
+    }
+    std::fwrite(png.data(), 1, write_len, f);
     std::fclose(f);
     return 0;
 }

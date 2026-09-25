@@ -68,7 +68,11 @@ bool walk_chunks(const std::uint8_t* data, std::size_t size, F&& visit) noexcept
     }
     std::size_t pos = 8;  // skip signature
     while (true) {
-        if (size - pos < 8) {
+        // A complete chunk needs length(4) + type(4) + CRC(4); checking the
+        // full 12-byte minimum here keeps `size - pos - 12` from underflowing
+        // on an 8..11-byte trailing fragment, which would otherwise let an
+        // oversized declared length reach `visit` with no payload present.
+        if (size - pos < 12) {
             return false;  // truncated chunk header
         }
         const std::uint32_t len = read_be32(data + pos);
