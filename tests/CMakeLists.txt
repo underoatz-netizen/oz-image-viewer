@@ -452,3 +452,21 @@ if(TARGET ozviewer)
                      -AllowSkipNoDesktop)
     set_tests_properties(package_portable_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
+
+# Stage 9.10 installer boundary: validates the staged portable payload
+# (manifest schema/version/platform/entrypoint/extension tokens/exact hashes and
+# expected payload ZIP hash), generates the installer include from the validated
+# manifest, asserts the Inno policy statically (stable AppId, per-user lowest,
+# x64, opt-in unchecked association task, quoted commands, ownership/cleanup,
+# prohibited keys), and mock-validates the collision/upgrade/uninstall policy.
+# It never runs a real installer or touches the host registry. Skips (77) when
+# the payload is unavailable; a compile is attempted only when Inno Setup is
+# locally installed.
+if(TARGET ozviewer)
+    add_test(NAME installer_script_tests
+             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                     -File ${CMAKE_SOURCE_DIR}/packaging/test-installer-script.ps1
+                     -PayloadDir $<TARGET_FILE_DIR:ozviewer>
+                     -WorkDir ${CMAKE_BINARY_DIR}/installer-script-tests)
+    set_tests_properties(installer_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()
