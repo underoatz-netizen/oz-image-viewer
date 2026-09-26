@@ -62,6 +62,30 @@ std::string_view get_svg_icon_data(icon_id id) noexcept {
             return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>)";
         case icon_id::nav_last:
             return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="5" x2="18" y2="19"/><polyline points="6 5 13 12 6 19"/></svg>)";
+        case icon_id::crop_free:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><path d="M9 12h6"/></svg>)";
+        case icon_id::crop_original:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8" cy="10" r="1.5"/><path d="m21 15-5-5L5 19"/></svg>)";
+        case icon_id::crop_1x1:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>)";
+        case icon_id::crop_3x2:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="1"/></svg>)";
+        case icon_id::crop_4x3:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1"/></svg>)";
+        case icon_id::crop_5x4:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/></svg>)";
+        case icon_id::crop_16x9:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="1"/></svg>)";
+        case icon_id::crop_9x16:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="1"/></svg>)";
+        case icon_id::crop_a_series:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><polyline points="14 3 14 9 20 9"/></svg>)";
+        case icon_id::crop_reset:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>)";
+        case icon_id::crop_apply:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>)";
+        case icon_id::crop_cancel:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>)";
         default:
             return {};
     }
@@ -96,6 +120,18 @@ std::wstring_view get_icon_fallback_label(icon_id id) noexcept {
         case icon_id::nav_prev: return L"Prev";
         case icon_id::nav_next: return L"Next";
         case icon_id::nav_last: return L"Last";
+        case icon_id::crop_free: return L"Free";
+        case icon_id::crop_original: return L"Orig";
+        case icon_id::crop_1x1: return L"1:1";
+        case icon_id::crop_3x2: return L"3:2";
+        case icon_id::crop_4x3: return L"4:3";
+        case icon_id::crop_5x4: return L"5:4";
+        case icon_id::crop_16x9: return L"16:9";
+        case icon_id::crop_9x16: return L"9:16";
+        case icon_id::crop_a_series: return L"A-ser";
+        case icon_id::crop_reset: return L"Reset";
+        case icon_id::crop_apply: return L"Apply";
+        case icon_id::crop_cancel: return L"Cancel";
         default: return L"";
     }
 }

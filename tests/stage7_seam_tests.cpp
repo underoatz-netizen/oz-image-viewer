@@ -21,6 +21,7 @@
 #include "../src/viewer/ui_command_state.hpp"
 #include "../src/viewer/command_dispatch.hpp"
 #include "../src/viewer/std_icon_bar.hpp"
+#include "../src/viewer/crop_icon_bar.hpp"
 #include "../src/viewer/ui_layout.hpp"
 #include "../src/viewer/dpi_fullscreen.hpp"
 #include "../src/viewer/viewer_strings.hpp"
@@ -1048,9 +1049,9 @@ void test_modern_dialogs_mapping_and_fallback() {
             CHECK(strip.hwnd() != nullptr);
 
             HWND txt_dim = GetDlgItem(strip.hwnd(), oz::viewer::kIdCropStripStaticDim);
-            HWND combo_ratio = GetDlgItem(strip.hwnd(), oz::viewer::kIdCropStripComboRatio);
+            HWND tb_crop = strip.toolbar_hwnd();
             CHECK(txt_dim != nullptr);
-            CHECK(combo_ratio != nullptr);
+            CHECK(tb_crop != nullptr);
 
             auto read_dim_text = [&]() -> std::wstring {
                 wchar_t text[64]{};
@@ -1065,7 +1066,7 @@ void test_modern_dialogs_mapping_and_fallback() {
             // A. Initial sync on entering crop mode
             strip.sync_state(&crop_state);
             CHECK(read_dim_text() == L"1920 × 1080");
-            CHECK(SendMessageW(combo_ratio, CB_GETCURSEL, 0, 0) == 0); // Free is index 0
+            CHECK((SendMessageW(tb_crop, TB_GETSTATE, 221, 0) & TBSTATE_CHECKED) != 0); // Free is checked
 
             // B. In-drag mutation via sync_dimension_summary
             crop_state.selection = oz::viewer_core::edit_rect{100, 100, 800, 600};
@@ -1084,8 +1085,9 @@ void test_modern_dialogs_mapping_and_fallback() {
             wchar_t exp_16x9_buf[64];
             swprintf_s(exp_16x9_buf, L"%d × %d", expected_16x9.width, expected_16x9.height);
             CHECK(read_dim_text() == std::wstring(exp_16x9_buf));
-            // Verify combo selection updated to ratio_16x9 (index 6)
-            CHECK(SendMessageW(combo_ratio, CB_GETCURSEL, 0, 0) == 6);
+            // Verify 16:9 button is checked (227), Free (221) is unchecked
+            CHECK((SendMessageW(tb_crop, TB_GETSTATE, 227, 0) & TBSTATE_CHECKED) != 0);
+            CHECK((SendMessageW(tb_crop, TB_GETSTATE, 221, 0) & TBSTATE_CHECKED) == 0);
 
             // E. Drag away from preset ratio
             crop_state.selection.width = 500;
@@ -1121,13 +1123,10 @@ void test_modern_dialogs_mapping_and_fallback() {
 
             // I. Focus traversal and keyboard accessibility verification:
             // Verify tab traversal and control containment helper
-            CHECK(strip.first_tab_stop() == combo_ratio);
+            CHECK(strip.first_tab_stop() == tb_crop);
             CHECK(strip.contains_hwnd(strip.hwnd()));
-            CHECK(strip.contains_hwnd(combo_ratio));
+            CHECK(strip.contains_hwnd(tb_crop));
             CHECK(strip.contains_hwnd(txt_dim));
-            CHECK(strip.contains_hwnd(GetDlgItem(strip.hwnd(), oz::viewer::kIdCropStripBtnReset)));
-            CHECK(strip.contains_hwnd(GetDlgItem(strip.hwnd(), oz::viewer::kIdCropStripBtnApply)));
-            CHECK(strip.contains_hwnd(GetDlgItem(strip.hwnd(), oz::viewer::kIdCropStripBtnCancel)));
             CHECK(!strip.contains_hwnd(host_hwnd));
 
             strip.destroy();
@@ -1222,76 +1221,79 @@ void test_dpi_and_accessibility_hardening() {
                 CHECK(strip.is_created());
 
                 HWND h_strip = strip.hwnd();
-                HWND h_lbl = GetDlgItem(h_strip, 0); // label
-                HWND h_combo = GetDlgItem(h_strip, oz::viewer::kIdCropStripComboRatio);
+                HWND h_tb = strip.toolbar_hwnd();
                 HWND h_dim = GetDlgItem(h_strip, oz::viewer::kIdCropStripStaticDim);
-                HWND h_reset = GetDlgItem(h_strip, oz::viewer::kIdCropStripBtnReset);
-                HWND h_apply = GetDlgItem(h_strip, oz::viewer::kIdCropStripBtnApply);
-                HWND h_cancel = GetDlgItem(h_strip, oz::viewer::kIdCropStripBtnCancel);
+                CHECK(h_tb != nullptr);
+                CHECK(h_dim != nullptr);
 
                 for (int test_w : widths_to_test) {
                     ui_layout_config cfg{};
                     cfg.show_crop_strip = true;
-                    cfg.crop_strip_height_dip = 32.0f;
+                    const float test_w_dip = physical_to_dip(test_w, test_dpi);
+                    const auto crop_calc = compute_crop_icon_bar_layout(test_w_dip);
+                    cfg.crop_strip_height_dip = crop_calc.valid ? crop_calc.bar_height_dip : 48.0f;
                     const auto layout = compute_ui_layout(test_w, 800, test_dpi, cfg);
 
                     strip.update_layout(layout, true);
 
-                    // Collect rectangles of all visible controls
-                    struct ctrl_rect {
-                        const char* name;
-                        RECT rc;
-                    };
-                    std::vector<ctrl_rect> visible_rects;
+                    // Essential direct toolbar controls MUST ALWAYS be present and visible
+                    CHECK((GetWindowLongW(h_tb, GWL_STYLE) & WS_VISIBLE) != 0);
+                    CHECK((GetWindowLongW(h_dim, GWL_STYLE) & WS_VISIBLE) != 0);
+                    CHECK(strip.contains_hwnd(h_tb));
+                    CHECK(strip.contains_hwnd(h_dim));
 
-                    auto check_and_add = [&](HWND h, const char* name) {
-                        // Check if child has WS_VISIBLE style
-                        if (h && (GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE)) {
-                            RECT rc{};
-                            GetWindowRect(h, &rc);
-                            // Map to parent strip client coordinates
-                            POINT p1{rc.left, rc.top};
-                            POINT p2{rc.right, rc.bottom};
-                            ScreenToClient(h_strip, &p1);
-                            ScreenToClient(h_strip, &p2);
-                            visible_rects.push_back({name, RECT{p1.x, p1.y, p2.x, p2.y}});
-                        }
-                    };
+                    // Verify actual native child-rectangle non-overlap and geometry:
+                    // 1. hwnd_txt_dim_ and hwnd_toolbar_ viewports must NEVER overlap horizontally and vertically.
+                    RECT rc_tb{};
+                    RECT rc_dim{};
+                    GetWindowRect(h_tb, &rc_tb);
+                    GetWindowRect(h_dim, &rc_dim);
+                    MapWindowPoints(nullptr, h_strip, reinterpret_cast<POINT*>(&rc_tb), 2);
+                    MapWindowPoints(nullptr, h_strip, reinterpret_cast<POINT*>(&rc_dim), 2);
 
-                    check_and_add(h_lbl, "label");
-                    check_and_add(h_combo, "combo");
-                    check_and_add(h_dim, "dim");
-                    check_and_add(h_reset, "reset");
-                    check_and_add(h_apply, "apply");
-                    check_and_add(h_cancel, "cancel");
+                    RECT rc_strip_client{};
+                    GetClientRect(h_strip, &rc_strip_client);
+                    CHECK(rc_dim.right <= rc_strip_client.right);
+                    CHECK(rc_dim.bottom <= rc_strip_client.bottom);
 
-                    // Essential action buttons (Reset, Apply, Cancel) and combo MUST ALWAYS have WS_VISIBLE
-                    CHECK((GetWindowLongW(h_combo, GWL_STYLE) & WS_VISIBLE) != 0);
-                    CHECK((GetWindowLongW(h_reset, GWL_STYLE) & WS_VISIBLE) != 0);
-                    CHECK((GetWindowLongW(h_apply, GWL_STYLE) & WS_VISIBLE) != 0);
-                    CHECK((GetWindowLongW(h_cancel, GWL_STYLE) & WS_VISIBLE) != 0);
+                    // Ensure the strip visible toolbar region does not intersect the dimension label rect
+                    RECT actual_tb_in_strip{};
+                    actual_tb_in_strip.left = (std::max)(rc_strip_client.left, rc_tb.left);
+                    actual_tb_in_strip.right = (std::min)(rc_strip_client.right, rc_tb.right);
+                    actual_tb_in_strip.top = rc_tb.top;
+                    actual_tb_in_strip.bottom = rc_tb.bottom;
+                    if (actual_tb_in_strip.right > actual_tb_in_strip.left &&
+                        actual_tb_in_strip.bottom > actual_tb_in_strip.top) {
+                        RECT isect{};
+                        const bool intersects = IntersectRect(&isect, &actual_tb_in_strip, &rc_dim);
+                        CHECK(!intersects);
+                    }
 
-                    // Assert NO overlapping between ANY pair of visible controls
-                    for (std::size_t i = 0; i < visible_rects.size(); ++i) {
-                        const auto& r1 = visible_rects[i].rc;
-                        // Stay within strip bounds
-                        CHECK(r1.left >= 0);
-                        CHECK(r1.right <= layout.crop_strip_physical.width);
+                    // 2. All 12 buttons must meet minimum 40 DIP cell size
+                    const int min_btn_size_px = dip_to_physical_round(kCropIconCellDip, test_dpi);
+                    const auto& crop_cmds = get_crop_command_items();
+                    for (const auto& item : crop_cmds) {
+                        const int idx = static_cast<int>(SendMessageW(h_tb, TB_COMMANDTOINDEX, static_cast<WPARAM>(item.command_int_id), 0));
+                        CHECK(idx >= 0);
+                        RECT btn_rc{};
+                        CHECK(SendMessageW(h_tb, TB_GETITEMRECT, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(&btn_rc)));
+                        CHECK((btn_rc.right - btn_rc.left) >= min_btn_size_px);
+                        // Vertical cell check: button height is bounded by cell size
+                        CHECK((btn_rc.bottom - btn_rc.top) > 0);
+                    }
 
-                        for (std::size_t j = i + 1; j < visible_rects.size(); ++j) {
-                            const auto& r2 = visible_rects[j].rc;
-                            // Check horizontal overlap: two rects overlap if max(left) < min(right)
-                            const bool x_overlap = ((std::max)(r1.left, r2.left) < (std::min)(r1.right, r2.right));
-                            const bool y_overlap = ((std::max)(r1.top, r2.top) < (std::min)(r1.bottom, r2.bottom));
-                            const bool overlaps = (x_overlap && y_overlap);
-                            if (overlaps) {
-                                std::printf("OVERLAP DETECTED at DPI=%.1f, W=%d between %s [%d, %d] and %s [%d, %d]\n",
-                                            test_dpi, test_w,
-                                            visible_rects[i].name, r1.left, r1.right,
-                                            visible_rects[j].name, r2.left, r2.right);
-                            }
-                            CHECK(!overlaps);
-                        }
+                    if (crop_calc.needs_scroll) {
+                        CHECK(strip.scrolling_active());
+                        HWND h_sb = strip.scrollbar_hwnd();
+                        CHECK(h_sb != nullptr);
+                        CHECK((GetWindowLongW(h_sb, GWL_STYLE) & WS_VISIBLE) != 0);
+                        CHECK(strip.contains_hwnd(h_sb));
+
+                        // Scrollbar must not overlap toolbar or dim summary
+                        RECT rc_sb{};
+                        GetWindowRect(h_sb, &rc_sb);
+                        MapWindowPoints(nullptr, h_strip, reinterpret_cast<POINT*>(&rc_sb), 2);
+                        CHECK(rc_sb.top >= rc_tb.bottom);
                     }
                 }
 
@@ -1414,6 +1416,47 @@ void test_dpi_and_accessibility_hardening() {
             DestroyWindow(host);
         }
         UnregisterClassW(kChromeTestClass, cwc.hInstance);
+    }
+
+    // G. Active Crop direct icon surface layout seam verification:
+    // Catalog contains 12 commands (9 ratios + 3 actions), pure layout guarantees 40 DIP cell size,
+    // <= 2 rows, and horizontal scroll reachability at narrow width.
+    {
+        using namespace oz::viewer;
+
+        const auto& cmds = get_crop_command_items();
+        CHECK(cmds.size() == 12);
+        CHECK(cmds[0].id == ui_command_id::crop_ratio_free);
+        CHECK(cmds[8].id == ui_command_id::crop_ratio_a_series);
+        CHECK(cmds[9].id == ui_command_id::edit_crop_reset);
+        CHECK(cmds[10].id == ui_command_id::edit_crop_apply);
+        CHECK(cmds[11].id == ui_command_id::edit_crop_cancel);
+
+        const float widths_dip[] = {1200.0f, 800.0f, 600.0f, 400.0f, 320.0f, 200.0f};
+        for (float w_dip : widths_dip) {
+            const auto layout = compute_crop_icon_bar_layout(w_dip);
+            CHECK(layout.valid);
+            CHECK(layout.rows >= 1 && layout.rows <= 2);
+            CHECK(layout.bar_height_dip > 0.0f);
+            CHECK(layout.dim_width_dip >= kCropIconMinDimSummaryWidthDip);
+
+            int btn_count = 0;
+            for (const auto& cell : layout.cells) {
+                if (cell.kind == crop_control_kind::ratio_button || cell.kind == crop_control_kind::action_button) {
+                    ++btn_count;
+                    CHECK(cell.width_dip >= kCropIconCellDip);
+                    CHECK(cell.row >= 0 && cell.row < layout.rows);
+                }
+            }
+            CHECK(btn_count == 12);
+
+            if (layout.needs_scroll) {
+                CHECK(layout.scroll_range_dip > 0.0f);
+                CHECK(layout.content_width_dip > layout.available_width_dip);
+            } else {
+                CHECK(layout.scroll_range_dip == 0.0f);
+            }
+        }
     }
 }
 

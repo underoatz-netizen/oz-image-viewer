@@ -152,6 +152,7 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_command_state.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/command_dispatch.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/std_icon_bar.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/crop_icon_bar.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_layout.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/crop_strip.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp

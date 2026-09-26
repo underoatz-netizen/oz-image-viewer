@@ -52,7 +52,20 @@ enum class icon_id : std::uint8_t {
     nav_first,
     nav_prev,
     nav_next,
-    nav_last
+    nav_last,
+    // Active crop direct-icon controls
+    crop_free,
+    crop_original,
+    crop_1x1,
+    crop_3x2,
+    crop_4x3,
+    crop_5x4,
+    crop_16x9,
+    crop_9x16,
+    crop_a_series,
+    crop_reset,
+    crop_apply,
+    crop_cancel
 };
 
 // Returns standard SVG XML text for an icon

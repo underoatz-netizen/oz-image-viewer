@@ -50,6 +50,7 @@
 #include "viewer_strings.hpp"
 #include "ozviewer_resources.h"
 #include "crop_strip.hpp"
+#include "crop_icon_bar.hpp"
 #include "context_menu.hpp"
 #include "clipboard_output.hpp"
 #include "clipboard_input.hpp"
@@ -1584,10 +1585,13 @@ static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& ap
         config.status_height_dip = 0.0f;
     } else if (app.is_fullscreen) {
         // Fullscreen: toolbar and status bar hide; crop strip stays visible while crop is active
+        const float dpi = (app.renderer.dpi > 0.0f) ? app.renderer.dpi : 96.0f;
+        const float available_dip = oz::viewer::physical_to_dip(client_width_px, dpi);
+        const auto crop_bar = oz::viewer::compute_crop_icon_bar_layout(available_dip);
         config.show_toolbar = false;
         config.toolbar_height_dip = 0.0f;
         config.show_crop_strip = is_crop_active;
-        config.crop_strip_height_dip = is_crop_active ? 32.0f : 0.0f;
+        config.crop_strip_height_dip = (is_crop_active && crop_bar.valid) ? crop_bar.bar_height_dip : (is_crop_active ? 48.0f : 0.0f);
         config.show_status = false;
         config.status_height_dip = 0.0f;
     } else {
@@ -1598,10 +1602,11 @@ static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& ap
         const float dpi = (app.renderer.dpi > 0.0f) ? app.renderer.dpi : 96.0f;
         const float available_dip = oz::viewer::physical_to_dip(client_width_px, dpi);
         const auto bar = oz::viewer::compute_std_icon_bar_layout(available_dip);
+        const auto crop_bar = oz::viewer::compute_crop_icon_bar_layout(available_dip);
         config.show_toolbar = true;
         config.toolbar_height_dip = bar.valid ? bar.bar_height_dip : 0.0f;
         config.show_crop_strip = is_crop_active;
-        config.crop_strip_height_dip = is_crop_active ? 32.0f : 0.0f;
+        config.crop_strip_height_dip = (is_crop_active && crop_bar.valid) ? crop_bar.bar_height_dip : (is_crop_active ? 48.0f : 0.0f);
         config.show_status = true;
         config.status_height_dip = 24.0f;
     }
@@ -4342,6 +4347,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 #if OZVIEWER_ENABLE_EDITING
                 if (app->crop_strip_ui) {
                     app->crop_strip_ui->set_dpi(new_dpi);
+                    app->crop_strip_ui->update_icons(app->renderer.d2d_context.Get());
                 }
 #endif
                 const RECT* rc = reinterpret_cast<const RECT*>(lparam);
@@ -4387,6 +4393,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 #if OZVIEWER_ENABLE_EDITING
                 if (app->crop_strip_ui) {
                     app->crop_strip_ui->set_theme(mode);
+                    app->crop_strip_ui->update_icons(app->renderer.d2d_context.Get());
                 }
 #endif
                 redraw_current_view(*app);
@@ -4394,16 +4401,29 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_NOTIFY: {
-            if (app && app->chrome) {
-                return app->chrome->handle_notify(lparam);
+            if (app) {
+#if OZVIEWER_ENABLE_EDITING
+                if (app->crop_strip_ui) {
+                    LRESULT lr = app->crop_strip_ui->handle_notify(lparam);
+                    if (lr != 0) return lr;
+                }
+#endif
+                if (app->chrome) {
+                    return app->chrome->handle_notify(lparam);
+                }
             }
             break;
         }
         case WM_HSCROLL: {
-            // Only the standard-surface scrollbar is horizontal; the chrome
-            // handler verifies ownership before moving the toolbar band.
-            if (app && app->chrome) {
-                app->chrome->handle_hscroll(wparam, lparam);
+            if (app) {
+#if OZVIEWER_ENABLE_EDITING
+                if (app->crop_strip_ui) {
+                    app->crop_strip_ui->handle_hscroll(wparam, lparam);
+                }
+#endif
+                if (app->chrome) {
+                    app->chrome->handle_hscroll(wparam, lparam);
+                }
             }
             return 0;
         }
@@ -5771,7 +5791,9 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
 
 #if OZVIEWER_ENABLE_EDITING
         app.crop_strip_ui = std::make_unique<oz::viewer::crop_strip>();
-        app.crop_strip_ui->create(app.hwnd, hInstance, app.renderer.dpi);
+        if (app.crop_strip_ui->create(app.hwnd, hInstance, app.renderer.dpi)) {
+            app.crop_strip_ui->update_icons(app.renderer.d2d_context.Get());
+        }
 #endif
     }
 
