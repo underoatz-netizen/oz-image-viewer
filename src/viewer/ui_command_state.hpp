@@ -21,6 +21,10 @@ enum class ui_command_id : int {
     file_copy_image = 108,
     file_delete = 109,
     file_print = 110,
+    // Distinct, stable Paste Image command ID. Routed to the existing
+    // clipboard-import behavior (start_paste_from_clipboard); never a
+    // synthesized Ctrl+V key event.
+    file_paste_image = 111,
 
     edit_rotate_left = 201,
     edit_rotate_right = 202,
@@ -101,6 +105,19 @@ struct ui_command_context {
 // Helper to determine if general editing commands (rotate, flip, crop, resize) can be invoked.
 [[nodiscard]] inline bool can_edit(const ui_command_context& ctx) noexcept {
     return ctx.have_image && ctx.has_document && !ctx.crop_active && !ctx.resize_busy && !ctx.save_busy && !ctx.copy_busy && !ctx.print_busy;
+}
+
+// Authoritative Paste Image admission policy (single source of truth for the
+// command state and the dispatch adapter). Paste is dispatchable whenever the
+// viewer is interactive and no modal/busy owner holds the UI. It deliberately
+// does NOT depend on the current document: a paste may replace a blank viewer
+// or an existing document, exactly like the existing Ctrl+V path. Live
+// clipboard contents are never inspected here (a pure predicate never touches
+// the clipboard); the existing paste path performs the bounded clipboard read
+// and fails quietly when nothing pastable exists.
+[[nodiscard]] inline bool can_paste_image(const ui_command_context& ctx) noexcept {
+    return !ctx.benchmark_mode && !ctx.crop_active && !ctx.resize_busy &&
+           !ctx.save_busy && !ctx.copy_busy && !ctx.print_busy;
 }
 
 }  // namespace oz::viewer

@@ -65,6 +65,7 @@
 #include "shell_integration.hpp"
 #include "ui_chrome.hpp"
 #include "ui_command_state.hpp"
+#include "command_dispatch.hpp"
 #include "ui_layout.hpp"
 #include "ui_theme.hpp"
 #include "dpi_fullscreen.hpp"
@@ -135,6 +136,9 @@ constexpr int kIdFileCopyPath = 107;
 constexpr int kIdFileCopyImage = 108;
 constexpr int kIdFileDelete = 109;
 constexpr int kIdFilePrint = 110;
+// Distinct, stable Paste Image command ID (catalog value 111). Routed to the
+// existing clipboard-import behavior; never a synthesized Ctrl+V key event.
+constexpr int kIdFilePasteImage = 111;
 
 #if OZVIEWER_ENABLE_EDITING
 constexpr int kIdEditRotateLeft  = 201;
@@ -3362,6 +3366,81 @@ static void start_paste_from_clipboard(app_state& app) {
     open_pasted_document(app, std::move(bitmap));
 }
 
+// Thin command-catalog dispatch adapter for the icon-first redesign. Routes a
+// catalog command ID to the existing view/navigation/paste handler paths after
+// consulting the authoritative command state (plan_command_dispatch). The
+// adapter never re-implements a safeguard: zoom uses the existing
+// zoom_at_point + redraw path, navigation uses the existing
+// execute_navigation_request path (which owns dirty-discard/crop gating), and
+// paste uses the existing start_paste_from_clipboard path (which owns the
+// clipboard read, modal/busy gating, and dirty-discard prompt). A recognized
+// but disabled command is consumed as a no-op. Returns true when the ID belongs
+// to this adapter's boundary (executed or consumed), false otherwise so the
+// caller can keep its own handling.
+static bool dispatch_catalog_command(app_state& app, int id) {
+    // The catalog ID and the ui_command_id enum value are the same stable
+    // integer; the constant documents the paste route at the WM_COMMAND seam.
+    static_assert(static_cast<int>(oz::viewer::ui_command_id::file_paste_image) ==
+                      kIdFilePasteImage,
+                  "Paste Image catalog ID must match ui_command_id::file_paste_image");
+    const auto ctx = current_ui_command_context(app);
+    const auto plan = oz::viewer::plan_command_dispatch(
+        static_cast<oz::viewer::ui_command_id>(id), ctx);
+    if (plan.kind == oz::viewer::command_dispatch_kind::none) {
+        return false;
+    }
+    if (!plan.enabled) {
+        return true;  // Recognized but disabled: consume with no work.
+    }
+
+    switch (plan.kind) {
+        case oz::viewer::command_dispatch_kind::zoom_in:
+        case oz::viewer::command_dispatch_kind::zoom_out: {
+            if (!app.have_image || !app.current) {
+                return true;
+            }
+            const auto layout = current_ui_layout(app);
+            const int view_w = layout.canvas_physical.width;
+            const int view_h = layout.canvas_physical.height;
+            const auto dims = active_view_dimensions(app);
+            const double cx = view_w * 0.5;
+            const double cy = view_h * 0.5;
+            const double step =
+                (plan.kind == oz::viewer::command_dispatch_kind::zoom_in) ? 1.0 : -1.0;
+            oz::viewer_core::zoom_at_point(app.view, dims.width, dims.height,
+                                           view_w, view_h, cx, cy, step);
+            redraw_current_view(app);
+            update_edit_menu_state(app);
+            return true;
+        }
+        case oz::viewer::command_dispatch_kind::nav_first:
+        case oz::viewer::command_dispatch_kind::nav_prev:
+        case oz::viewer::command_dispatch_kind::nav_next:
+        case oz::viewer::command_dispatch_kind::nav_last: {
+            WPARAM vk_key = VK_LEFT;
+            switch (plan.kind) {
+                case oz::viewer::command_dispatch_kind::nav_first: vk_key = VK_HOME; break;
+                case oz::viewer::command_dispatch_kind::nav_prev:  vk_key = VK_LEFT; break;
+                case oz::viewer::command_dispatch_kind::nav_next:  vk_key = VK_RIGHT; break;
+                case oz::viewer::command_dispatch_kind::nav_last:  vk_key = VK_END; break;
+                default: break;
+            }
+            // Existing navigation path owns dirty-discard, crop modality, and
+            // boundary no-op behavior.
+            execute_navigation_request(app, vk_key, "interactive");
+            return true;
+        }
+        case oz::viewer::command_dispatch_kind::paste_image:
+            // Existing paste path owns the bounded clipboard read, modal/busy
+            // gating, and the dirty-discard prompt. Never a synthesized Ctrl+V.
+            start_paste_from_clipboard(app);
+            return true;
+        case oz::viewer::command_dispatch_kind::none:
+            break;
+    }
+    return true;
+}
+
 // Stage 9.7: clear every document/presentation/navigation artifact for the
 // blank state reached when a recycled file has no successor. The document
 // generation bumps exactly once (reset_to_empty), invalidating all in-flight
@@ -4059,6 +4138,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         start_print(*app);
                     }
                 }
+                return 0;
+            }
+            // Icon-first command catalog: Paste Image (111), Zoom In/Out
+            // (303/304), and First/Previous/Next/Last (305-308) route through
+            // the thin dispatch adapter to the existing handler paths. Unknown
+            // IDs fall through to the handlers below.
+            if (dispatch_catalog_command(*app, id)) {
                 return 0;
             }
             if (id == 302) { // View Fit

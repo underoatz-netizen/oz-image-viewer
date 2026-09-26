@@ -74,6 +74,16 @@ add_test(NAME ozviewer_paste_isolation_scan
                  -DVIEWER_DIR=${CMAKE_SOURCE_DIR}/src/viewer
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_paste_isolation.cmake)
 
+# Icon-first command catalog scan: the distinct Paste Image ID, its
+# authoritative admission policy, and the thin dispatch adapter that routes
+# zoom/navigation/paste to the existing handler paths (never a synthesized
+# Ctrl+V) with disabled commands consumed as no-ops.
+add_test(NAME ozviewer_command_catalog_scan
+         COMMAND ${CMAKE_COMMAND}
+                 -DMAIN_CPP=${CMAKE_SOURCE_DIR}/src/viewer/main.cpp
+                 -DVIEWER_DIR=${CMAKE_SOURCE_DIR}/src/viewer
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/check_command_catalog.cmake)
+
 # Stage 9.4-OFF link guard: copy_controller.cpp (always built) calls
 # read_file_stable_identity, so the always-built source_identity.cpp must own
 # that symbol while edit_controller.cpp stays behind the editing gate.
@@ -140,6 +150,7 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_theme.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_chrome.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_command_state.cpp
+                   ${CMAKE_SOURCE_DIR}/src/viewer/command_dispatch.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/ui_layout.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/crop_strip.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp

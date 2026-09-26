@@ -19,6 +19,7 @@
 #include "../src/viewer/svg_icon_cache.hpp"
 #include "../src/viewer/ui_chrome.hpp"
 #include "../src/viewer/ui_command_state.hpp"
+#include "../src/viewer/command_dispatch.hpp"
 #include "../src/viewer/ui_layout.hpp"
 #include "../src/viewer/dpi_fullscreen.hpp"
 #include "../src/viewer/viewer_strings.hpp"
@@ -263,6 +264,256 @@ void test_ui_command_state() {
         // No presented image: disabled.
         ctx.have_image = false;
         CHECK(!derive_command_state(ui_command_id::file_delete, ctx).enabled);
+    }
+}
+
+// Icon-first command catalog: the distinct Paste Image command ID and its
+// explicit, authoritative admission policy. Paste is document-independent
+// (a paste may replace a blank viewer or an existing document) and is gated
+// only by interactivity and modal/busy ownership. Clipboard contents are never
+// part of this pure state.
+void test_paste_command_state() {
+    using namespace oz::viewer;
+
+    // 1. Distinct, stable catalog ID that does not collide with any existing
+    //    command value.
+    CHECK(static_cast<int>(ui_command_id::file_paste_image) == 111);
+    CHECK(static_cast<int>(ui_command_id::file_paste_image) !=
+          static_cast<int>(ui_command_id::file_print));
+    CHECK(static_cast<int>(ui_command_id::file_paste_image) !=
+          static_cast<int>(ui_command_id::file_delete));
+    CHECK(static_cast<int>(ui_command_id::file_paste_image) !=
+          static_cast<int>(ui_command_id::view_zoom_in));
+
+    // 2. Blank viewer (no image, no document): paste is still dispatchable.
+    {
+        ui_command_context ctx{};
+        const auto st = derive_command_state(ui_command_id::file_paste_image, ctx);
+        CHECK(st.enabled);
+        CHECK(st.visible);
+        CHECK(!st.checked);
+        CHECK(can_paste_image(ctx));
+    }
+
+    // 3. Loaded document: paste remains dispatchable (it may replace it).
+    {
+        ui_command_context ctx{};
+        ctx.have_image = true;
+        ctx.has_document = true;
+        ctx.has_source = true;
+        ctx.has_file_path = true;
+        ctx.is_dirty = true;
+        CHECK(derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+    }
+
+    // 4. Benchmark mode: disabled and invisible, exactly like every command.
+    {
+        ui_command_context ctx{};
+        ctx.benchmark_mode = true;
+        ctx.have_image = true;
+        ctx.has_document = true;
+        const auto st = derive_command_state(ui_command_id::file_paste_image, ctx);
+        CHECK(!st.enabled);
+        CHECK(!st.visible);
+        CHECK(!can_paste_image(ctx));
+    }
+
+    // 5. Modal/busy owners disable paste (crop, resize, save, copy, print).
+    {
+        ui_command_context ctx{};
+        ctx.have_image = true;
+        ctx.has_document = true;
+
+        ctx.crop_active = true;
+        CHECK(!derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        CHECK(!can_paste_image(ctx));
+        ctx.crop_active = false;
+
+        ctx.resize_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        ctx.resize_busy = false;
+
+        ctx.save_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        ctx.save_busy = false;
+
+        ctx.copy_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        ctx.copy_busy = false;
+
+        ctx.print_busy = true;
+        CHECK(!derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        ctx.print_busy = false;
+
+        // All owners clear: dispatchable again.
+        CHECK(derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+    }
+
+    // 6. Editing-OFF-shaped context: crop/resize/save are structurally absent,
+    //    so paste is dispatchable whenever an image is present or not.
+    {
+        ui_command_context ctx{};
+        ctx.crop_active = false;
+        ctx.resize_busy = false;
+        ctx.save_busy = false;
+        CHECK(derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+        ctx.have_image = true;
+        ctx.has_document = true;
+        CHECK(derive_command_state(ui_command_id::file_paste_image, ctx).enabled);
+    }
+}
+
+// Icon-first command catalog: the pure dispatch mapping must agree exactly with
+// the authoritative command state for every catalog ID it owns, and must leave
+// IDs outside its boundary untouched. This proves command parity and the
+// disabled/no-op contract in both Editing-ON and Editing-OFF shaped contexts.
+void test_command_dispatch_parity() {
+    using namespace oz::viewer;
+
+    // 1. Every owned ID maps to its intent and mirrors derive_command_state.
+    struct owned_case {
+        ui_command_id id;
+        command_dispatch_kind kind;
+    };
+    const owned_case owned[] = {
+        {ui_command_id::view_zoom_in, command_dispatch_kind::zoom_in},
+        {ui_command_id::view_zoom_out, command_dispatch_kind::zoom_out},
+        {ui_command_id::nav_first, command_dispatch_kind::nav_first},
+        {ui_command_id::nav_prev, command_dispatch_kind::nav_prev},
+        {ui_command_id::nav_next, command_dispatch_kind::nav_next},
+        {ui_command_id::nav_last, command_dispatch_kind::nav_last},
+        {ui_command_id::file_paste_image, command_dispatch_kind::paste_image},
+    };
+
+    // Editing-ON-shaped context: image + document + navigation available.
+    ui_command_context on_ctx{};
+    on_ctx.have_image = true;
+    on_ctx.has_document = true;
+    on_ctx.has_source = true;
+    on_ctx.has_file_path = true;
+    on_ctx.can_navigate_prev = true;
+    on_ctx.can_navigate_next = true;
+    on_ctx.has_navigation_items = true;
+
+    for (const auto& c : owned) {
+        const auto plan = plan_command_dispatch(c.id, on_ctx);
+        CHECK(plan.kind == c.kind);
+        CHECK(plan.enabled == derive_command_state(c.id, on_ctx).enabled);
+    }
+
+    // 2. IDs outside the adapter boundary are untouched (none/false), so the
+    //    caller keeps its own handling.
+    const ui_command_id outside[] = {
+        ui_command_id::view_fit,
+        ui_command_id::view_actual_size,
+        ui_command_id::view_fullscreen,
+        ui_command_id::file_open,
+        ui_command_id::file_save,
+        ui_command_id::file_copy_image,
+        ui_command_id::edit_rotate_left,
+        ui_command_id::edit_undo,
+        ui_command_id::edit_crop,
+    };
+    for (const auto id : outside) {
+        const auto plan = plan_command_dispatch(id, on_ctx);
+        CHECK(plan.kind == command_dispatch_kind::none);
+        CHECK(!plan.enabled);
+    }
+
+    // 3. Disabled/no-op parity: an empty context disables the image/navigation
+    //    commands (no presented image, no navigation items) while Paste Image
+    //    stays dispatchable by design (a paste may replace a blank viewer). The
+    //    plan always mirrors the authoritative state without changing intent.
+    {
+        ui_command_context empty{};
+        for (const auto& c : owned) {
+            const auto plan = plan_command_dispatch(c.id, empty);
+            CHECK(plan.kind == c.kind);
+            CHECK(plan.enabled == derive_command_state(c.id, empty).enabled);
+        }
+        CHECK(!plan_command_dispatch(ui_command_id::view_zoom_in, empty).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::view_zoom_out, empty).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_first, empty).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_prev, empty).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_next, empty).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_last, empty).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::file_paste_image, empty).enabled);
+    }
+
+    // 4. Benchmark mode disables every owned command (no-op dispatch).
+    {
+        ui_command_context bench = on_ctx;
+        bench.benchmark_mode = true;
+        for (const auto& c : owned) {
+            const auto plan = plan_command_dispatch(c.id, bench);
+            CHECK(plan.kind == c.kind);
+            CHECK(!plan.enabled);
+        }
+    }
+
+    // 5. Modal/busy ownership disables navigation and paste but not zoom
+    //    (zoom is a pure view operation gated only on a presented image).
+    {
+        ui_command_context busy = on_ctx;
+        busy.crop_active = true;
+        CHECK(!plan_command_dispatch(ui_command_id::nav_next, busy).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::file_paste_image, busy).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::view_zoom_in, busy).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::view_zoom_out, busy).enabled);
+    }
+
+    // 6. Navigation boundary parity mirrors the authoritative policy exactly:
+    //    Previous/Next gate on can_navigate_prev/next, while First/Last gate on
+    //    has_navigation_items (they are always available when a list exists).
+    {
+        ui_command_context at_first = on_ctx;
+        at_first.can_navigate_prev = false;
+        at_first.can_navigate_next = true;
+        CHECK(!plan_command_dispatch(ui_command_id::nav_prev, at_first).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_next, at_first).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_first, at_first).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_last, at_first).enabled);
+
+        ui_command_context at_last = on_ctx;
+        at_last.can_navigate_prev = true;
+        at_last.can_navigate_next = false;
+        CHECK(plan_command_dispatch(ui_command_id::nav_prev, at_last).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_next, at_last).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_first, at_last).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_last, at_last).enabled);
+
+        // No navigation list at all: First/Last are disabled too.
+        ui_command_context no_list = on_ctx;
+        no_list.has_navigation_items = false;
+        no_list.can_navigate_prev = false;
+        no_list.can_navigate_next = false;
+        CHECK(!plan_command_dispatch(ui_command_id::nav_first, no_list).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_last, no_list).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_prev, no_list).enabled);
+        CHECK(!plan_command_dispatch(ui_command_id::nav_next, no_list).enabled);
+    }
+
+    // 7. Editing-OFF-shaped context: no crop/resize/save owners exist, so the
+    //    same parity holds with those fields structurally false.
+    {
+        ui_command_context off_ctx{};
+        off_ctx.have_image = true;
+        off_ctx.has_document = true;
+        off_ctx.has_source = true;
+        off_ctx.can_navigate_prev = true;
+        off_ctx.can_navigate_next = true;
+        off_ctx.has_navigation_items = true;
+        off_ctx.crop_active = false;
+        off_ctx.resize_busy = false;
+        off_ctx.save_busy = false;
+        for (const auto& c : owned) {
+            const auto plan = plan_command_dispatch(c.id, off_ctx);
+            CHECK(plan.kind == c.kind);
+            CHECK(plan.enabled == derive_command_state(c.id, off_ctx).enabled);
+        }
+        CHECK(plan_command_dispatch(ui_command_id::file_paste_image, off_ctx).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::nav_next, off_ctx).enabled);
+        CHECK(plan_command_dispatch(ui_command_id::view_zoom_in, off_ctx).enabled);
     }
 }
 
@@ -2988,6 +3239,8 @@ void test_localization_readiness_seam() {
 
 int main() {
     test_ui_command_state();
+    test_paste_command_state();
+    test_command_dispatch_parity();
     test_ui_layout();
     test_svg_icon_cache_and_fallback();
     test_modern_dialogs_mapping_and_fallback();

@@ -60,6 +60,16 @@ ui_item_state derive_command_state(ui_command_id id, const ui_command_context& c
             state.enabled = ctx.have_image && ctx.has_document && ctx.has_source && ctx.has_file_path && not_modal;
             break;
 
+        case ui_command_id::file_paste_image:
+            // Paste Image admission is authoritative and document-independent:
+            // a paste may replace a blank viewer or an existing document. It is
+            // dispatchable whenever the viewer is interactive and no modal/busy
+            // owner holds the UI. Clipboard contents are not part of this pure
+            // state; the existing paste path performs the bounded read and fails
+            // quietly when nothing pastable exists.
+            state.enabled = can_paste_image(ctx);
+            break;
+
         case ui_command_id::edit_rotate_left:
         case ui_command_id::edit_rotate_right:
         case ui_command_id::edit_flip_h:
