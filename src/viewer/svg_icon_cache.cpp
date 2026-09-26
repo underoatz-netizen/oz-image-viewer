@@ -30,6 +30,38 @@ std::string_view get_svg_icon_data(icon_id id) noexcept {
             return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>)";
         case icon_id::fullscreen:
             return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>)";
+        case icon_id::paste_image:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1"/><line x1="12" y1="11" x2="12" y2="16"/><polyline points="9.5 13.5 12 16 14.5 13.5"/></svg>)";
+        case icon_id::save_as:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><line x1="14" y1="9" x2="18" y2="5"/><line x1="16" y1="5" x2="18" y2="5"/><line x1="18" y1="5" x2="18" y2="7"/></svg>)";
+        case icon_id::open_location:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><circle cx="13" cy="13" r="3"/><line x1="15.2" y1="15.2" x2="18.5" y2="18.5"/></svg>)";
+        case icon_id::copy_image:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/><circle cx="13" cy="13" r="1.1"/><polyline points="9 19 12 16 14 18 16 16 21 21"/></svg>)";
+        case icon_id::copy_file:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6l4 4v3"/><line x1="12" y1="13" x2="18" y2="13"/><line x1="12" y1="16" x2="16" y2="16"/></svg>)";
+        case icon_id::copy_path:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>)";
+        case icon_id::print:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>)";
+        case icon_id::delete_image:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>)";
+        case icon_id::flip_h:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 7 4 12 8 17"/><polyline points="16 7 20 12 16 17"/></svg>)";
+        case icon_id::flip_v:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><polyline points="7 8 12 4 17 8"/><polyline points="7 16 12 20 17 16"/></svg>)";
+        case icon_id::zoom_in:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>)";
+        case icon_id::zoom_out:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="8" y1="12" x2="16" y2="12"/></svg>)";
+        case icon_id::nav_first:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="5" x2="6" y2="19"/><polyline points="18 5 11 12 18 19"/></svg>)";
+        case icon_id::nav_prev:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg>)";
+        case icon_id::nav_next:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>)";
+        case icon_id::nav_last:
+            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="5" x2="18" y2="19"/><polyline points="6 5 13 12 6 19"/></svg>)";
         default:
             return {};
     }
@@ -48,6 +80,22 @@ std::wstring_view get_icon_fallback_label(icon_id id) noexcept {
         case icon_id::fit: return L"Fit";
         case icon_id::one_to_one: return L"1:1";
         case icon_id::fullscreen: return L"Full";
+        case icon_id::paste_image: return L"Paste";
+        case icon_id::save_as: return L"SaveAs";
+        case icon_id::open_location: return L"OpenLoc";
+        case icon_id::copy_image: return L"CopyImg";
+        case icon_id::copy_file: return L"CopyFile";
+        case icon_id::copy_path: return L"CopyPath";
+        case icon_id::print: return L"Print";
+        case icon_id::delete_image: return L"Delete";
+        case icon_id::flip_h: return L"FlipH";
+        case icon_id::flip_v: return L"FlipV";
+        case icon_id::zoom_in: return L"ZoomIn";
+        case icon_id::zoom_out: return L"ZoomOut";
+        case icon_id::nav_first: return L"First";
+        case icon_id::nav_prev: return L"Prev";
+        case icon_id::nav_next: return L"Next";
+        case icon_id::nav_last: return L"Last";
         default: return L"";
     }
 }

@@ -34,7 +34,25 @@ enum class icon_id : std::uint8_t {
     resize,
     fit,
     one_to_one,
-    fullscreen
+    fullscreen,
+    // Standard direct-icon surface additions (icon-first boundary). One icon
+    // per active non-crop command so every button is a real, distinct glyph.
+    paste_image,
+    save_as,
+    open_location,
+    copy_image,
+    copy_file,
+    copy_path,
+    print,
+    delete_image,
+    flip_h,
+    flip_v,
+    zoom_in,
+    zoom_out,
+    nav_first,
+    nav_prev,
+    nav_next,
+    nav_last
 };
 
 // Returns standard SVG XML text for an icon

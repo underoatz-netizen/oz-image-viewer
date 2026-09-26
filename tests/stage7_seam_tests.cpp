@@ -20,6 +20,7 @@
 #include "../src/viewer/ui_chrome.hpp"
 #include "../src/viewer/ui_command_state.hpp"
 #include "../src/viewer/command_dispatch.hpp"
+#include "../src/viewer/std_icon_bar.hpp"
 #include "../src/viewer/ui_layout.hpp"
 #include "../src/viewer/dpi_fullscreen.hpp"
 #include "../src/viewer/viewer_strings.hpp"
@@ -1304,6 +1305,7 @@ void test_dpi_and_accessibility_hardening() {
     // E. SVG and Fallback semantic labels and accessible text verification
     {
         const auto& descs = get_toolbar_button_descriptors();
+        CHECK(descs.size() == 27);
         for (const auto& desc : descs) {
             // Accessible names must be complete commands, not abbreviations
             CHECK(desc.accessible_name != nullptr);
@@ -1316,6 +1318,102 @@ void test_dpi_and_accessibility_hardening() {
             // Must have substantive length and semantic completeness
             CHECK(acc_name.length() >= 4);
         }
+    }
+
+    // F. Standard icon surface: 40x40 DIP cell size, grouping, bounded two-row packing,
+    // and horizontal scrolling reachability across DPIs and narrow widths.
+    {
+        using namespace oz::viewer;
+
+        // 1. Catalog integrity: exactly 27 non-crop commands, 3 groups.
+        const auto& cmds = get_std_icon_commands();
+        CHECK(cmds.size() == 27);
+        int group_starts = 0;
+        for (const auto& c : cmds) {
+            if (c.group_start) ++group_starts;
+        }
+        CHECK(group_starts == 3); // File, History, View
+
+        // 2. Pure layout seam: 40x40 DIP cell bound and row ceiling (<= 2 rows)
+        const float dpis[] = {96.0f, 120.0f, 144.0f, 192.0f};
+        const float widths_dip[] = {1600.0f, 1200.0f, 800.0f, 600.0f, 400.0f, 320.0f, 200.0f};
+
+        for (float w_dip : widths_dip) {
+            const auto layout = compute_std_icon_bar_layout(w_dip);
+            CHECK(layout.valid);
+            CHECK(layout.rows >= 1 && layout.rows <= 2);
+            CHECK(layout.bar_height_dip > 0.0f);
+
+            // Every active command must be represented in layout cells
+            int cmd_cell_count = 0;
+            int sep_cell_count = 0;
+            for (const auto& cell : layout.cells) {
+                if (cell.separator) {
+                    ++sep_cell_count;
+                    CHECK(cell.width_dip == kStdIconSeparatorDip);
+                } else {
+                    ++cmd_cell_count;
+                    CHECK(cell.width_dip >= kStdIconCellDip);
+                    CHECK(cell.row >= 0 && cell.row < layout.rows);
+                }
+            }
+            CHECK(cmd_cell_count == 27);
+            CHECK(sep_cell_count == 2); // 2 separators between 3 groups
+
+            if (layout.needs_scroll) {
+                CHECK(layout.scroll_range_dip > 0.0f);
+                CHECK(layout.content_width_dip > layout.available_width_dip);
+            } else {
+                CHECK(layout.scroll_range_dip == 0.0f);
+            }
+        }
+
+        // 3. Native ui_chrome control integration test: toolbar + horizontal scrollbar
+        const wchar_t kChromeTestClass[] = L"OzStdIconChromeTestWindow";
+        WNDCLASSEXW cwc{sizeof(cwc)};
+        cwc.lpfnWndProc = DefWindowProcW;
+        cwc.hInstance = GetModuleHandleW(nullptr);
+        cwc.lpszClassName = kChromeTestClass;
+        RegisterClassExW(&cwc);
+
+        HWND host = CreateWindowExW(
+            0, kChromeTestClass, L"StdIconChromeHost", WS_OVERLAPPEDWINDOW,
+            0, 0, 1200, 800, nullptr, nullptr, cwc.hInstance, nullptr);
+        CHECK(host != nullptr);
+
+        if (host) {
+            for (float test_dpi : dpis) {
+                ui_chrome chrome;
+                CHECK(chrome.create(host, cwc.hInstance, test_dpi));
+                HWND tb = chrome.toolbar_hwnd();
+                HWND sb = chrome.bar_scrollbar_hwnd();
+                CHECK(tb != nullptr);
+                CHECK(sb != nullptr);
+
+                // Both wide and narrow layout updates
+                for (int test_w_px : {1200, 800, 480, 320}) {
+                    ui_layout_config cfg{};
+                    const float w_dip = physical_to_dip(test_w_px, test_dpi);
+                    const auto bar_calc = compute_std_icon_bar_layout(w_dip);
+                    cfg.show_toolbar = true;
+                    cfg.toolbar_height_dip = bar_calc.bar_height_dip;
+
+                    const auto layout = compute_ui_layout(test_w_px, 600, test_dpi, cfg);
+                    chrome.update_layout(layout, false);
+
+                    CHECK(chrome.contains_hwnd(tb));
+                    CHECK(chrome.contains_hwnd(sb));
+
+                    if (bar_calc.needs_scroll) {
+                        CHECK(chrome.bar_scrolling_active());
+                        CHECK((GetWindowLongW(sb, GWL_STYLE) & WS_VISIBLE) != 0);
+                    }
+                }
+                chrome.destroy();
+            }
+            DestroyWindow(host);
+        }
+        UnregisterClassW(kChromeTestClass, cwc.hInstance);
     }
 }
 

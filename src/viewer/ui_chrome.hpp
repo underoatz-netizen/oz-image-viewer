@@ -41,7 +41,8 @@ struct toolbar_button_desc {
     bool is_check_button = false;
 };
 
-// Returns standard descriptions for the 11 toolbar buttons
+// Returns standard descriptions for every active non-crop command button shown
+// on the standard direct-icon surface (27 commands), in catalog order.
 [[nodiscard]] const std::vector<toolbar_button_desc>& get_toolbar_button_descriptors() noexcept;
 
 // Modern interactive-only UI Chrome manager:
@@ -74,10 +75,17 @@ public:
         return hwnd_status_;
     }
 
+    // Native horizontal scrollbar revealed only when the standard icon surface
+    // cannot fit every command in two rows at the current width.
+    [[nodiscard]] HWND bar_scrollbar_hwnd() const noexcept {
+        return hwnd_bar_scroll_;
+    }
+
     [[nodiscard]] bool contains_hwnd(HWND h) const noexcept {
         if (!h) return false;
         return (h == hwnd_toolbar_ || IsChild(hwnd_toolbar_, h) ||
-                h == hwnd_status_  || IsChild(hwnd_status_, h));
+                h == hwnd_status_  || IsChild(hwnd_status_, h) ||
+                h == hwnd_bar_scroll_ || IsChild(hwnd_bar_scroll_, h));
     }
 
     // Update DPI (re-creates fonts and updates control metric layout)
@@ -98,8 +106,19 @@ public:
     // Update status bar text fields without per-frame polling
     void update_status(const status_bar_info& info) noexcept;
 
-    // Handle WM_NOTIFY for TTN_GETDISPINFO and custom draw if needed
+    // Handle WM_NOTIFY for TTN_GETDISPINFO, custom draw, and focus-driven
+    // horizontal auto-scroll of the standard icon surface.
     LRESULT handle_notify(LPARAM lparam) noexcept;
+
+    // Handle WM_HSCROLL from the standard-surface scrollbar (the scrollbar is a
+    // direct child of the main window, so the message arrives at the window).
+    void handle_hscroll(WPARAM wparam, LPARAM lparam) noexcept;
+
+    // True when the standard-surface scrollbar is currently visible (two rows
+    // do not fit every command at the current width).
+    [[nodiscard]] bool bar_scrolling_active() const noexcept {
+        return hwnd_bar_scroll_ != nullptr && bar_scroll_range_px_ > 0;
+    }
 
     // Handle WM_CTLCOLORSTATIC / WM_CTLCOLORBTN for theme backgrounds
     HBRUSH handle_ctl_color(HDC hdc, HWND control) noexcept;
@@ -116,11 +135,26 @@ private:
     void rebuild_fonts() noexcept;
     void setup_toolbar_buttons() noexcept;
     void setup_tooltips() noexcept;
+    void apply_command_button_size() noexcept;
+    void reposition_bar() noexcept;
+    void scroll_to_offset(int pos_px) noexcept;
+    void ensure_command_visible(int command_int_id) noexcept;
 
     HWND parent_ = nullptr;
     HWND hwnd_toolbar_ = nullptr;
     HWND hwnd_status_ = nullptr;
     HWND hwnd_tooltip_ = nullptr;
+    HWND hwnd_bar_scroll_ = nullptr;
+
+    // Standard icon surface scroll geometry (physical pixels).
+    int bar_band_x_ = 0;
+    int bar_band_y_ = 0;
+    int bar_band_w_ = 0;
+    int bar_band_h_ = 0;
+    int bar_toolbar_height_px_ = 0;
+    int bar_view_width_px_ = 0;
+    int bar_scroll_pos_px_ = 0;
+    int bar_scroll_range_px_ = 0;
 
     float dpi_ = 96.0f;
     theme_mode theme_mode_ = theme_mode::light;

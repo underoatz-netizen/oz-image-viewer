@@ -73,6 +73,61 @@
 #define IDS_TB_ACC_ACTUAL 5079
 #define IDS_TB_ACC_FULLSCREEN 5080
 
+// Icon-first standard (non-crop) direct-icon surface: tooltip / shortcut /
+// accessible-name strings for the commands that did not previously have a
+// toolbar button. Same contract as the ids above (one definition shared by the
+// English STRINGTABLE and the compiled-in fallback table). Three contiguous
+// blocks: tips 5600+, shortcuts 5620+, accessible names 5640+. Commands with no
+// keyboard shortcut intentionally have no shortcut id (their tooltip is the
+// plain command name).
+#define IDS_TB_TIP_PASTE_IMAGE 5600
+#define IDS_TB_TIP_SAVE_AS 5601
+#define IDS_TB_TIP_OPEN_LOCATION 5602
+#define IDS_TB_TIP_COPY_IMAGE 5603
+#define IDS_TB_TIP_COPY_FILE 5604
+#define IDS_TB_TIP_COPY_PATH 5605
+#define IDS_TB_TIP_PRINT 5606
+#define IDS_TB_TIP_DELETE 5607
+#define IDS_TB_TIP_FLIP_H 5608
+#define IDS_TB_TIP_FLIP_V 5609
+#define IDS_TB_TIP_ZOOM_IN 5610
+#define IDS_TB_TIP_ZOOM_OUT 5611
+#define IDS_TB_TIP_FIRST 5612
+#define IDS_TB_TIP_PREV 5613
+#define IDS_TB_TIP_NEXT 5614
+#define IDS_TB_TIP_LAST 5615
+
+#define IDS_TB_SHORTCUT_PASTE_IMAGE 5620
+#define IDS_TB_SHORTCUT_SAVE_AS 5621
+#define IDS_TB_SHORTCUT_COPY_IMAGE 5622
+#define IDS_TB_SHORTCUT_PRINT 5623
+#define IDS_TB_SHORTCUT_DELETE 5624
+#define IDS_TB_SHORTCUT_FLIP_H 5625
+#define IDS_TB_SHORTCUT_FLIP_V 5626
+#define IDS_TB_SHORTCUT_ZOOM_IN 5627
+#define IDS_TB_SHORTCUT_ZOOM_OUT 5628
+#define IDS_TB_SHORTCUT_FIRST 5629
+#define IDS_TB_SHORTCUT_PREV 5630
+#define IDS_TB_SHORTCUT_NEXT 5631
+#define IDS_TB_SHORTCUT_LAST 5632
+
+#define IDS_TB_ACC_PASTE_IMAGE 5640
+#define IDS_TB_ACC_SAVE_AS 5641
+#define IDS_TB_ACC_OPEN_LOCATION 5642
+#define IDS_TB_ACC_COPY_IMAGE 5643
+#define IDS_TB_ACC_COPY_FILE 5644
+#define IDS_TB_ACC_COPY_PATH 5645
+#define IDS_TB_ACC_PRINT 5646
+#define IDS_TB_ACC_DELETE 5647
+#define IDS_TB_ACC_FLIP_H 5648
+#define IDS_TB_ACC_FLIP_V 5649
+#define IDS_TB_ACC_ZOOM_IN 5650
+#define IDS_TB_ACC_ZOOM_OUT 5651
+#define IDS_TB_ACC_FIRST 5652
+#define IDS_TB_ACC_PREV 5653
+#define IDS_TB_ACC_NEXT 5654
+#define IDS_TB_ACC_LAST 5655
+
 #define IDS_MENU_FILE_OPEN 5100
 #define IDS_MENU_FILE_OPEN_LOCATION 5101
 #define IDS_MENU_FILE_COPY_IMAGE 5102

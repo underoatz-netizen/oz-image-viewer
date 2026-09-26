@@ -66,6 +66,7 @@
 #include "ui_chrome.hpp"
 #include "ui_command_state.hpp"
 #include "command_dispatch.hpp"
+#include "std_icon_bar.hpp"
 #include "ui_layout.hpp"
 #include "ui_theme.hpp"
 #include "dpi_fullscreen.hpp"
@@ -188,7 +189,8 @@ static void start_paste_from_clipboard(app_state& app);
 static void start_recycle_delete(app_state& app);
 static void enter_recycle_blank_state(app_state& app);
 static void update_open_button_layout(app_state& app);
-static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app) noexcept;
+static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app,
+                                                             std::int32_t client_width_px) noexcept;
 static oz::viewer::ui_layout_result current_ui_layout(const app_state& app) noexcept;
 static oz::viewer::presentation_plan compute_active_presentation_plan(app_state& app, int view_w, int view_h);
 static bool upload_and_present(app_state& app, std::uint64_t* out_present_ticks = nullptr);
@@ -1563,7 +1565,8 @@ static bool check_dirty_discard_allowed(app_state& app) {
     return true;
 }
 
-static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app) noexcept {
+static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& app,
+                                                             std::int32_t client_width_px) noexcept {
     oz::viewer::ui_layout_config config{};
     const bool is_crop_active =
 #if OZVIEWER_ENABLE_EDITING
@@ -1588,8 +1591,15 @@ static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& ap
         config.show_status = false;
         config.status_height_dip = 0.0f;
     } else {
+        // Standard direct-icon surface: a bounded (<=2 row) band whose height
+        // is derived from the pure std_icon_bar seam so a narrow window keeps
+        // every command reachable (two rows, then horizontal scrolling) rather
+        // than hiding commands. No overflow menu exists.
+        const float dpi = (app.renderer.dpi > 0.0f) ? app.renderer.dpi : 96.0f;
+        const float available_dip = oz::viewer::physical_to_dip(client_width_px, dpi);
+        const auto bar = oz::viewer::compute_std_icon_bar_layout(available_dip);
         config.show_toolbar = true;
-        config.toolbar_height_dip = 32.0f;
+        config.toolbar_height_dip = bar.valid ? bar.bar_height_dip : 0.0f;
         config.show_crop_strip = is_crop_active;
         config.crop_strip_height_dip = is_crop_active ? 32.0f : 0.0f;
         config.show_status = true;
@@ -1610,7 +1620,8 @@ static oz::viewer::ui_layout_result current_ui_layout(const app_state& app) noex
     return oz::viewer::compute_ui_layout(static_cast<std::int32_t>(rc.right),
                                          static_cast<std::int32_t>(rc.bottom),
                                          dpi,
-                                         current_ui_layout_config(app));
+                                         current_ui_layout_config(app,
+                                                                  static_cast<std::int32_t>(rc.right)));
 }
 
 static oz::viewer::ui_command_context current_ui_command_context(const app_state& app) noexcept {
@@ -4388,6 +4399,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         }
+        case WM_HSCROLL: {
+            // Only the standard-surface scrollbar is horizontal; the chrome
+            // handler verifies ownership before moving the toolbar band.
+            if (app && app->chrome) {
+                app->chrome->handle_hscroll(wparam, lparam);
+            }
+            return 0;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN: {
             if (app) {
@@ -5918,6 +5937,22 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
             // Enables cycling through crop strip controls (Ratio Combo -> Reset -> Apply -> Cancel)
             if (msg.wParam == VK_TAB && app.crop_strip_ui && app.crop_strip_ui->contains_hwnd(focused)) {
                 HWND next_ctrl = GetNextDlgTabItem(app.crop_strip_ui->hwnd(), focused, shift_down ? TRUE : FALSE);
+                if (next_ctrl && IsWindow(next_ctrl)) {
+                    SetFocus(next_ctrl);
+                }
+                continue;
+            }
+
+            // 4b. Tab Navigation across the standard icon surface and its
+            // horizontal scrollbar. The scrollbar is only present while two
+            // rows cannot fit every command; cycling to it keeps off-screen
+            // commands keyboard-reachable (the scrollbar scrolls with
+            // Left/Right and Page keys).
+            if (msg.wParam == VK_TAB && app.chrome && app.chrome->bar_scrolling_active() &&
+                app.chrome->contains_hwnd(focused)) {
+                HWND toolbar_h = app.chrome->toolbar_hwnd();
+                HWND scroll_h = app.chrome->bar_scrollbar_hwnd();
+                HWND next_ctrl = (focused == scroll_h) ? toolbar_h : scroll_h;
                 if (next_ctrl && IsWindow(next_ctrl)) {
                     SetFocus(next_ctrl);
                 }
