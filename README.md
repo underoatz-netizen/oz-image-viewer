@@ -13,10 +13,9 @@ It is built with C++23, Win32, Direct3D 11, DXGI and Direct2D.
 ## Project status
 
 > **In development.** OZ Image Viewer is at version 0.1.0. There is no public
-> release and no public download, and the source repository is not publicly
-> accessible.
+> release and no public download.
 
-- Source repository (private): <https://github.com/underoatz-netizen/oz-image-viewer>
+- Source repository (public): <https://github.com/underoatz-netizen/oz-image-viewer>
 - Product page (once the OZ Lab site is published):
   <https://underoatz-netizen.github.io/software/oz-image-viewer/>
 
