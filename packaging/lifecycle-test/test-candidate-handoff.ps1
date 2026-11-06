@@ -729,12 +729,169 @@ function Verify-Hex64([string]$filename, [string]$hash) {
     # =========================================================================
     # Part 8: Process Ownership & Cleanup Failure Handling Tests
     # =========================================================================
-    # 8.1: Test Get-ProcessOwnerSidSafely rejects query failures as unknown rather than not-owned
-    $mockFailingProcess = [pscustomobject]@{ ProcessId = 99999 }
-    $qFail = Get-ProcessOwnerSidSafely -Process $mockFailingProcess
-    Assert-Condition ($qFail.Success -eq $false) "Get-ProcessOwnerSidSafely should fail for mock process without CIM method"
-    Assert-Condition ($null -eq $qFail.Sid) "Get-ProcessOwnerSidSafely must return null SID on failure"
-    Pass "Process ownership helper: Safely treats query failure as UNKNOWN (Success=false) rather than not-owned."
+    # 8.1: Test Get-ProcessOwnerSidSafely contract, exit race confirmation, and fail-closed handling
+    $currentPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
+    $currentProcCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $currentPid"
+    Assert-Condition ($null -ne $currentProcCim) "Failed to query current process CIM instance"
+
+    # 8.1.1: Standard owned SID success
+    $qSelf = Get-ProcessOwnerSidSafely -Process $currentProcCim
+    Assert-Condition ($qSelf.Success -eq $true) "Get-ProcessOwnerSidSafely should succeed for self"
+    Assert-Condition ($qSelf.AlreadyExited -eq $false) "Self process is not AlreadyExited"
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($qSelf.Sid)) "Self process owner SID must be non-empty"
+    Assert-Condition ($null -eq $qSelf.Error) "Self process Error must be null"
+    Pass "Process ownership helper: Standard owned SID query succeeds with strict fields."
+
+    # 8.1.2: Mock GetOwnerSid throws Not found + fresh query returns empty -> AlreadyExited=true confirmed
+    # Use non-existent PID 999999
+    $mockExitedProc = [pscustomobject]@{
+        ProcessId    = 999999
+        CreationDate = [DateTime]::UtcNow.AddHours(-1)
+    }
+    $qExited = Get-ProcessOwnerSidSafely -Process $mockExitedProc
+    Assert-Condition ($qExited.Success -eq $true) "Non-existent process confirmed naturally exited must have Success=true"
+    Assert-Condition ($qExited.AlreadyExited -eq $true) "Non-existent process must report AlreadyExited=true"
+    Assert-Condition ($null -eq $qExited.Sid) "AlreadyExited process must return null Sid"
+    Assert-Condition ($null -eq $qExited.Error) "AlreadyExited process must have null Error"
+    Pass "Process ownership helper: GetOwnerSid failure + fresh query empty correctly confirms AlreadyExited=true."
+
+    # 8.1.3: Active process present + owner query fails -> fail closed as UNKNOWN (Success=false, AlreadyExited=false)
+    # We can mock this by creating a mock object whose ProcessId is $currentPid but has no GetOwnerSid CIM method
+    $mockActiveFailOwner = [pscustomobject]@{
+        ProcessId    = $currentPid
+        CreationDate = $currentProcCim.CreationDate
+    }
+    $qPresentFailOwner = Get-ProcessOwnerSidSafely -Process $mockActiveFailOwner
+    Assert-Condition ($qPresentFailOwner.Success -eq $false) "Active process with failed GetOwnerSid must fail closed (Success=false)"
+    Assert-Condition ($qPresentFailOwner.AlreadyExited -eq $false) "Active process with failed GetOwnerSid must NOT be AlreadyExited"
+    Assert-Condition ($null -eq $qPresentFailOwner.Sid) "Failed owner query must return null Sid"
+    Assert-Condition ($qPresentFailOwner.Error -match "still active but owner query failed") "Error must indicate process is active but owner query failed"
+    Pass "Process ownership helper: Active process + owner failure correctly fails closed as UNKNOWN."
+
+    # 8.1.4: Positive PID with owner failure where fresh CIM query throws -> fail closed as UNKNOWN
+    # We can mock this by creating a mock object whose ProcessId is positive but causes Get-CimInstance to throw
+    # by using an in-scope mock function for Get-CimInstance during this test block
+    $mockThrowingProc = [pscustomobject]@{
+        ProcessId    = 88888
+        CreationDate = [DateTime]::UtcNow.AddHours(-1)
+    }
+    # Invoke with temporary wrapper to test fresh CIM query exception handling
+    $scriptBlockThrowCim = {
+        param($proc)
+        function Get-CimInstance {
+            param([string]$ClassName, [string]$Filter, $ErrorAction)
+            throw "Simulated WMI/CIM provider RPC failure"
+        }
+        Get-ProcessOwnerSidSafely -Process $proc
+    }
+    $qThrow = & $scriptBlockThrowCim $mockThrowingProc
+    Assert-Condition ($qThrow.Success -eq $false) "Query failure on fresh check must fail closed (Success=false)"
+    Assert-Condition ($qThrow.AlreadyExited -eq $false) "Query failure on fresh check must NOT claim AlreadyExited"
+    Assert-Condition ($qThrow.Error -match "Simulated WMI/CIM provider RPC failure") "Error must preserve CIM failure details"
+    Pass "Process ownership helper: Positive PID with fresh CIM query throw correctly fails closed as UNKNOWN."
+
+    # 8.1.5: Same PID but different CreationDate (PID reuse) -> must fail closed and NOT claim AlreadyExited or safe
+    $mockReusedPid = [pscustomobject]@{
+        ProcessId    = $currentPid
+        CreationDate = [DateTime]::UtcNow.AddDays(-10) # definitely different from $currentProcCim.CreationDate
+    }
+    $qReused = Get-ProcessOwnerSidSafely -Process $mockReusedPid
+    Assert-Condition ($qReused.Success -eq $false) "PID reuse must fail closed (Success=false)"
+    Assert-Condition ($qReused.AlreadyExited -eq $false) "PID reuse must NOT claim AlreadyExited=true"
+    Assert-Condition ($qReused.Error -match "reused by another process") "Error must record PID reuse detection"
+    Pass "Process ownership helper: Same PID with different CreationDate correctly detects PID reuse without claiming exited."
+
+    # 8.1.6: Pure helper Test-ProcessIdentityMatchForTermination unit tests (side-effect free, no process kill)
+    $origTargetSample = [pscustomobject]@{
+        ProcessId    = 5555
+        CreationDate = [DateTime]::Parse("2026-11-06T12:00:00Z")
+        OwnerSid     = "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    }
+
+    # Case A: Same identity, PID, CreationDate, and expected standard user SID -> PASS
+    $liveMatching = [pscustomobject]@{
+        Success       = $true
+        AlreadyExited = $false
+        ProcessId     = 5555
+        CreationDate  = [DateTime]::Parse("2026-11-06T12:00:00Z")
+        Sid           = "S-1-5-21-1234567890-1234567890-1234567890-5001"
+        Error         = $null
+    }
+    $decMatch = Test-ProcessIdentityMatchForTermination `
+        -OriginalRecord $origTargetSample `
+        -LiveQueryState $liveMatching `
+        -ExpectedUserSid "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    Assert-Condition ($decMatch.CanTerminate -eq $true) "Matching process identity must allow termination"
+    Assert-Condition ($decMatch.AlreadyExited -eq $false) "Matching active process is not AlreadyExited"
+    Pass "Process termination guard: Exact matching identity and expected user SID passes."
+
+    # Case B: Same PID + same SID, but DIFFERENT CreationDate (PID reuse by same user) -> REJECT
+    $liveReusedSameSid = [pscustomobject]@{
+        Success       = $true
+        AlreadyExited = $false
+        ProcessId     = 5555
+        CreationDate  = [DateTime]::Parse("2026-11-06T12:05:00Z") # Reused later!
+        Sid           = "S-1-5-21-1234567890-1234567890-1234567890-5001"
+        Error         = $null
+    }
+    $decReusedSameSid = Test-ProcessIdentityMatchForTermination `
+        -OriginalRecord $origTargetSample `
+        -LiveQueryState $liveReusedSameSid `
+        -ExpectedUserSid "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    Assert-Condition ($decReusedSameSid.CanTerminate -eq $false) "Same PID with different CreationDate must REJECT termination"
+    Assert-Condition ($decReusedSameSid.Reason -match "PID reuse detected") "Reason must indicate PID reuse"
+    Pass "Process termination guard: Same PID with different CreationDate correctly rejects termination."
+
+    # Case C: Same PID, but DIFFERENT SID (PID reuse by another user/system) -> REJECT
+    $liveDifferentSid = [pscustomobject]@{
+        Success       = $true
+        AlreadyExited = $false
+        ProcessId     = 5555
+        CreationDate  = [DateTime]::Parse("2026-11-06T12:00:00Z")
+        Sid           = "S-1-5-18" # Local System
+        Error         = $null
+    }
+    $decDiffSid = Test-ProcessIdentityMatchForTermination `
+        -OriginalRecord $origTargetSample `
+        -LiveQueryState $liveDifferentSid `
+        -ExpectedUserSid "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    Assert-Condition ($decDiffSid.CanTerminate -eq $false) "Different owner SID must REJECT termination"
+    Assert-Condition ($decDiffSid.Reason -match "does not match expected user SID") "Reason must indicate SID mismatch"
+    Pass "Process termination guard: Different SID correctly rejects termination."
+
+    # Case D: Live query failed / unknown (Success=false) -> REJECT
+    $liveUnknown = [pscustomobject]@{
+        Success       = $false
+        AlreadyExited = $false
+        ProcessId     = 5555
+        CreationDate  = [DateTime]::Parse("2026-11-06T12:00:00Z")
+        Sid           = $null
+        Error         = "Access Denied"
+    }
+    $decUnknown = Test-ProcessIdentityMatchForTermination `
+        -OriginalRecord $origTargetSample `
+        -LiveQueryState $liveUnknown `
+        -ExpectedUserSid "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    Assert-Condition ($decUnknown.CanTerminate -eq $false) "Unresolved/failed query must REJECT termination"
+    Assert-Condition ($decUnknown.Reason -match "Live ownership query failed or unresolved") "Reason must indicate failed query"
+    Pass "Process termination guard: Unresolved/failed live query correctly rejects termination."
+
+    # Case E: Confirmed naturally exited (AlreadyExited=true) -> No kill, but reports AlreadyExited
+    $liveExited = [pscustomobject]@{
+        Success       = $true
+        AlreadyExited = $true
+        ProcessId     = 5555
+        CreationDate  = [DateTime]::Parse("2026-11-06T12:00:00Z")
+        Sid           = $null
+        Error         = $null
+    }
+    $decExited = Test-ProcessIdentityMatchForTermination `
+        -OriginalRecord $origTargetSample `
+        -LiveQueryState $liveExited `
+        -ExpectedUserSid "S-1-5-21-1234567890-1234567890-1234567890-5001"
+    Assert-Condition ($decExited.CanTerminate -eq $false) "Exited process must not be terminated"
+    Assert-Condition ($decExited.AlreadyExited -eq $true) "AlreadyExited flag must be true"
+    Pass "Process termination guard: Naturally exited process correctly reported with CanTerminate=false and AlreadyExited=true."
 
     # 8.2: Test manifest verification rejects wrong repository, run ID, and installer hash
     $badRepoDir = Join-Path $WorkDir "bad-repo-stage"

@@ -127,35 +127,231 @@ function Get-NativeTokenElevationState {
 function Get-ProcessOwnerSidSafely {
     <#
     .SYNOPSIS
-      Queries a Win32_Process instance's owner SID safely.
+      Queries a Win32_Process instance's owner SID safely with race-tolerant exit verification.
       Returns:
-        @{ Success = $true; Sid = "<sid>" } when successfully resolved.
-        @{ Success = $false; Error = "<error>" } when query fails or returns non-zero.
+        [pscustomobject]@{
+            Success        = $true | $false
+            AlreadyExited  = $true | $false
+            Sid            = "<sid>" | $null
+            CreationDate   = [DateTime] | $null
+            Error          = "<error>" | $null
+        }
+      Under StrictMode, all fields are guaranteed to exist.
+      If GetOwnerSid succeeds and ReturnValue == 0:
+        Success=$true, AlreadyExited=$false, Sid=<sid>.
+      If GetOwnerSid throws or returns non-zero:
+        Performs a fresh, authoritative CIM query for the exact ProcessId:
+        - If query succeeds and returns NO process: the process confirmed naturally exited ->
+          AlreadyExited=$true, Success=$true, Sid=$null.
+        - If query succeeds and returns a process:
+          If CreationDate differs from the original snapshot -> original process exited, but PID
+          has been reused -> AlreadyExited=$false, Success=$false, Error="PID <id> was reused by a different process (creation date mismatch)"
+          If CreationDate matches -> process is still running and ownership query failed ->
+          AlreadyExited=$false, Success=$false, Error="GetOwnerSid failed: <err>"
+        - If query throws or fails -> fail closed: AlreadyExited=$false, Success=$false, Error="<err>".
     #>
     param([Parameter(Mandatory = $true)]$Process)
 
+    $procId = $null
+    $origCreation = $null
     try {
-        $ownerRes = Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid
+        $procId = [int]$Process.ProcessId
+    } catch {
+        return [pscustomobject]@{
+            Success       = $false
+            AlreadyExited = $false
+            Sid           = $null
+            CreationDate  = $null
+            Error         = "Process argument has invalid or missing ProcessId: $_"
+        }
+    }
+
+    try {
+        if ($null -ne $Process.CreationDate) {
+            $origCreation = $Process.CreationDate
+        }
+    } catch {}
+
+    $ownerFailed = $false
+    $ownerError = $null
+
+    try {
+        $ownerRes = Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -ErrorAction Stop
         if ($null -ne $ownerRes -and $ownerRes.ReturnValue -eq 0 -and -not [string]::IsNullOrWhiteSpace($ownerRes.Sid)) {
             return [pscustomobject]@{
-                Success = $true
-                Sid     = $ownerRes.Sid.Trim()
-                Error   = $null
+                Success       = $true
+                AlreadyExited = $false
+                ProcessId     = $procId
+                Sid           = $ownerRes.Sid.Trim()
+                CreationDate  = $origCreation
+                Error         = $null
             }
         } else {
             $retVal = if ($null -ne $ownerRes) { $ownerRes.ReturnValue } else { "null" }
-            return [pscustomobject]@{
-                Success = $false
-                Sid     = $null
-                Error   = "GetOwnerSid returned non-zero ($retVal) or empty SID"
-            }
+            $ownerFailed = $true
+            $ownerError = "GetOwnerSid returned ReturnValue=$retVal or empty SID"
         }
     } catch {
-        return [pscustomobject]@{
-            Success = $false
-            Sid     = $null
-            Error   = "$_"
+        $ownerFailed = $true
+        $ownerError = $_.Exception.Message
+    }
+
+    # On GetOwnerSid error or non-zero ReturnValue:
+    # Run a fresh, exact query to verify if the process already exited naturally.
+    # NEVER assume exit from string 'Not found' or exceptions without fresh query confirmation.
+    try {
+        $freshList = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $procId" -ErrorAction Stop)
+        if ($freshList.Count -eq 0) {
+            # Confirmed: Process no longer exists in system process table
+            return [pscustomobject]@{
+                Success       = $true
+                AlreadyExited = $true
+                ProcessId     = $procId
+                Sid           = $null
+                CreationDate  = $origCreation
+                Error         = $null
+            }
         }
+
+        # Process with this PID still exists; check for PID reuse via CreationDate
+        $freshProc = $freshList[0]
+        $freshCreation = $freshProc.CreationDate
+
+        if ($null -ne $origCreation -and $null -ne $freshCreation) {
+            if ($origCreation -ne $freshCreation) {
+                # Original process exited, but PID was reused by another process.
+                # Must NOT claim already gone or safe; replacement must still be treated as unknown/remaining.
+                return [pscustomobject]@{
+                    Success       = $false
+                    AlreadyExited = $false
+                    ProcessId     = $procId
+                    Sid           = $null
+                    CreationDate  = $freshCreation
+                    Error         = "PID $procId was reused by another process (snapshot CreationDate=$origCreation vs fresh CreationDate=$freshCreation)"
+                }
+            }
+        }
+
+        # Process is still present, but ownership query failed (e.g. Access Denied or WMI failure) -> FAIL CLOSED as UNKNOWN
+        return [pscustomobject]@{
+            Success       = $false
+            AlreadyExited = $false
+            ProcessId     = $procId
+            Sid           = $null
+            CreationDate  = $freshCreation
+            Error         = "Process $procId is still active but owner query failed: $ownerError"
+        }
+    } catch {
+        # Fresh query itself failed -> cannot confirm exit; FAIL CLOSED as UNKNOWN
+        return [pscustomobject]@{
+            Success       = $false
+            AlreadyExited = $false
+            ProcessId     = $procId
+            Sid           = $null
+            CreationDate  = $origCreation
+            Error         = "Fresh process check for PID $procId failed: $($_.Exception.Message); original owner error: $ownerError"
+        }
+    }
+}
+
+function Test-ProcessIdentityMatchForTermination {
+    <#
+    .SYNOPSIS
+      Pure, side-effect-free helper to verify whether a candidate process can safely be terminated.
+      Asserts that live state strictly matches the original target record and created standard user SID.
+      Returns:
+        [pscustomobject]@{
+            CanTerminate  = $true | $false
+            AlreadyExited = $true | $false
+            Reason        = "<details>"
+        }
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$OriginalRecord,
+        [Parameter(Mandatory = $false)]$LiveQueryState,
+        [Parameter(Mandatory = $true)][string]$ExpectedUserSid
+    )
+
+    if ($null -eq $OriginalRecord) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "Original record is null"
+        }
+    }
+
+    if ($null -eq $LiveQueryState) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "Live query state is null"
+        }
+    }
+
+    if ($LiveQueryState.AlreadyExited -eq $true) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $true
+            Reason        = "Process already exited naturally"
+        }
+    }
+
+    if ($LiveQueryState.Success -ne $true) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "Live ownership query failed or unresolved: $($LiveQueryState.Error)"
+        }
+    }
+
+    # Verify SID matches target standard user
+    if ([string]::IsNullOrWhiteSpace($LiveQueryState.Sid) -or $LiveQueryState.Sid -ne $ExpectedUserSid) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "Live SID '$($LiveQueryState.Sid)' does not match expected user SID '$ExpectedUserSid'"
+        }
+    }
+
+    # Verify original record SID also matches
+    if ($OriginalRecord.OwnerSid -ne $ExpectedUserSid) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "Original record OwnerSid '$($OriginalRecord.OwnerSid)' does not match expected user SID '$ExpectedUserSid'"
+        }
+    }
+
+    # Verify ProcessId matches exactly
+    if ($OriginalRecord.ProcessId -ne $LiveQueryState.ProcessId) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "ProcessId mismatch: original $($OriginalRecord.ProcessId) vs live $($LiveQueryState.ProcessId)"
+        }
+    }
+
+    # Verify CreationDate matches exactly
+    if ($null -eq $OriginalRecord.CreationDate -or $null -eq $LiveQueryState.CreationDate) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "CreationDate missing on original record or live query state"
+        }
+    }
+
+    if ($OriginalRecord.CreationDate -ne $LiveQueryState.CreationDate) {
+        return [pscustomobject]@{
+            CanTerminate  = $false
+            AlreadyExited = $false
+            Reason        = "PID reuse detected: original CreationDate '$($OriginalRecord.CreationDate)' vs live CreationDate '$($LiveQueryState.CreationDate)'"
+        }
+    }
+
+    return [pscustomobject]@{
+        CanTerminate  = $true
+        AlreadyExited = $false
+        Reason        = "Identity, PID, CreationDate, and OwnerSid match expected standard user"
     }
 }
 

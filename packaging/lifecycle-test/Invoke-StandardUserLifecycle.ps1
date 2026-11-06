@@ -454,7 +454,7 @@ try {
         # Bounded ownership query helper: any query failure counts as UNKNOWN/unresolved
         try {
             $cimProcs = Get-CimInstance Win32_Process
-            $procsToKill = [System.Collections.Generic.List[int]]::new()
+            $targetsToKill = [System.Collections.Generic.List[object]]::new()
             $unresolvedRelevant = $false
 
             foreach ($p in $cimProcs) {
@@ -467,9 +467,17 @@ try {
                 }
 
                 $queryRes = Get-ProcessOwnerSidSafely -Process $p
+                if ($queryRes.AlreadyExited) {
+                    # Process confirmed naturally exited between snapshot and query; safe to skip
+                    continue
+                }
                 if ($queryRes.Success) {
                     if ($queryRes.Sid -eq $createdUserSid) {
-                        $procsToKill.Add($p.ProcessId)
+                        $targetsToKill.Add([pscustomobject]@{
+                            ProcessId    = [int]$p.ProcessId
+                            CreationDate = $pCreation
+                            OwnerSid     = $queryRes.Sid
+                        })
                     }
                 } else {
                     $unresolvedRelevant = $true
@@ -478,8 +486,37 @@ try {
             }
 
             $killedCount = 0
-            foreach ($pidToKill in $procsToKill) {
-                try { Stop-Process -Id $pidToKill -Force; $killedCount++ } catch {}
+            foreach ($origTarget in $targetsToKill) {
+                $tPid = $origTarget.ProcessId
+                # Before Stop-Process, query fresh live process and verify identity match via Test-ProcessIdentityMatchForTermination
+                try {
+                    $verifyList = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $tPid" -ErrorAction Stop)
+                    if ($verifyList.Count -eq 0) {
+                        # Process naturally exited before kill attempt; confirmed gone
+                        $cleanupLog["killSkippedAlreadyGone_PID_$tPid"] = "Process confirmed naturally exited before kill attempt"
+                        continue
+                    }
+
+                    $liveProc = $verifyList[0]
+                    $vQuery = Get-ProcessOwnerSidSafely -Process $liveProc
+                    $termDecision = Test-ProcessIdentityMatchForTermination `
+                        -OriginalRecord $origTarget `
+                        -LiveQueryState $vQuery `
+                        -ExpectedUserSid $createdUserSid
+
+                    if ($termDecision.CanTerminate -eq $true) {
+                        Stop-Process -Id $tPid -Force -ErrorAction Stop
+                        $killedCount++
+                    } elseif ($termDecision.AlreadyExited -eq $true) {
+                        $cleanupLog["killSkippedAlreadyGone_PID_$tPid"] = $termDecision.Reason
+                    } else {
+                        $cleanupLog["killSkippedIdentityMismatch_PID_$tPid"] = $termDecision.Reason
+                        $cleanupAllPassed = $false
+                    }
+                } catch {
+                    $cleanupLog["killError_PID_$tPid"] = "$_"
+                    $cleanupAllPassed = $false
+                }
             }
             $cleanupLog["processesTerminated"] = $killedCount
             if ($unresolvedRelevant) {
@@ -504,6 +541,9 @@ try {
                         continue
                     }
                     $qRes = Get-ProcessOwnerSidSafely -Process $cp
+                    if ($qRes.AlreadyExited) {
+                        continue
+                    }
                     if ($qRes.Success) {
                         if ($qRes.Sid -eq $createdUserSid) {
                             $remainingOwned.Add($cp.ProcessId)
