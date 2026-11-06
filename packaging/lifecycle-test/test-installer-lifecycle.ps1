@@ -62,6 +62,10 @@
   Optional override for the target installation directory (primarily for isolated unit testing).
   Defaults to "$env:LOCALAPPDATA\Programs\OZ Image Viewer".
 
+.PARAMETER RequireStandardUser
+  Strict mode: Asserts process token is non-elevated and not in Administrator role.
+  Fails closed before executing or modifying anything if elevated.
+
 .PARAMETER AllowDisposableExecution
   Mandatory safety switch confirming the run is occurring on a disposable runner/VM.
 #>
@@ -72,6 +76,7 @@ param(
     [string]$FixturePath = "",
     [string]$ReportPath = "",
     [string]$OverrideInstallDir = "",
+    [switch]$RequireStandardUser,
     [switch]$AllowDisposableExecution
 )
 
@@ -85,6 +90,12 @@ if (-not (Test-Path -LiteralPath $processHelper -PathType Leaf)) {
     throw "Required helper ProcessHelper.ps1 not found in $ScriptDir"
 }
 . $processHelper
+
+$standardUserHelpers = Join-Path $ScriptDir "StandardUserHelpers.ps1"
+if (-not (Test-Path -LiteralPath $standardUserHelpers -PathType Leaf)) {
+    throw "Required helper StandardUserHelpers.ps1 not found in $ScriptDir"
+}
+. $standardUserHelpers
 
 # Safe Registry Helpers that never throw in StrictMode and distinguish null from absent
 function Get-RegValueSafe {
@@ -204,6 +215,8 @@ $isCiEnvironment = ($env:GITHUB_ACTIONS -eq "true" -or $env:CI -eq "true" -or $e
 if ($isCiEnvironment) {
     $wfName = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_WORKFLOW)) { $env:GITHUB_WORKFLOW } else { "CI" }
     Record-Check -Name "guard_environment_attestation" -Status "pass" -Details "Running within disposable hosted CI runner ($wfName)."
+} elseif ($RequireStandardUser) {
+    Record-Check -Name "guard_environment_attestation" -Status "fail" -Details "Strict standard user verification requires explicit disposable CI environment attestation (CI=true)."
 } else {
     Record-Check -Name "guard_environment_attestation" -Status "warning" -Details "Not running in detected standard CI runner. Relying on explicit -AllowDisposableExecution flag. Ensure environment is disposable."
 }
@@ -220,12 +233,39 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $script:Report.isElevated = $isAdmin
-if ($isAdmin) {
-    $script:Report.elevationCheck = "elevated-administrator"
-    Record-Check -Name "non_admin_integrity_check" -Status "warning" -Details "Process is running as Administrator (common on hosted CI runners). Per-user non-elevated UAC boundary is unverified on this run."
+
+# Query process token elevation directly via Windows API to be certain (fail closed on API failure)
+$isTokenElevated = $null
+$tokenElevationError = $null
+try {
+    $isTokenElevated = Get-NativeTokenElevationState
+} catch {
+    $tokenElevationError = "$_"
+}
+
+if ($RequireStandardUser) {
+    if ($null -ne $tokenElevationError) {
+        $script:Report.elevationCheck = "unknown-elevation-error"
+        Record-Check -Name "non_admin_integrity_check" -Status "fail" -Details "Strict standard user required (-RequireStandardUser), but native token elevation check failed closed: $tokenElevationError"
+    } elseif ($isAdmin -or $isTokenElevated) {
+        $script:Report.elevationCheck = "elevated-administrator"
+        Record-Check -Name "non_admin_integrity_check" -Status "fail" -Details "Strict standard user required (-RequireStandardUser), but process is elevated (isAdmin=$isAdmin, isTokenElevated=$isTokenElevated). Fails closed before executing or modifying anything."
+    } else {
+        $script:Report.elevationCheck = "standard-user"
+        Record-Check -Name "non_admin_integrity_check" -Status "pass" -Details "Strict standard user confirmed (non-elevated process token, not Administrator role). Identity: $($identity.Name), SID: $($identity.User.Value)."
+    }
 } else {
-    $script:Report.elevationCheck = "standard-user"
-    Record-Check -Name "non_admin_integrity_check" -Status "pass" -Details "Running as standard unprivileged user; true non-elevated behavior confirmed."
+    $effectiveElevated = ($isAdmin -or ($isTokenElevated -eq $true))
+    if ($effectiveElevated) {
+        $script:Report.elevationCheck = "elevated-administrator"
+        Record-Check -Name "non_admin_integrity_check" -Status "warning" -Details "Process is running as Administrator (common on hosted CI runners). Per-user non-elevated UAC boundary is unverified on this run."
+    } elseif ($null -ne $tokenElevationError) {
+        $script:Report.elevationCheck = "unknown-elevation-error"
+        Record-Check -Name "non_admin_integrity_check" -Status "warning" -Details "Native token elevation check encountered error: $tokenElevationError. Admin role is $isAdmin."
+    } else {
+        $script:Report.elevationCheck = "standard-user"
+        Record-Check -Name "non_admin_integrity_check" -Status "pass" -Details "Running as standard unprivileged user; true non-elevated behavior confirmed."
+    }
 }
 
 # Target directory and registry constants

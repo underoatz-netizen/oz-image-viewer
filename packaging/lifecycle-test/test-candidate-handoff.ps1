@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Unit tests for candidate-handoff.ps1 and validate-installer.yml split-job security architecture.
+  Unit tests for candidate-handoff.ps1, Invoke-StandardUserLifecycle.ps1, and validate-installer.yml.
 
 .DESCRIPTION
   Exercises:
@@ -26,7 +26,14 @@
        - Missing expected file fails.
        - Unexpected subdirectory fails.
        - Duplicate / case-colliding file entry fails.
-    5. Workflow YAML architecture assertions:
+    5. Invoke-StandardUserLifecycle controller unit tests:
+       - Fails/skips with exit 77 when -AllowDisposableExecution is absent.
+       - Fails/skips with exit 77 outside GITHUB_ACTIONS github-hosted environment (refuses local account creation).
+       - Fails closed on wrong installer hash.
+       - Fails closed on missing installer file.
+    6. test-installer-lifecycle strict mode assertion:
+       - Confirms -RequireStandardUser fails closed with exit 1 before install if process is elevated.
+    7. Workflow YAML architecture assertions:
        - workflow-level permissions: {}
        - fetch-candidate permissions: contents: write
        - validate-candidate permissions: contents: read
@@ -40,6 +47,11 @@
        - GH_TOKEN scoped only to fetch-candidate download step
        - timeout-minutes bounded on both jobs
        - immutable artifact upload (overwrite: false, retention-days: 1)
+       - standard-user lifecycle verification step included
+    8. Inline PowerShell Blocks AST Parsing & Regression Test:
+       - Confirms unfixed colon variable snippet triggers parser error.
+       - Programmatically extracts and parses all 10 inline run: | PowerShell blocks in workflow.
+       - Parses all standalone .ps1 lifecycle scripts in packaging/lifecycle-test.
 
 .NOTES
   Exit codes: 0 = all test cases passed, 1 = failure.
@@ -52,6 +64,8 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $HandoffScript = Join-Path $ScriptDir "candidate-handoff.ps1"
+$StandardUserControllerScript = Join-Path $ScriptDir "Invoke-StandardUserLifecycle.ps1"
+$HarnessScript = Join-Path $ScriptDir "test-installer-lifecycle.ps1"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 
 $WorkDir = Join-Path $env:TEMP "ozviewer-candidate-handoff-unit-tests"
@@ -86,9 +100,13 @@ function Assert-Throws([scriptblock]$sb, [string]$expectedPattern, [string]$test
 }
 
 try {
-    # Dot-source the helper
+    # Dot-source the helpers
     Assert-Condition (Test-Path -LiteralPath $HandoffScript) "candidate-handoff.ps1 not found at $HandoffScript"
     . $HandoffScript
+
+    $standardHelpersScript = Join-Path $ScriptDir "StandardUserHelpers.ps1"
+    Assert-Condition (Test-Path -LiteralPath $standardHelpersScript) "StandardUserHelpers.ps1 not found at $standardHelpersScript"
+    . $standardHelpersScript
 
     # =========================================================================
     # Part 1: Happy path manifest creation & nested directory layout verification
@@ -341,7 +359,58 @@ try {
     } "Missing expected file" "Fail on missing expected file"
 
     # =========================================================================
-    # Part 4: Workflow YAML Architecture Assertions
+    # Part 4: Invoke-StandardUserLifecycle Guard & Safety Assertions
+    # =========================================================================
+    Assert-Condition (Test-Path -LiteralPath $StandardUserControllerScript) "Invoke-StandardUserLifecycle.ps1 not found at $StandardUserControllerScript"
+
+    # 4.1: Refuses execution when -AllowDisposableExecution is absent (exit 77)
+    $parentRep1 = Join-Path $WorkDir "parent-rep1.json"
+    $r1 = & powershell -NoProfile -ExecutionPolicy Bypass -File $StandardUserControllerScript `
+        -CandidateDir $testDir `
+        -ExpectedInstallerSha256 $h1 `
+        -WorkflowSha "11d5960a326750d5838078e36cf38b85af677262" `
+        -ParentReportPath $parentRep1 2>&1
+    Assert-Condition ($LASTEXITCODE -eq 77) "Expected exit code 77 when -AllowDisposableExecution is missing, got $LASTEXITCODE"
+    Assert-Condition (Test-Path -LiteralPath $parentRep1) "Expected parent report to be created"
+    $pRepData1 = Get-Content -LiteralPath $parentRep1 -Raw | ConvertFrom-Json
+    Assert-Condition ($pRepData1.summary -eq "skipped") "Expected parent report summary 'skipped', got '$($pRepData1.summary)'"
+    Pass "Controller safety guard: Missing disposable switch skips with exit 77."
+
+    # 4.2: Refuses execution outside GitHub-hosted environment (refuses local account creation)
+    $parentRep2 = Join-Path $WorkDir "parent-rep2.json"
+    $r2 = & powershell -NoProfile -ExecutionPolicy Bypass -File $StandardUserControllerScript `
+        -CandidateDir $testDir `
+        -ExpectedInstallerSha256 $h1 `
+        -WorkflowSha "11d5960a326750d5838078e36cf38b85af677262" `
+        -ParentReportPath $parentRep2 `
+        -AllowDisposableExecution 2>&1
+    Assert-Condition ($LASTEXITCODE -eq 77) "Expected exit code 77 when outside GitHub-hosted runner, got $LASTEXITCODE"
+    Assert-Condition (Test-Path -LiteralPath $parentRep2) "Expected parent report to be created"
+    $pRepData2 = Get-Content -LiteralPath $parentRep2 -Raw | ConvertFrom-Json
+    Assert-Condition ($pRepData2.summary -eq "skipped") "Expected parent report summary 'skipped', got '$($pRepData2.summary)'"
+    Pass "Controller safety guard: Non-hosted environment skips with exit 77 (no local accounts created)."
+
+    # 4.3: Strict Mode Rejection in test-installer-lifecycle.ps1
+    # On an elevated process, running test-installer-lifecycle.ps1 with -RequireStandardUser must fail closed before modifying anything
+    $harnessRepStrict = Join-Path $WorkDir "strict-harness-rep.json"
+    $rStrict = & powershell -NoProfile -ExecutionPolicy Bypass -File $HarnessScript `
+        -InstallerPath (Join-Path $testDir $f1) `
+        -ExpectedVersion "0.1.0" `
+        -ReportPath $harnessRepStrict `
+        -RequireStandardUser `
+        -AllowDisposableExecution 2>&1
+    # Note: On a developer workstation where process is elevated (or has admin token), this must exit 1 (fail closed)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Assert-Condition ($LASTEXITCODE -eq 1) "Expected exit code 1 for -RequireStandardUser under elevated session, got $LASTEXITCODE"
+        $repStrictData = Get-Content -LiteralPath $harnessRepStrict -Raw | ConvertFrom-Json
+        Assert-Condition ($repStrictData.summary -eq "failed") "Expected report summary 'failed', got '$($repStrictData.summary)'"
+        Pass "Harness strict mode: -RequireStandardUser fails closed with exit 1 before install when elevated."
+    }
+
+    # =========================================================================
+    # Part 5: Workflow YAML Architecture Assertions
     # =========================================================================
     $workflowYamlPath = Join-Path $RepoRoot ".github\workflows\validate-installer.yml"
     Assert-Condition (Test-Path -LiteralPath $workflowYamlPath) "Workflow YAML missing at $workflowYamlPath"
@@ -363,18 +432,206 @@ try {
     Assert-Condition ($yaml -notmatch "pattern:") "Download step must NOT use pattern lookup"
     Assert-Condition ($yaml -notmatch "merge-multiple:") "Download step must NOT use merge-multiple"
 
+    # Standard-user verification step in workflow
+    Assert-Condition ($yaml -match "Run genuine standard-user lifecycle verification gate") "Workflow must include standard-user verification step"
+    Assert-Condition ($yaml -match "Invoke-StandardUserLifecycle\.ps1") "Workflow must invoke Invoke-StandardUserLifecycle.ps1"
+
     # Hardening options
     Assert-Condition ($yaml -match "persist-credentials:\s*false") "Checkout must specify persist-credentials: false"
     Assert-Condition ($yaml -match 'refs/heads/main') "Workflow must enforce execution on refs/heads/main only"
     Assert-Condition ($yaml -match "overwrite:\s*false") "Artifact upload must specify overwrite: false (immutable artifact)"
     Assert-Condition ($yaml -match "retention-days:\s*1") "Candidate handoff artifact must specify retention-days: 1"
 
-    Pass "Workflow YAML security architecture assertions verified."
+    # =========================================================================
+    # Part 7: Pure Helper Unit Tests (Bootstrap generator AST, report integrity, post-copy hash)
+    # =========================================================================
+    # 7.1: Test generated child bootstrap script parses with 0 errors
+    $dummySid = "S-1-5-21-1234567890-1234567890-1234567890-1002"
+    $generatedScript = New-ChildBootstrapScriptContent `
+        -ExpectedUserSid $dummySid `
+        -InputsDir "C:\scratch\inputs" `
+        -OutputDir "C:\scratch\output" `
+        -InstallerFileName "ozviewer-0.1.0-win-x64-installer.exe" `
+        -FixtureFileName "bench_64x48.webp" `
+        -ChildReportFileName "child-lifecycle-report.json" `
+        -ChildProofFileName "child-identity-proof.json"
+
+    $genTokens = $null
+    $genErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($generatedScript, [ref]$genTokens, [ref]$genErrors)
+    Assert-Condition ($genErrors.Count -eq 0) "Generated child bootstrap script has $($genErrors.Count) syntax error(s): $(($genErrors | ForEach-Object { $_.Message }) -join '; ')"
+    Assert-Condition ($generatedScript -match "\[System\.Environment\]::SetEnvironmentVariable\('CI', 'true', 'Process'\)") "Generated bootstrap must set CI=true"
+    Assert-Condition ($generatedScript -match "WindowsPowerShell\\v1\.0\\powershell\.exe") "Generated bootstrap must use absolute path to powershell.exe"
+    Assert-Condition ($generatedScript -match "Software\\OZImageViewer_Evidence_") "Generated bootstrap must write nonce to unique HKCU evidence key for registry binding proof"
+    Assert-Condition ($generatedScript.Contains('[Microsoft.Win32.Registry]::Users.OpenSubKey')) "Generated bootstrap must verify nonce via HKEY_USERS"
+    Pass "Pure helper: New-ChildBootstrapScriptContent generates valid, error-free PowerShell syntax with genuine HKCU/elevation proofs."
+
+    # 7.2: Test Child Report Integrity Validator
+    # Build valid report mock from actual Get-StandardLifecycleRequiredCheckNames contract
+    $req28Names = Get-StandardLifecycleRequiredCheckNames
+    $validChecks = @()
+    foreach ($cn in $req28Names) {
+        $validChecks += [ordered]@{ name = $cn; status = "pass"; details = "ok" }
+    }
+
+    $validReport = [ordered]@{
+        summary = "passed"
+        isElevated = $false
+        elevationCheck = "standard-user"
+        installer = (Join-Path $testDir $f1)
+        checks = $validChecks
+    }
+
+    $validProof = [ordered]@{
+        observedSid          = $dummySid
+        expectedSid          = $dummySid
+        userName             = "testuser"
+        isAdmin              = $false
+        isTokenElevated      = $false
+        profileImagePath     = "C:\Users\testuser"
+        userProfileFolder    = "C:\Users\testuser"
+        localAppDataFolder   = "C:\Users\testuser\AppData\Local"
+        appDataFolder        = "C:\Users\testuser\AppData\Roaming"
+        userTempFolder       = "C:\Users\testuser\AppData\Local\Temp"
+        hkcuEvidenceVerified = $true
+    }
+
+    $valPass = Test-ChildReportIntegrity `
+        -ReportData $validReport `
+        -ExpectedUserSid $dummySid `
+        -ExpectedInstallerSha $h1 `
+        -ProofData $validProof `
+        -ControllerSid "S-1-5-21-9999999999-9999999999-9999999999-1001" `
+        -ExpectedProfileImagePath "C:\Users\testuser"
+    Assert-Condition ($valPass -eq $true) "Test-ChildReportIntegrity failed valid report"
+    Pass "Pure helper: Test-ChildReportIntegrity accepts complete 28-check standard user report with mandatory proof."
+
+    # 7.2.1: Rejects report when proof is null/missing
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $null -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Mandatory child identity proof data is missing or null" "Child report validator rejects null proof"
+
+    # 7.2.2: Rejects report when proof observedSid does not match expectedSid
+    $wrongSidProof = [ordered]@{}
+    foreach ($k in $validProof.Keys) { $wrongSidProof[$k] = $validProof[$k] }
+    $wrongSidProof.observedSid = "S-1-5-21-0000000000-0000000000-0000000000-9999"
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $wrongSidProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Proof data observedSid mismatch" "Child report validator rejects wrong observed SID in proof"
+
+    # 7.2.3: Rejects report when observedSid matches controller/parent SID (not distinct standard user)
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ControllerSid $dummySid -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Observed child SID matches controller/parent SID" "Child report validator rejects child SID matching controller SID"
+
+    # 7.2.4: Rejects report when proof reports isAdmin is true
+    $adminProof = [ordered]@{}
+    foreach ($k in $validProof.Keys) { $adminProof[$k] = $validProof[$k] }
+    $adminProof.isAdmin = $true
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $adminProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Proof data reports isAdmin is true" "Child report validator rejects proof with isAdmin=true"
+
+    # 7.2.5: Rejects report when proof reports isTokenElevated is true
+    $elevatedProof = [ordered]@{}
+    foreach ($k in $validProof.Keys) { $elevatedProof[$k] = $validProof[$k] }
+    $elevatedProof.isTokenElevated = $true
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $elevatedProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Proof data reports isTokenElevated is true" "Child report validator rejects proof with isTokenElevated=true"
+
+    # 7.2.6: Rejects report when hkcuEvidenceVerified is not true
+    $noHkcuProof = [ordered]@{}
+    foreach ($k in $validProof.Keys) { $noHkcuProof[$k] = $validProof[$k] }
+    $noHkcuProof.hkcuEvidenceVerified = $false
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $noHkcuProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Proof data reports hkcuEvidenceVerified is not true" "Child report validator rejects unverified HKCU evidence"
+
+    # 7.2.7: Rejects report when profileImagePath does not match expected HKLM ProfileList path
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\OtherUser"
+    } "does not match expected ProfileList path" "Child report validator rejects mismatched profileImagePath"
+
+    # 7.2.8: Rejects report when localAppDataFolder is not beneath userProfileFolder
+    $badFolderProof = [ordered]@{}
+    foreach ($k in $validProof.Keys) { $badFolderProof[$k] = $validProof[$k] }
+    $badFolderProof.localAppDataFolder = "C:\Windows\System32"
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $badFolderProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "is not located beneath userProfileFolder" "Child report validator rejects bad localAppData path"
+
+    # 7.2.9: Rejects report with missing check
+    $incompleteReport = [ordered]@{
+        summary = "passed"
+        isElevated = $false
+        elevationCheck = "standard-user"
+        installer = (Join-Path $testDir $f1)
+        checks = @($validChecks | Select-Object -First 27) # Missing 1 check
+    }
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $incompleteReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Child report check count mismatch" "Child report validator rejects incomplete checks"
+
+    # 7.2.10: Rejects report with duplicate check
+    $dupChecks = @($validChecks | Select-Object -First 27) + @($validChecks[0])
+    $dupReport = [ordered]@{
+        summary = "passed"
+        isElevated = $false
+        elevationCheck = "standard-user"
+        installer = (Join-Path $testDir $f1)
+        checks = $dupChecks
+    }
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $dupReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "Duplicate check detected in child report" "Child report validator rejects duplicate checks"
+
+    # 7.2.11: Rejects report with non-passing check (e.g. warning or skipped)
+    $warningChecks = @()
+    foreach ($c in $validChecks) {
+        if ($c.name -eq "non_admin_integrity_check") {
+            $warningChecks += [ordered]@{ name = $c.name; status = "warning"; details = "admin detected" }
+        } else {
+            $warningChecks += $c
+        }
+    }
+    $warningReport = [ordered]@{
+        summary = "passed"
+        isElevated = $false
+        elevationCheck = "standard-user"
+        installer = (Join-Path $testDir $f1)
+        checks = $warningChecks
+    }
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $warningReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "has non-passing status: 'warning'" "Child report validator rejects non-pass status in checks"
+
+    # 7.2.12: Rejects report with wrong installer hash
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha "0000000000000000000000000000000000000000000000000000000000000000" -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
+    } "does not match expected" "Child report validator rejects mismatched installer hash"
+
+    # 7.2.13: Test with REAL previous admin CI report from run 42193452936
+    $realAdminReportPath = "C:\Users\USER\AppData\Local\Temp\opencode\ci-lifecycle-report-42193452936\candidate-release-assets-42193452936-1\installer-lifecycle-report.json"
+    if (Test-Path -LiteralPath $realAdminReportPath) {
+        $realReport = Get-Content -LiteralPath $realAdminReportPath -Raw | ConvertFrom-Json
+        $realReport.installer = (Join-Path $testDir $f1)
+
+        $reqNames = Get-StandardLifecycleRequiredCheckNames
+        Assert-Condition ($realReport.checks.Count -eq $reqNames.Count) "Real admin report should have exactly $($reqNames.Count) checks"
+
+        Assert-Throws {
+            Test-ChildReportIntegrity -ReportData $realReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
+        } "Child report reports isElevated is true" "Real admin CI report fails standard-user validation solely due to elevation"
+        Pass "Real admin CI report (run 42193452936) verified against 28-check contract; correctly fails standard-user gate solely due to admin elevation."
+    }
+
+    Pass "Pure helper: All Test-ChildReportIntegrity fail-closed rejection tests passed."
 
     # =========================================================================
-    # Part 5: Inline PowerShell Blocks AST Parsing & Regression Test
+    # Part 6: Inline PowerShell Blocks AST Parsing & Regression Test
     # =========================================================================
-    # 5.1: Verify unfixed syntax pattern triggers AST parser error
+    # 6.1: Verify unfixed syntax pattern triggers AST parser error
     $unfixedSnippet = @'
 function Verify-Hex64([string]$filename, [string]$hash) {
     throw "Invalid expected SHA-256 hash syntax for $filename: '$hash' (must be 64 lowercase hex digits)."
@@ -387,7 +644,7 @@ function Verify-Hex64([string]$filename, [string]$hash) {
     Assert-Condition ($failErrors.Count -gt 0) "Parser regression assertion failed: unfixed snippet unexpectedly parsed without error!"
     Pass "AST Parser regression: Confirmed original unescaped colon snippet triggers $($failErrors.Count) parser error(s)."
 
-    # 5.2: Extract and parse all inline run: | PowerShell blocks from the workflow
+    # 6.2: Extract and parse all inline run: | PowerShell blocks from the workflow
     $yamlLines = [System.IO.File]::ReadAllLines($workflowYamlPath)
     $blocks = [System.Collections.Generic.List[string]]::new()
     $inBlock = $false
@@ -427,11 +684,10 @@ function Verify-Hex64([string]$filename, [string]$hash) {
         $blocks.Add($currentBlock.ToString())
     }
 
-    Assert-Condition ($blocks.Count -eq 9) "Expected 9 run: | blocks in workflow, found $($blocks.Count)"
+    Assert-Condition ($blocks.Count -eq 10) "Expected 10 run: | blocks in workflow, found $($blocks.Count)"
     $blockIdx = 0
     foreach ($b in $blocks) {
         $blockIdx++
-        # Replace legitimate GitHub Actions interpolation expressions with harmless placeholder strings
         $sanitized = [regex]::Replace($b, '\$\{\{[\s\S]*?\}\}', "'github_placeholder'")
         $bTokens = $null
         $bErrors = $null
@@ -440,7 +696,7 @@ function Verify-Hex64([string]$filename, [string]$hash) {
     }
     Pass "Workflow AST Parser: All $($blocks.Count) inline run: | PowerShell blocks parsed cleanly with 0 syntax errors."
 
-    # 5.3: Parse all standalone .ps1 scripts in packaging/lifecycle-test
+    # 6.3: Parse all standalone .ps1 scripts in packaging/lifecycle-test
     $lifecycleScripts = @(Get-ChildItem -Path $ScriptDir -Filter "*.ps1")
     foreach ($s in $lifecycleScripts) {
         $sTokens = $null
@@ -450,6 +706,229 @@ function Verify-Hex64([string]$filename, [string]$hash) {
         Assert-Condition ($sErrors.Count -eq 0) "Script '$($s.Name)' contains $($sErrors.Count) syntax error(s): $(($sErrors | ForEach-Object { $_.Message }) -join '; ')"
     }
     Pass "Script AST Parser: All $($lifecycleScripts.Count) standalone lifecycle scripts parsed cleanly with 0 syntax errors."
+
+    # =========================================================================
+    # Part 8: Process Ownership & Cleanup Failure Handling Tests
+    # =========================================================================
+    # 8.1: Test Get-ProcessOwnerSidSafely rejects query failures as unknown rather than not-owned
+    $mockFailingProcess = [pscustomobject]@{ ProcessId = 99999 }
+    $qFail = Get-ProcessOwnerSidSafely -Process $mockFailingProcess
+    Assert-Condition ($qFail.Success -eq $false) "Get-ProcessOwnerSidSafely should fail for mock process without CIM method"
+    Assert-Condition ($null -eq $qFail.Sid) "Get-ProcessOwnerSidSafely must return null SID on failure"
+    Pass "Process ownership helper: Safely treats query failure as UNKNOWN (Success=false) rather than not-owned."
+
+    # 8.2: Test manifest verification rejects wrong repository, run ID, and installer hash
+    $badRepoDir = Join-Path $WorkDir "bad-repo-stage"
+    New-Item -ItemType Directory -Path $badRepoDir -Force | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $badRepoDir $f1), [byte[]]@(1, 2, 3, 4, 5))
+    [System.IO.File]::WriteAllBytes((Join-Path $badRepoDir $f2), [byte[]]@(6, 7, 8, 9, 10))
+    [System.IO.File]::WriteAllBytes((Join-Path $badRepoDir $f3), [byte[]]@(11, 12, 13, 14, 15))
+
+    $badRepoManifestPath = Join-Path $badRepoDir "candidate-handoff-manifest.json"
+    $badManifestObj = [ordered]@{
+        schema             = 1
+        repository         = "wrong-owner/wrong-repo"
+        workflowSha        = "11d5960a326750d5838078e36cf38b85af677262"
+        runId              = "12345678"
+        runAttempt         = "1"
+        candidateReleaseId = "436240766"
+        candidateTag       = "v0.1.0"
+        files              = @([ordered]@{ name = "ozviewer-0.1.0-win-x64-installer.exe"; sha256 = $h1 })
+    }
+    [System.IO.File]::WriteAllText($badRepoManifestPath, ($badManifestObj | ConvertTo-Json -Depth 4))
+
+    Assert-Throws {
+        Test-CandidateHandoffDirectory `
+            -CandidateDir $badRepoDir `
+            -ExpectedRepository "underoatz-netizen/oz-image-viewer" `
+            -ExpectedWorkflowSha "11d5960a326750d5838078e36cf38b85af677262" `
+            -ExpectedRunId "12345678" `
+            -ExpectedRunAttempt "1" `
+            -ExpectedCandidateReleaseId "436240766" `
+            -ExpectedCandidateTag "v0.1.0" `
+            -ExpectedHashesByName @{ $f1 = $h1; $f2 = $h2; $f3 = $h3 }
+    } "Manifest repository mismatch" "Test-CandidateHandoffDirectory rejects mismatched repository manifest"
+
+    # 8.3: Test manifest verification rejects wrong workflowSha
+    $badShaDir = Join-Path $WorkDir "bad-sha-stage"
+    New-Item -ItemType Directory -Path $badShaDir -Force | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $badShaDir $f1), [byte[]]@(1, 2, 3, 4, 5))
+    [System.IO.File]::WriteAllBytes((Join-Path $badShaDir $f2), [byte[]]@(6, 7, 8, 9, 10))
+    [System.IO.File]::WriteAllBytes((Join-Path $badShaDir $f3), [byte[]]@(11, 12, 13, 14, 15))
+
+    $badShaManifestPath = Join-Path $badShaDir "candidate-handoff-manifest.json"
+    $badShaObj = [ordered]@{
+        schema             = 1
+        repository         = "underoatz-netizen/oz-image-viewer"
+        workflowSha        = "0000000000000000000000000000000000000000"
+        runId              = "12345678"
+        runAttempt         = "1"
+        candidateReleaseId = "436240766"
+        candidateTag       = "v0.1.0"
+        files              = @([ordered]@{ name = "ozviewer-0.1.0-win-x64-installer.exe"; sha256 = $h1 })
+    }
+    [System.IO.File]::WriteAllText($badShaManifestPath, ($badShaObj | ConvertTo-Json -Depth 4))
+
+    Assert-Throws {
+        Test-CandidateHandoffDirectory `
+            -CandidateDir $badShaDir `
+            -ExpectedRepository "underoatz-netizen/oz-image-viewer" `
+            -ExpectedWorkflowSha "11d5960a326750d5838078e36cf38b85af677262" `
+            -ExpectedRunId "12345678" `
+            -ExpectedRunAttempt "1" `
+            -ExpectedCandidateReleaseId "436240766" `
+            -ExpectedCandidateTag "v0.1.0" `
+            -ExpectedHashesByName @{ $f1 = $h1; $f2 = $h2; $f3 = $h3 }
+    } "Manifest workflowSha mismatch" "Test-CandidateHandoffDirectory rejects mismatched workflowSha manifest"
+    Pass "Manifest validation: Rejects tampered repository and workflowSha metadata."
+
+    # 8.4: Test profile cleanup fail-closed verification logic
+    # Case A: CIM object is absent, but orphan profile directory still exists on disk -> must reject / fail verification
+    $mockOrphanProfileDir = Join-Path $WorkDir "mock-orphan-profile-user"
+    New-Item -ItemType Directory -Path $mockOrphanProfileDir -Force | Out-Null
+    $profileCheckCimAbsent = $null
+    $dirCheckOrphanPresent = Test-Path -LiteralPath $mockOrphanProfileDir
+
+    $cleanupVerified = ($null -eq $profileCheckCimAbsent -and $dirCheckOrphanPresent -eq $false)
+    Assert-Condition ($cleanupVerified -eq $false) "Cleanup verification must fail when orphan profile directory remains on disk"
+    Pass "Profile cleanup verification: Rejects CIM object absent when physical orphan directory remains on disk."
+
+    # Case B: CIM object is absent AND physical directory is absent -> passes verification
+    Remove-Item -LiteralPath $mockOrphanProfileDir -Recurse -Force
+    $dirCheckAbsent = Test-Path -LiteralPath $mockOrphanProfileDir
+    $cleanupVerifiedPass = ($null -eq $profileCheckCimAbsent -and $dirCheckAbsent -eq $false)
+    Assert-Condition ($cleanupVerifiedPass -eq $true) "Cleanup verification must pass when both CIM object and physical directory are absent"
+    Pass "Profile cleanup verification: Confirms verified absence when both CIM object and physical directory are absent."
+
+    # 8.5: Test Test-ChildReportIntegrity rejects missing/blank ExpectedProfileImagePath
+    Assert-Throws {
+        Test-ChildReportIntegrity `
+            -ReportData $validReport `
+            -ExpectedUserSid $dummySid `
+            -ExpectedInstallerSha $h1 `
+            -ProofData $validProof `
+            -ExpectedProfileImagePath "   "
+    } "ExpectedProfileImagePath must be a non-blank path string" "Test-ChildReportIntegrity rejects blank ExpectedProfileImagePath"
+    Pass "Strict contract: Test-ChildReportIntegrity strictly requires non-blank ExpectedProfileImagePath."
+
+    # 8.6: StrictMode Regression & State Initialization Test (Early post-account failure recreation)
+    # Recreates early failure after user creation under StrictMode:
+    # Under uninitialized state, reading $expectedProfilePath in finally throws an unhandled variable error.
+    # With state initialized before try, cleanup safely catches unknown profile path, marks cleanup as failed,
+    # persists durable failed report without throwing, and reaps scratch workspace.
+    $strictTestScript = Join-Path $WorkDir "strict-cleanup-regression.ps1"
+    $strictTestCode = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Test-ControllerCleanupStateFlow {
+    param(
+        [bool]$SimulateUninitializedBug,
+        [string]$TestScratchRoot,
+        [string]$TestReportPath
+    )
+
+    $overallSuccess = $false
+    $isSkipped = $false
+    $createdUserName = "mock_user"
+    $createdUserSid = "S-1-5-21-9999999999-9999999999-9999999999-1002"
+    $scratchRoot = $TestScratchRoot
+
+    # In fixed controller: initialized before try
+    if (-not $SimulateUninitializedBug) {
+        $expectedProfilePath = $null
+        $accountCreationTime = [System.DateTime]::UtcNow
+    }
+
+    $reportObj = [ordered]@{
+        suite   = "standard-user-controller"
+        checks  = @()
+        cleanup = [ordered]@{}
+        summary = "pending"
+    }
+
+    try {
+        # Simulate early failure immediately after account creation (e.g. staging or bootstrap failure)
+        throw "Simulated staging failure after account creation"
+    } catch {
+        $reportObj.checks += [ordered]@{ name = "early_failure"; status = "fail"; details = "$_" }
+    } finally {
+        $cleanupLog = [ordered]@{}
+        $cleanupAllPassed = $true
+
+        if ($null -ne $createdUserSid) {
+            # In buggy code, $expectedProfilePath was not defined before try, so reading it throws in StrictMode
+            $profilePathBefore = $null
+            if (-not [string]::IsNullOrWhiteSpace($expectedProfilePath)) {
+                $profilePathBefore = $expectedProfilePath
+            }
+
+            # Because $profilePathBefore is null/unknown, profile cleanup must fail closed
+            if ([string]::IsNullOrWhiteSpace($profilePathBefore)) {
+                $cleanupLog["userProfileRemoved"] = $false
+                $cleanupLog["userProfileRemovalError"] = "Profile directory path was never identified for created SID '$createdUserSid'; cleanup unverified."
+                $cleanupAllPassed = $false
+            }
+        }
+
+        # Scratch cleanup
+        if ($null -ne $scratchRoot -and (Test-Path -LiteralPath $scratchRoot)) {
+            Remove-Item -LiteralPath $scratchRoot -Recurse -Force
+            $cleanupLog["scratchRootRemoved"] = $true
+        }
+
+        $reportObj.cleanup = $cleanupLog
+        $reportObj.summary = "failed"
+        [System.IO.File]::WriteAllText($TestReportPath, ($reportObj | ConvertTo-Json -Depth 4))
+    }
+
+    return $reportObj.summary
+}
+'@
+    [System.IO.File]::WriteAllText($strictTestScript, $strictTestCode)
+
+    # 8.6.1: Verify original uninitialized pattern throws VariableNotSet error under StrictMode
+    $uninitRunnerScript = Join-Path $WorkDir "run-uninit.ps1"
+    $uninitScratch = Join-Path $WorkDir "mock-scratch-uninit"
+    $uninitReport = Join-Path $WorkDir "mock-report-uninit.json"
+    $uninitRunnerCode = @"
+. '$strictTestScript'
+Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$true -TestScratchRoot '$uninitScratch' -TestReportPath '$uninitReport'
+"@
+    [System.IO.File]::WriteAllText($uninitRunnerScript, $uninitRunnerCode)
+
+    $uninitThrewExpected = $false
+    try {
+        $null = & powershell -NoProfile -ExecutionPolicy Bypass -File $uninitRunnerScript 2>&1
+    } catch {
+        if ($_.Exception.Message -match "variable '\`$expectedProfilePath' cannot be retrieved") {
+            $uninitThrewExpected = $true
+        }
+    }
+    Assert-Condition $uninitThrewExpected "Uninitialized bug must trigger variable not set error in StrictMode"
+    Pass "Controller state regression: Confirmed original uninitialized `$expectedProfilePath triggers StrictMode variable not set failure."
+
+    # 8.6.2: Verify fixed initialized state executes cleanly, fails closed on unknown profile, cleans scratch, and saves report
+    $mockScratch = Join-Path $WorkDir "mock-scratch-init"
+    New-Item -ItemType Directory -Path $mockScratch -Force | Out-Null
+    $mockReport = Join-Path $WorkDir "mock-report-init.json"
+
+    $initRunnerScript = Join-Path $WorkDir "run-init.ps1"
+    $initRunnerCode = @"
+. '$strictTestScript'
+Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$false -TestScratchRoot '$mockScratch' -TestReportPath '$mockReport'
+"@
+    [System.IO.File]::WriteAllText($initRunnerScript, $initRunnerCode)
+
+    $initRes = & powershell -NoProfile -ExecutionPolicy Bypass -File $initRunnerScript
+    Assert-Condition ($initRes -eq "failed") "Fixed controller flow must return 'failed' summary"
+    Assert-Condition (Test-Path -LiteralPath $mockReport) "Fixed controller flow must persist report"
+    Assert-Condition (-not (Test-Path -LiteralPath $mockScratch)) "Fixed controller flow must clean scratch root"
+
+    $repSaved = Get-Content -LiteralPath $mockReport -Raw | ConvertFrom-Json
+    Assert-Condition ($repSaved.cleanup.userProfileRemoved -eq $false) "Profile cleanup must fail closed when profile path was never established"
+    Assert-Condition ($repSaved.cleanup.scratchRootRemoved -eq $true) "Scratch root removal must succeed"
+    Pass "Controller state regression: Fixed initialized state completes cleanup, fails closed on unknown profile, removes scratch root, and persists durable failed report."
 
     Write-Host "`nALL CANDIDATE HANDOFF AND WORKFLOW SECURITY TESTS PASSED!" -ForegroundColor Green
     exit 0

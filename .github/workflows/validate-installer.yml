@@ -282,6 +282,45 @@ jobs:
               throw "Installer lifecycle harness exited with non-zero code $harnessExit."
           }
 
+      - name: Run genuine standard-user lifecycle verification gate
+        shell: powershell
+        run: |
+          $candidateDir = $env:CANDIDATE_DIR
+          $parentReportPath = Join-Path $candidateDir "standard-user-lifecycle-report.json"
+          $controllerScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\Invoke-StandardUserLifecycle.ps1"
+
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $controllerScript `
+              -CandidateDir $candidateDir `
+              -ExpectedInstallerSha256 $env:EXPECTED_INSTALLER_SHA256 `
+              -WorkflowSha "${{ github.sha }}" `
+              -Repository $env:GITHUB_REPOSITORY `
+              -RunId "${{ github.run_id }}" `
+              -RunAttempt "${{ github.run_attempt }}" `
+              -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
+              -CandidateTag $env:CANDIDATE_TAG `
+              -ParentReportPath $parentReportPath `
+              -AllowDisposableExecution
+
+          $controllerExit = $LASTEXITCODE
+          Write-Host "Standard-user controller finished with exit code $controllerExit."
+
+          if (-not (Test-Path -LiteralPath $parentReportPath -PathType Leaf)) {
+              throw "CRITICAL: Standard-user controller report was not generated at '$parentReportPath'!"
+          }
+
+          $pReport = Get-Content -LiteralPath $parentReportPath -Raw | ConvertFrom-Json
+          Write-Host "Standard-user Controller Summary: $($pReport.summary)"
+          $pFailures = @($pReport.checks | Where-Object { $_.status -eq "fail" })
+          if ($pFailures.Count -gt 0) {
+              throw "Standard-user controller reported $($pFailures.Count) check failure(s): $(($pFailures | ForEach-Object { $_.name }) -join ', ')"
+          }
+          if ($pReport.summary -ne "passed") {
+              throw "Standard-user controller summary is not 'passed' (got '$($pReport.summary)')."
+          }
+          if ($controllerExit -ne 0) {
+              throw "Standard-user controller exited with non-zero code $controllerExit."
+          }
+
       - name: Upload lifecycle verification report
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
@@ -289,4 +328,5 @@ jobs:
           name: installer-lifecycle-report
           path: |
             ${{ runner.temp }}/handoff-parent/*/installer-lifecycle-report.json
+            ${{ runner.temp }}/handoff-parent/*/standard-user-lifecycle-report.json
           if-no-files-found: error
