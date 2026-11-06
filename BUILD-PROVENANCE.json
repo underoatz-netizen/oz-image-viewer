@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "provenanceSchemaVersion": "1.0.0",
+  "product": {
+    "name": "OZ Image Viewer",
+    "version": "0.1.0",
+    "publisher": "OZ Lab",
+    "homepage": "https://underoatz-netizen.github.io/software/oz-image-viewer/",
+    "repository": "https://github.com/underoatz-netizen/oz-image-viewer"
+  },
+  "source": {
+    "baselineCommit": "77d4660cfeb8ac081bc3156248a1badee4d934fc",
+    "remoteMergedCommit": "56d6c34f273622c33dfa97f644312d58f7bb9fec",
+    "envelopeCommit": "fe58b6f12cd1f2511475422183d0d27967c3629f",
+    "envelopeDeltaStatus": "uncommitted-working-tree-envelope-delta"
+  },
+  "toolchain": {
+    "hostOs": "Microsoft Windows NT 10.0.22631.0 (Windows 11 x64)",
+    "compiler": "Microsoft Visual C++ 2022 (MSVC 19.44.35228.0 / MSVC 14.44.35207 toolset)",
+    "cmake": "3.31.6-msvc6 (Visual Studio 2022 BuildTools embedded)",
+    "targetTriplet": "oz-x64-windows-static-md",
+    "vcpkgBaseline": "52d80838fb40c755b1615fbc9c7b994a33742a22",
+    "innoSetup": "Inno Setup 6.7.3 (ISCC command-line compiler 6.7.3)"
+  },
+  "thirdPartySourceInputs": [
+    {
+      "name": "libheif",
+      "version": "1.23.2",
+      "license": "LGPL-3.0-only",
+      "archive": "strukturag-libheif-v1.23.2.tar.gz",
+      "bytes": 2065440,
+      "sha256": "1405ed070421459b569ff49deab109b7f1a30a447e72a9b20a4154f774634a44",
+      "patches": [
+        "cmake-project-include.cmake",
+        "cxx-linkage-pkgconfig.diff",
+        "find-modules.diff",
+        "gdk-pixbuf.patch",
+        "symbol-exports.diff"
+      ]
+    },
+    {
+      "name": "libde265",
+      "version": "1.1.1",
+      "license": "LGPL-3.0-only",
+      "archive": "strukturag-libde265-v1.1.1.tar.gz",
+      "bytes": 316780,
+      "sha256": "5b4fac677018e6074196e8f9889f3e4a5310e46afbf22a893f620d4e24d3510e",
+      "patches": [
+        "fix-api-visibility.patch",
+        "fix-linkage.patch"
+      ]
+    },
+    {
+      "name": "libavif",
+      "version": "1.4.2#1",
+      "license": "BSD-2-Clause AND Apache-2.0",
+      "archive": "AOMediaCodec-libavif-v1.4.2.tar.gz",
+      "bytes": 14665927,
+      "sha256": "2b645287340ba5a631d268b551dc2d72bd73ac33335962dd36dcdb6d8366921d",
+      "patches": [
+        "disable-source-changes.patch"
+      ]
+    },
+    {
+      "name": "dav1d",
+      "version": "1.5.4",
+      "license": "BSD-2-Clause AND ISC",
+      "archive": "videolan-dav1d-1.5.4.tar.gz",
+      "bytes": 1748189,
+      "sha256": "a1d5b63d2d38ec9bd03acf643caa51fa22edd1e89c5a109c4807717216bbec07",
+      "patches": [
+        "fix-dependencies.patch",
+        "fix-msvc-arm64.patch"
+      ]
+    },
+    {
+      "name": "libyuv",
+      "version": "1916 (commit d98915a)",
+      "license": "BSD-3-Clause",
+      "archive": "libyuv-d98915a654d3564e4802a0004add46221c4e4348.tar.gz",
+      "bytes": 616851,
+      "sha256": "46b57ce9a0678369e7767a4378368ff07ba4f25bfb4c59d86ebc8529c4d0826c",
+      "patches": [
+        "fix-install.patch"
+      ]
+    },
+    {
+      "name": "libwebp",
+      "version": "1.6.0",
+      "license": "BSD-3-Clause",
+      "archive": "webmproject-libwebp-v1.6.0.tar.gz",
+      "bytes": 3833512,
+      "sha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136",
+      "patches": [
+        "cmake-fixes.patch",
+        "pkgconfig-fixes.patch"
+      ]
+    },
+    {
+      "name": "libjpeg-turbo",
+      "version": "3.2.0",
+      "license": "IJG / Modified BSD / zlib",
+      "archive": "libjpeg-turbo-libjpeg-turbo-3.2.0.tar.gz",
+      "bytes": 2537858,
+      "sha256": "980dd81f425082aa6d7c9e47fef27554ce7a9ffc8e2f6e863b97d263c5c50858",
+      "patches": [
+        "add-options-for-exes.patch",
+        "workaround_cmake_system_processor.patch"
+      ]
+    }
+  ],
+  "stagedCandidateBinaries": [
+    {
+      "name": "ozviewer.exe",
+      "bytes": 3803136,
+      "sha256": "c03ed6775a7a4cfd0200028f45bf318e074952ce636523c019afb84ed953625a",
+      "kind": "pe-executable",
+      "machine": "0x8664",
+      "freshBuildVerified": true,
+      "reproducibleRebuildVerified": false,
+      "note": "Fresh Release x64 binary compiled directly from clean isolated source tree with MSVC 14.44.35207. Bit-for-bit reproducibility across independent environments is unverified pending future release CI comparison."
+    },
+    {
+      "name": "heif.dll",
+      "bytes": 1394688,
+      "sha256": "d198e82c7c0ce5ea6835a7707408f4d1b8e4e4285e9d872d37fe3b8186a5f98e",
+      "kind": "dynamic-library",
+      "machine": "0x8664",
+      "freshBuildVerified": true,
+      "reproducibleRebuildVerified": false,
+      "note": "Standalone dynamically loaded LGPL-3.0 library for HEIC/HEIF decode. Functional rebuild exercised via bundled build-lgpl-dlls.ps1; bit-for-bit binary identity across distinct toolchains is unverified."
+    },
+    {
+      "name": "libde265.dll",
+      "bytes": 360960,
+      "sha256": "a542604865f1d10fe04e4d4a05b0898fe4ce8ad94038e4bd20cbc8fa20185dbb",
+      "kind": "dynamic-library",
+      "machine": "0x8664",
+      "freshBuildVerified": true,
+      "reproducibleRebuildVerified": false,
+      "note": "Standalone dynamically loaded LGPL-3.0 library for HEVC decode. Functional rebuild exercised via bundled build-lgpl-dlls.ps1; bit-for-bit binary identity across distinct toolchains is unverified."
+    }
+  ],
+  "lgplCorrespondingSourceAsset": {
+    "assetName": "ozviewer-0.1.0-lgpl-corresponding-source.zip",
+    "deliveryBasis": "GPL-3.0 §6(d) source distribution / LGPL-3.0 §4 combined-work shared-library provisions",
+    "contains": [
+      "Exact upstream tarballs for libheif 1.23.2 and libde265 1.1.1",
+      "vcpkg port recipes and patches",
+      "triplets/oz-x64-windows-static-md.cmake",
+      "Full LGPL-3.0 and GPL-3.0 license texts",
+      "README-BUILD-LGPL.txt and build-lgpl-dlls.ps1"
+    ]
+  }
+}

@@ -35,7 +35,11 @@
     "tga"
   ],
   "licenseFiles": [
-    "THIRD-PARTY-NOTICES.md"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "THIRD-PARTY-LICENSES.txt",
+    "THIRD-PARTY-SOURCE.txt",
+    "BUILD-PROVENANCE.json"
   ],
   "excludedExtensions": [
     ".pdb",

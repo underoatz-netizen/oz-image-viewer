@@ -1,4 +1,20 @@
-# Third-party notices — OZ image viewer
+# Third-party notices — OZ Image Viewer
+
+## Scope statement
+
+OZ Image Viewer first-party source code is licensed under the MIT License
+(Copyright (c) 2026 OZ Lab; see `LICENSE`).
+
+This MIT grant applies strictly to first-party code created for OZ Image Viewer.
+It does NOT grant rights to third-party software, third-party libraries,
+runtime components, or attributed third-party test fixtures, each of which
+retains its respective upstream copyright and license terms as documented below.
+No grant is made to any third-party trademark, logo, trade dress, or patent rights.
+Full license texts for all acquired third-party components are collected in
+`THIRD-PARTY-LICENSES.txt`, and exact source acquisition and corresponding source
+details are provided in `THIRD-PARTY-SOURCE.txt`.
+
+---
 
 ## libheif 1.23.2 (Stage 3.4 dynamic HEIC/HEIF decode)
 

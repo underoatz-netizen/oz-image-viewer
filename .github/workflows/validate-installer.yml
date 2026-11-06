@@ -1,0 +1,168 @@
+name: Validate Installer Lifecycle
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: 'Candidate draft release tag to validate (e.g. v0.1.0-rc1)'
+        required: true
+        type: string
+      expected_installer_sha256:
+        description: 'Expected SHA-256 hash of ozviewer-0.1.0-win-x64-installer.exe'
+        required: true
+        type: string
+      expected_portable_sha256:
+        description: 'Expected SHA-256 hash of ozviewer-0.1.0-win-x64-portable.zip'
+        required: true
+        type: string
+      expected_source_sha256:
+        description: 'Expected SHA-256 hash of ozviewer-0.1.0-lgpl-corresponding-source.zip'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate-installer:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag }}
+      EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
+      EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
+      EXPECTED_SOURCE_SHA256: ${{ github.event.inputs.expected_source_sha256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare validation workspace
+        shell: powershell
+        run: |
+          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+          New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+          Write-Host "Download directory created at: $downloadDir"
+
+      - name: Download candidate release assets from repository draft release
+        shell: powershell
+        run: |
+          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+          $tag = $env:CANDIDATE_TAG.Trim()
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+              throw "candidate_tag input cannot be empty."
+          }
+          Write-Host "Downloading candidate assets for tag '$tag' using gh..."
+          gh release download $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern "ozviewer-0.1.0-win-x64-installer.exe" `
+              --pattern "ozviewer-0.1.0-win-x64-portable.zip" `
+              --pattern "ozviewer-0.1.0-lgpl-corresponding-source.zip" `
+              --dir $downloadDir
+          if ($LASTEXITCODE -ne 0) {
+              throw "gh release download failed for tag '$tag'."
+          }
+
+      - name: Verify asset cryptographic checksums
+        shell: powershell
+        run: |
+          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+
+          function Verify-FileHash([string]$filename, [string]$expected) {
+              $path = Join-Path $downloadDir $filename
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                  throw "Downloaded asset missing: $path"
+              }
+              $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              $exp = $expected.Trim().ToLowerInvariant()
+              Write-Host "Verifying $filename..."
+              Write-Host "  Expected: $exp"
+              Write-Host "  Actual:   $actual"
+              if ($actual -ne $exp) {
+                  throw "SHA-256 hash mismatch for asset '$filename'!"
+              }
+              Write-Host "  Check PASSED."
+          }
+
+          Verify-FileHash "ozviewer-0.1.0-win-x64-installer.exe" $env:EXPECTED_INSTALLER_SHA256
+          Verify-FileHash "ozviewer-0.1.0-win-x64-portable.zip" $env:EXPECTED_PORTABLE_SHA256
+          Verify-FileHash "ozviewer-0.1.0-lgpl-corresponding-source.zip" $env:EXPECTED_SOURCE_SHA256
+
+      - name: Validate portable payload and smoke test
+        shell: powershell
+        run: |
+          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+          $portableZip = Join-Path $downloadDir "ozviewer-0.1.0-win-x64-portable.zip"
+          $extractDir = Join-Path $downloadDir "portable-unpacked"
+          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($portableZip, $extractDir)
+
+          # package-portable.ps1 produces a flat ZIP; the extracted root contains ozviewer.exe directly
+          $validateScript = Join-Path $env:GITHUB_WORKSPACE "packaging\validate-portable-payload.ps1"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $validateScript `
+              -PackageDir $extractDir `
+              -ZipPath $portableZip `
+              -ExpectedSha256 $env:EXPECTED_PORTABLE_SHA256
+          if ($LASTEXITCODE -ne 0) {
+              throw "Portable payload validation failed with exit code $LASTEXITCODE."
+          }
+
+          $smokeScript = Join-Path $env:GITHUB_WORKSPACE "packaging\smoke-portable.ps1"
+          $smokeWork = Join-Path $downloadDir "smoke-work"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript `
+              -PackageDir $extractDir `
+              -WorkDir $smokeWork
+          if ($LASTEXITCODE -ne 0) {
+              throw "Portable smoke test exited with code $LASTEXITCODE."
+          }
+
+      - name: Run disposable installer lifecycle harness
+        shell: powershell
+        run: |
+          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+          $installerPath = Join-Path $downloadDir "ozviewer-0.1.0-win-x64-installer.exe"
+          $reportPath = Join-Path $downloadDir "installer-lifecycle-report.json"
+          $fixturePath = Join-Path $env:GITHUB_WORKSPACE "tests\data\webp\bench_64x48.webp"
+          if (-not (Test-Path -LiteralPath $fixturePath)) {
+              $fixturePath = Join-Path $env:GITHUB_WORKSPACE "tests\data\phasea\bench_64x48.bmp"
+          }
+
+          $harnessScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\test-installer-lifecycle.ps1"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $harnessScript `
+              -InstallerPath $installerPath `
+              -ExpectedVersion "0.1.0" `
+              -FixturePath $fixturePath `
+              -ReportPath $reportPath `
+              -AllowDisposableExecution
+
+          $harnessExit = $LASTEXITCODE
+          Write-Host "Harness process finished with exit code $harnessExit."
+
+          # Strictly inspect the generated report: must exist, summary must be 'passed', no failures
+          if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+              throw "CRITICAL: Installer lifecycle report was not generated at '$reportPath'!"
+          }
+
+          $reportContent = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          Write-Host "Report Summary: $($reportContent.summary)"
+          $failures = @($reportContent.checks | Where-Object { $_.status -eq "fail" })
+          if ($failures.Count -gt 0) {
+              throw "Lifecycle harness reported $($failures.Count) check failure(s): $(($failures | ForEach-Object { $_.name }) -join ', ')"
+          }
+          if ($reportContent.summary -ne "passed") {
+              throw "Lifecycle harness summary is not 'passed' (got '$($reportContent.summary)')."
+          }
+          if ($harnessExit -ne 0) {
+              throw "Installer lifecycle harness exited with non-zero code $harnessExit."
+          }
+
+      - name: Upload lifecycle verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-lifecycle-report
+          path: |
+            ${{ runner.temp }}/release-candidates/installer-lifecycle-report.json
+          if-no-files-found: error

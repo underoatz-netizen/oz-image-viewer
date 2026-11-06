@@ -13,10 +13,9 @@ It is built with C++23, Win32, Direct3D 11, DXGI and Direct2D.
 ## Project status
 
 > **In development.** OZ Image Viewer is at version 0.1.0. There is no public
-> release and no public download, and the source repository is not publicly
-> accessible.
+> release and no public download.
 
-- Source repository (private): <https://github.com/underoatz-netizen/oz-image-viewer>
+- Source repository (public): <https://github.com/underoatz-netizen/oz-image-viewer>
 - Product page (once the OZ Lab site is published):
   <https://underoatz-netizen.github.io/software/oz-image-viewer/>
 
@@ -149,11 +148,29 @@ build\stage1\src\viewer\Release\ozviewer.exe --benchmark path\to\image.png
 
 ## Licenses and notices
 
-First-party source code in this repository is not covered by a top-level
-`LICENSE` file at this time.
+OZ Image Viewer first-party source code is licensed under the standard MIT License;
+see [LICENSE](LICENSE).
+
+Copyright (c) 2026 OZ Lab.
+
+The MIT license grant applies strictly to first-party source code created for
+OZ Image Viewer. It does not grant rights to third-party code, third-party
+libraries, runtime dependencies, or attributed test fixtures, each of which
+retains its respective upstream license. No trademark, brand name, logo, or
+patent rights are granted for third-party marks or technologies.
 
 Third-party components and their licences are listed in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). These include libjpeg-turbo,
-libwebp, libavif with dav1d, and libheif with libde265. libheif and libde265 are
-LGPL-3.0-only and are loaded dynamically as standalone DLLs that can be replaced
-alongside `ozviewer.exe`.
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Full third-party license
+texts are collected in [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt), and
+exact source acquisition and build instructions are documented in
+[THIRD-PARTY-SOURCE.txt](THIRD-PARTY-SOURCE.txt).
+
+Third-party dependencies include libjpeg-turbo, libwebp, libavif with dav1d and
+libyuv, and libheif with libde265. libheif and libde265 are licensed under the
+GNU Lesser General Public License version 3.0 (LGPL-3.0-only) and are loaded
+dynamically as standalone DLLs (`heif.dll` and `libde265.dll`) that can be
+freely replaced alongside `ozviewer.exe` with ABI-compatible builds under the
+combined-work shared-library provisions of LGPLv3 §4. Corresponding source
+code, patches, and build scripts for the LGPL components are provided
+alongside binary distributions following the source-distribution provisions of
+GPLv3 §6(d).

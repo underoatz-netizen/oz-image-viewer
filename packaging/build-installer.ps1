@@ -199,6 +199,15 @@ foreach ($name in ($allFiles | Sort-Object)) {
 $scriptCopy = Join-Path $OutDir 'ozviewer-installer.iss'
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $InnoScript).Path -Destination $scriptCopy -Force
 
+# Copy LICENSE file to $OutDir so Inno's LicenseFile=LICENSE resolves during compilation
+$licenseSrc = Join-Path $packageDirResolved 'LICENSE'
+if (-not (Test-Path -LiteralPath $licenseSrc -PathType Leaf)) {
+    $licenseSrc = Join-Path $RepoRoot 'LICENSE'
+}
+if (Test-Path -LiteralPath $licenseSrc -PathType Leaf) {
+    Copy-Item -LiteralPath $licenseSrc -Destination (Join-Path $OutDir 'LICENSE') -Force
+}
+
 Info "validated payload: $entrypoint $version, $($files.Count) files, $($extensions.Count) extensions"
 Info "generated include: $generatedPath"
 Info "installer script:  $scriptCopy"

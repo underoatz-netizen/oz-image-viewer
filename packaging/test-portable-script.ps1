@@ -90,7 +90,7 @@ try {
     $zip1 = Join-Path $out1 'ozviewer-0.1.0-win-x64-portable.zip'
     Assert-True (Test-Path -LiteralPath $zip1) "expected ZIP was not produced"
     $entries1 = Get-ZipEntries -ZipPath $zip1
-    foreach ($required in @('ozviewer.exe', 'heif.dll', 'libde265.dll', 'THIRD-PARTY-NOTICES.md', 'RUNNING.txt', 'package-manifest.json')) {
+    foreach ($required in @('ozviewer.exe', 'heif.dll', 'libde265.dll', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'THIRD-PARTY-LICENSES.txt', 'THIRD-PARTY-SOURCE.txt', 'BUILD-PROVENANCE.json', 'RUNNING.txt', 'package-manifest.json')) {
         Assert-True ($entries1 -contains $required) "happy path ZIP is missing $required (got: $($entries1 -join ', '))"
     }
     Assert-True (@($entries1 | Where-Object { $_ -match '^MSVCP140\.dll$' }).Count -eq 1) "MSVCP140.dll was not staged"

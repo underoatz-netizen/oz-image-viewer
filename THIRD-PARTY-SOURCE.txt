@@ -1,0 +1,135 @@
+================================================================================
+OZ Image Viewer — Third-Party Source & Provenance
+================================================================================
+
+This document provides the exact source repositories, pinned revision tags,
+upstream archive digests, port configurations, and rebuild instructions for
+all third-party components incorporated into OZ Image Viewer.
+
+In particular, for components licensed under the GNU Lesser General Public
+License (libheif 1.23.2 and libde265 1.1.1), complete corresponding source code,
+patches, build scripts, and build instructions are packaged into the
+separate release asset 'ozviewer-0.1.0-lgpl-corresponding-source.zip'
+accompanying binary distributions following the source-distribution provisions
+of GPLv3 §6(d) and combined-work shared-library provisions of LGPLv3 §4.
+
+vcpkg Baseline: 52d80838fb40c755b1615fbc9c7b994a33742a22
+Target Triplet: oz-x64-windows-static-md (x64 Windows, static libraries, dynamic CRT)
+
+--------------------------------------------------------------------------------
+libheif 1.23.2
+--------------------------------------------------------------------------------
+License:       LGPL-3.0-only
+Role:          Dynamic HEIC/HEIF still-image decoding via standalone heif.dll
+Upstream:      https://github.com/strukturag/libheif
+Release Tag:   v1.23.2
+Source Archive:strukturag-libheif-v1.23.2.tar.gz
+SHA-512:       d34ccd40d7f7cc48ff8ceddafd8f7c7004ab0df2a657237fcc715c4bcc453a41946d7db542d32b781875868ee116c451b4b63daaf073530245ec7b117ae60e27
+vcpkg Port:    ports/libheif
+Applied Patches: cmake-project-include.cmake, cxx-linkage-pkgconfig.diff, find-modules.diff, gdk-pixbuf.patch, symbol-exports.diff
+Linkage:       Dynamic (heif.dll loaded dynamically via LoadLibraryExW; no import lib linked into ozviewer.exe)
+LGPL Note:     Users may freely modify, rebuild, or replace heif.dll alongside ozviewer.exe.
+
+--------------------------------------------------------------------------------
+libde265 1.1.1
+--------------------------------------------------------------------------------
+License:       LGPL-3.0-only
+Role:          HEVC/H.265 software video/still decoder dependency for libheif
+Upstream:      https://github.com/strukturag/libde265
+Release Tag:   v1.1.1
+Source Archive:strukturag-libde265-v1.1.1.tar.gz
+SHA-512:       fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8
+vcpkg Port:    ports/libde265
+Applied Patches: fix-api-visibility.patch, fix-linkage.patch
+Linkage:       Dynamic (libde265.dll loaded dynamically as dependency of heif.dll)
+LGPL Note:     Users may freely modify, rebuild, or replace libde265.dll alongside ozviewer.exe.
+
+--------------------------------------------------------------------------------
+libavif 1.4.2#1
+--------------------------------------------------------------------------------
+License:       BSD-2-Clause AND Apache-2.0
+Role:          Static AVIF still-image decoding
+Upstream:      https://github.com/AOMediaCodec/libavif
+Release Tag:   v1.4.2
+Source Archive:AOMediaCodec-libavif-v1.4.2.tar.gz
+SHA-512:       cbf31827884058acc54d3b1fa0f2059f022691609a76e0f913981d5b8c1be60f52069a25b61c888c09e963161d1f4c9bf692c0716ab0ee067a4ccaa4e36d9ce1
+vcpkg Port:    ports/libavif
+Applied Patches: disable-source-changes.patch
+Linkage:       Static (avif.lib linked statically into ozviewer_core / ozviewer.exe)
+
+--------------------------------------------------------------------------------
+dav1d 1.5.4
+--------------------------------------------------------------------------------
+License:       BSD-2-Clause AND ISC
+Role:          AV1 decoder dependency for libavif
+Upstream:      https://code.videolan.org/videolan/dav1d
+Release Tag:   1.5.4
+Source Archive:videolan-dav1d-1.5.4.tar.gz
+SHA-512:       7ee5906640495919462b2242c44a8c3cc577fdda52fc25257792f6df919429d54e4a48c315a7a11759385f044f68d3d6573fd720853f447e2d8520a13693827f
+vcpkg Port:    ports/dav1d
+Applied Patches: fix-dependencies.patch, fix-msvc-arm64.patch
+Linkage:       Static (dav1d.lib linked statically into ozviewer_core / ozviewer.exe)
+
+--------------------------------------------------------------------------------
+libyuv 1916 (commit d98915a)
+--------------------------------------------------------------------------------
+License:       BSD-3-Clause
+Role:          Color conversion dependency for libavif
+Upstream:      https://chromium.googlesource.com/libyuv/libyuv
+Release Tag:   d98915a654d3564e4802a0004add46221c4e4348
+Source Archive:libyuv-d98915a654d3564e4802a0004add46221c4e4348.tar.gz
+SHA-512:       f11fdbda610c3c2f1f00889f5c40aa2e7e452a39ae5f63d7637f5256e298516fb90fb8f9f6e6f987ab8cb1e367808200673d325ce2521f1d1aa9db31481d45c7
+vcpkg Port:    ports/libyuv
+Applied Patches: fix-install.patch
+Linkage:       Static (yuv.lib linked statically into ozviewer_core / ozviewer.exe)
+
+--------------------------------------------------------------------------------
+libwebp 1.6.0
+--------------------------------------------------------------------------------
+License:       BSD-3-Clause (and Additional IP Rights Grant)
+Role:          Static WebP still-image decode and lossless encode
+Upstream:      https://chromium.googlesource.com/webm/libwebp
+Release Tag:   v1.6.0
+Source Archive:webmproject-libwebp-v1.6.0.tar.gz
+SHA-512:       3b08e5f884a44bc6061aa014498305c24e626e3f421be0d5f309d9e685f0e3860bb617db840bbd0c5a2423984534ef064379ca2fc7bbdfa8397a7a5cb60ea1bf
+vcpkg Port:    ports/libwebp
+Applied Patches: cmake-fixes.patch, pkgconfig-fixes.patch
+Linkage:       Static (libwebpdecoder.lib, libwebpdemux.lib, libwebp.lib linked statically)
+
+--------------------------------------------------------------------------------
+libjpeg-turbo 3.2.0
+--------------------------------------------------------------------------------
+License:       IJG / Modified BSD / zlib
+Role:          Static JPEG decoding via TurboJPEG C API
+Upstream:      https://github.com/libjpeg-turbo/libjpeg-turbo
+Release Tag:   3.2.0
+Source Archive:libjpeg-turbo-libjpeg-turbo-3.2.0.tar.gz
+SHA-512:       2c74421b92c4228b7536d54d2459b13959daec472db496e67cfcf463d1469e7be94018eecbfef521235bb77fc546b539a9ceba85a1efab8dbb3eec682c3f81e3
+vcpkg Port:    ports/libjpeg-turbo
+Applied Patches: add-options-for-exes.patch, workaround_cmake_system_processor.patch
+Linkage:       Static (jpeg.lib, turbojpeg.lib linked statically into ozviewer_core / ozviewer.exe)
+
+--------------------------------------------------------------------------------
+nlohmann-json 3.12.0
+--------------------------------------------------------------------------------
+License:       MIT
+Role:          Optional JSON parser used only in benchmark runner tool (ozbench), not in ozviewer.exe
+Upstream:      https://github.com/nlohmann/json
+Release Tag:   v3.12.0
+Source Archive:nlohmann-json-v3.12.0.tar.gz
+SHA-512:       a96a1fc09fb46aa27ca22be72648fbcf93e87889b70b55ff8255ee88c22ff7ea2ecfb8fef85040f7bdfa684078ad94d216d68b9cf19a3b655da010e051bfb25a
+vcpkg Port:    ports/nlohmann-json
+Applied Patches: None
+Linkage:       Header-only (used by runner build only)
+
+================================================================================
+LGPL Source & Rebuild Instructions
+================================================================================
+
+To rebuild heif.dll and libde265.dll from the corresponding source asset:
+1. Extract ozviewer-0.1.0-lgpl-corresponding-source.zip.
+2. Refer to README-BUILD-LGPL.txt inside the archive.
+3. Run the provided build-lgpl-dlls.ps1 script using MSVC 2022 and CMake.
+4. Replace heif.dll and libde265.dll in your OZ Image Viewer directory.
+   The application verifies ABI compatibility dynamically at runtime.
+
