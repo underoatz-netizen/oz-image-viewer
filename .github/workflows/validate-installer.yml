@@ -24,25 +24,39 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  validate-installer:
+  fetch-candidate:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
     env:
       CANDIDATE_RELEASE_ID: ${{ github.event.inputs.candidate_release_id }}
       CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag }}
       EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
       EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
       EXPECTED_SOURCE_SHA256: ${{ github.event.inputs.expected_source_sha256 }}
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Assert execution ref is trusted main
+        shell: powershell
+        run: |
+          $ref = "${{ github.ref }}"
+          Write-Host "Evaluating execution ref: $ref"
+          if ($ref -ne "refs/heads/main") {
+              throw "Security policy violation: This workflow may only be executed on refs/heads/main (got '$ref')."
+          }
 
-      - name: Prepare validation workspace
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare download workspace
         shell: powershell
         run: |
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
@@ -51,6 +65,8 @@ jobs:
 
       - name: Download candidate release assets from repository draft release
         shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
@@ -66,37 +82,142 @@ jobs:
               ) `
               -DestinationDir $downloadDir
 
-      - name: Verify asset cryptographic checksums
+      - name: Verify asset cryptographic checksums and create handoff manifest
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
 
-          function Verify-FileHash([string]$filename, [string]$expected) {
+          function Verify-Hex64([string]$filename, [string]$hash) {
+              $clean = $hash.Trim().ToLowerInvariant()
+              if ($clean.Length -ne 64 -or $clean -notmatch '^[0-9a-f]{64}$') {
+                  throw "Invalid expected SHA-256 hash syntax for $filename: '$hash' (must be 64 lowercase hex digits)."
+              }
               $path = Join-Path $downloadDir $filename
               if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-                  throw "Downloaded asset missing: $path"
+                  throw "Asset file missing: $path"
               }
               $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-              $exp = $expected.Trim().ToLowerInvariant()
-              Write-Host "Verifying $filename..."
-              Write-Host "  Expected: $exp"
-              Write-Host "  Actual:   $actual"
-              if ($actual -ne $exp) {
-                  throw "SHA-256 hash mismatch for asset '$filename'!"
+              if ($actual -ne $clean) {
+                  throw "SHA-256 hash mismatch for $filename! Expected '$clean', got '$actual'."
               }
-              Write-Host "  Check PASSED."
+              Write-Host "Verified $filename: $actual"
           }
 
-          Verify-FileHash "ozviewer-0.1.0-win-x64-installer.exe" $env:EXPECTED_INSTALLER_SHA256
-          Verify-FileHash "ozviewer-0.1.0-win-x64-portable.zip" $env:EXPECTED_PORTABLE_SHA256
-          Verify-FileHash "ozviewer-0.1.0-lgpl-corresponding-source.zip" $env:EXPECTED_SOURCE_SHA256
+          Verify-Hex64 "ozviewer-0.1.0-win-x64-installer.exe" $env:EXPECTED_INSTALLER_SHA256
+          Verify-Hex64 "ozviewer-0.1.0-win-x64-portable.zip" $env:EXPECTED_PORTABLE_SHA256
+          Verify-Hex64 "ozviewer-0.1.0-lgpl-corresponding-source.zip" $env:EXPECTED_SOURCE_SHA256
+
+          # Create handoff manifest using candidate-handoff helper
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $manifestPath = Join-Path $downloadDir "candidate-handoff-manifest.json"
+
+          New-CandidateHandoffManifest `
+              -Repository $env:GITHUB_REPOSITORY `
+              -WorkflowSha "${{ github.sha }}" `
+              -RunId "${{ github.run_id }}" `
+              -RunAttempt "${{ github.run_attempt }}" `
+              -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
+              -CandidateTag $env:CANDIDATE_TAG `
+              -CandidateDir $downloadDir `
+              -FixedAssetNames @(
+                  "ozviewer-0.1.0-win-x64-installer.exe",
+                  "ozviewer-0.1.0-win-x64-portable.zip",
+                  "ozviewer-0.1.0-lgpl-corresponding-source.zip"
+              ) `
+              -ManifestPath $manifestPath
+
+      - name: Upload immutable candidate handoff artifact
+        id: upload_candidate
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: candidate-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-win-x64-installer.exe
+            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-win-x64-portable.zip
+            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-lgpl-corresponding-source.zip
+            ${{ runner.temp }}/release-candidates/candidate-handoff-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  validate-candidate:
+    needs: fetch-candidate
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_RELEASE_ID: ${{ github.event.inputs.candidate_release_id }}
+      CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag }}
+      EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
+      EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
+      EXPECTED_SOURCE_SHA256: ${{ github.event.inputs.expected_source_sha256 }}
+    steps:
+      - name: Assert execution ref is trusted main
+        shell: powershell
+        run: |
+          $ref = "${{ github.ref }}"
+          Write-Host "Evaluating execution ref: $ref"
+          if ($ref -ne "refs/heads/main") {
+              throw "Security policy violation: This workflow may only be executed on refs/heads/main (got '$ref')."
+          }
+
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare isolated validation workspace
+        shell: powershell
+        run: |
+          $handoffParent = Join-Path $env:RUNNER_TEMP "handoff-parent"
+          New-Item -ItemType Directory -Path $handoffParent -Force | Out-Null
+          Write-Host "Handoff parent directory created at: $handoffParent"
+
+      - name: Download candidate handoff artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.fetch-candidate.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff-parent
+
+      - name: Audit candidate directory and rehash before execution
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $handoffParent = Join-Path $env:RUNNER_TEMP "handoff-parent"
+          $expectedArtifactName = "candidate-release-assets-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $candidateDir = Resolve-CandidateHandoffDirectory `
+              -ParentDir $handoffParent `
+              -ExpectedArtifactDirectoryName $expectedArtifactName
+          Write-Host "Resolved verified candidate directory at: $candidateDir"
+
+          # Export verified candidate directory for subsequent steps in this job
+          "CANDIDATE_DIR=$candidateDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Test-CandidateHandoffDirectory `
+              -CandidateDir $candidateDir `
+              -ExpectedRepository $env:GITHUB_REPOSITORY `
+              -ExpectedWorkflowSha "${{ github.sha }}" `
+              -ExpectedRunId "${{ github.run_id }}" `
+              -ExpectedRunAttempt "${{ github.run_attempt }}" `
+              -ExpectedCandidateReleaseId $env:CANDIDATE_RELEASE_ID `
+              -ExpectedCandidateTag $env:CANDIDATE_TAG `
+              -ExpectedHashesByName @{
+                  "ozviewer-0.1.0-win-x64-installer.exe"        = $env:EXPECTED_INSTALLER_SHA256
+                  "ozviewer-0.1.0-win-x64-portable.zip"         = $env:EXPECTED_PORTABLE_SHA256
+                  "ozviewer-0.1.0-lgpl-corresponding-source.zip" = $env:EXPECTED_SOURCE_SHA256
+              }
 
       - name: Validate portable payload and smoke test
         shell: powershell
         run: |
-          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
-          $portableZip = Join-Path $downloadDir "ozviewer-0.1.0-win-x64-portable.zip"
-          $extractDir = Join-Path $downloadDir "portable-unpacked"
+          $candidateDir = $env:CANDIDATE_DIR
+          $portableZip = Join-Path $candidateDir "ozviewer-0.1.0-win-x64-portable.zip"
+          $extractDir = Join-Path $candidateDir "portable-unpacked"
           New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
 
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -113,7 +234,7 @@ jobs:
           }
 
           $smokeScript = Join-Path $env:GITHUB_WORKSPACE "packaging\smoke-portable.ps1"
-          $smokeWork = Join-Path $downloadDir "smoke-work"
+          $smokeWork = Join-Path $candidateDir "smoke-work"
           & powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript `
               -PackageDir $extractDir `
               -WorkDir $smokeWork
@@ -124,9 +245,9 @@ jobs:
       - name: Run disposable installer lifecycle harness
         shell: powershell
         run: |
-          $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
-          $installerPath = Join-Path $downloadDir "ozviewer-0.1.0-win-x64-installer.exe"
-          $reportPath = Join-Path $downloadDir "installer-lifecycle-report.json"
+          $candidateDir = $env:CANDIDATE_DIR
+          $installerPath = Join-Path $candidateDir "ozviewer-0.1.0-win-x64-installer.exe"
+          $reportPath = Join-Path $candidateDir "installer-lifecycle-report.json"
           $fixturePath = Join-Path $env:GITHUB_WORKSPACE "tests\data\webp\bench_64x48.webp"
           if (-not (Test-Path -LiteralPath $fixturePath)) {
               $fixturePath = Join-Path $env:GITHUB_WORKSPACE "tests\data\phasea\bench_64x48.bmp"
@@ -163,9 +284,9 @@ jobs:
 
       - name: Upload lifecycle verification report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: installer-lifecycle-report
           path: |
-            ${{ runner.temp }}/release-candidates/installer-lifecycle-report.json
+            ${{ runner.temp }}/handoff-parent/*/installer-lifecycle-report.json
           if-no-files-found: error
