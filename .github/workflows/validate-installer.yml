@@ -3,8 +3,12 @@ name: Validate Installer Lifecycle
 on:
   workflow_dispatch:
     inputs:
+      candidate_release_id:
+        description: 'Candidate draft release ID to validate (strictly positive integer, e.g. 436240766)'
+        required: true
+        type: string
       candidate_tag:
-        description: 'Candidate draft release tag to validate (e.g. v0.1.0-rc1)'
+        description: 'Candidate draft release tag to validate (e.g. v0.1.0)'
         required: true
         type: string
       expected_installer_sha256:
@@ -28,6 +32,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 15
     env:
+      CANDIDATE_RELEASE_ID: ${{ github.event.inputs.candidate_release_id }}
       CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag }}
       EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
       EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
@@ -47,21 +52,19 @@ jobs:
       - name: Download candidate release assets from repository draft release
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
-          $tag = $env:CANDIDATE_TAG.Trim()
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-              throw "candidate_tag input cannot be empty."
-          }
-          Write-Host "Downloading candidate assets for tag '$tag' using gh..."
-          gh release download $tag `
-              --repo $env:GITHUB_REPOSITORY `
-              --pattern "ozviewer-0.1.0-win-x64-installer.exe" `
-              --pattern "ozviewer-0.1.0-win-x64-portable.zip" `
-              --pattern "ozviewer-0.1.0-lgpl-corresponding-source.zip" `
-              --dir $downloadDir
-          if ($LASTEXITCODE -ne 0) {
-              throw "gh release download failed for tag '$tag'."
-          }
+          $downloadScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\DownloadReleaseDraftAssets.ps1"
+          & $downloadScript `
+              -Repository $env:GITHUB_REPOSITORY `
+              -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
+              -CandidateTag $env:CANDIDATE_TAG `
+              -ExpectedAssetNames @(
+                  "ozviewer-0.1.0-win-x64-installer.exe",
+                  "ozviewer-0.1.0-win-x64-portable.zip",
+                  "ozviewer-0.1.0-lgpl-corresponding-source.zip"
+              ) `
+              -DestinationDir $downloadDir
 
       - name: Verify asset cryptographic checksums
         shell: powershell
