@@ -948,6 +948,53 @@ Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$false -TestScratchRo
     }
     Pass "Username generator: 100 generated names verified safe (length 15 <= 20, regex compliant, 100% unique, zero local accounts created)."
 
+    # 8.8: New-LocalUser parameter length constraints & AST inspection of controller call
+    # Inspect New-LocalUser parameter metadata directly from PowerShell command metadata
+    $newLocalUserCmd = Get-Command New-LocalUser
+    $nameMaxLen = $null
+    $descMaxLen = $null
+    if ($newLocalUserCmd.Parameters.ContainsKey('Name')) {
+        $lenAttr = $newLocalUserCmd.Parameters['Name'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateLengthAttribute] }
+        if ($null -ne $lenAttr) { $nameMaxLen = $lenAttr.MaxLength }
+    }
+    if ($newLocalUserCmd.Parameters.ContainsKey('Description')) {
+        $lenAttr = $newLocalUserCmd.Parameters['Description'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateLengthAttribute] }
+        if ($null -ne $lenAttr) { $descMaxLen = $lenAttr.MaxLength }
+    }
+    Assert-Condition ($nameMaxLen -eq 20) "New-LocalUser Name MaxLength must be 20"
+    Assert-Condition ($descMaxLen -eq 48) "New-LocalUser Description MaxLength must be 48"
+    Pass "Command metadata: New-LocalUser Name MaxLength=20 and Description MaxLength=48 confirmed."
+
+    # Inspect the actual production controller script AST for New-LocalUser call arguments
+    $controllerContent = [System.IO.File]::ReadAllText($StandardUserControllerScript)
+    $cTokens = $null
+    $cErrors = $null
+    $cAst = [System.Management.Automation.Language.Parser]::ParseInput($controllerContent, [ref]$cTokens, [ref]$cErrors)
+    Assert-Condition ($cErrors.Count -eq 0) "Controller script has 0 AST parser errors"
+
+    $newLocalUserAsts = $cAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'New-LocalUser'
+    }, $true)
+
+    Assert-Condition ($newLocalUserAsts.Count -eq 1) "Expected exactly 1 New-LocalUser command invocation in controller"
+    $cmdAst = $newLocalUserAsts[0]
+    $descArgValue = $null
+
+    $elements = $cmdAst.CommandElements
+    for ($i = 0; $i -lt $elements.Count; $i++) {
+        if ($elements[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and $elements[$i].ParameterName -eq 'Description') {
+            $descArgValue = $elements[$i + 1].SafeGetValue()
+            break
+        }
+    }
+
+    Assert-Condition ($null -ne $descArgValue) "Could not resolve Description parameter argument on New-LocalUser call in AST"
+    Assert-Condition ($descArgValue.Length -le 48) "Controller Description literal '$descArgValue' length ($($descArgValue.Length)) must be <= 48 chars"
+    Assert-Condition ($descArgValue -eq "OZ release test") "Controller Description literal expected 'OZ release test', got '$descArgValue'"
+    Pass "AST constraint verification: Controller New-LocalUser Description is '$descArgValue' (length $($descArgValue.Length) <= 48)."
+
     Write-Host "`nALL CANDIDATE HANDOFF AND WORKFLOW SECURITY TESTS PASSED!" -ForegroundColor Green
     exit 0
 } catch {

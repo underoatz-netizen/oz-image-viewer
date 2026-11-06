@@ -188,7 +188,7 @@ try {
 
     # Create Ephemeral Standard User
     Write-Host "Creating ephemeral local standard user: $createdUserName..."
-    $localUserObj = New-LocalUser -Name $createdUserName -Password $secPass -Description "Ephemeral standard user for OZ Viewer lifecycle test" -PasswordNeverExpires
+    $localUserObj = New-LocalUser -Name $createdUserName -Password $secPass -Description "OZ release test" -PasswordNeverExpires
     $createdUserSid = $localUserObj.SID.Value
     $script:ParentReport.createdUserName = $createdUserName
     $script:ParentReport.createdUserSid = $createdUserSid
