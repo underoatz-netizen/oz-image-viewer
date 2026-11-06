@@ -118,7 +118,7 @@ function Save-ParentReportInternal {
 # --- Execution Boundary ---
 $overallSuccess = $false
 $isSkipped = $false
-$createdUserName = "oztestuser_$([System.Guid]::NewGuid().ToString('N').Substring(0, 10))"
+$createdUserName = New-EphemeralStandardUserName
 $createdUserSid = $null
 $localUserObj = $null
 $scratchRoot = $null

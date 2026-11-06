@@ -49,6 +49,25 @@ function Get-StandardLifecycleRequiredCheckNames {
     return $script:StandardLifecycleRequiredCheckNames
 }
 
+function New-EphemeralStandardUserName {
+    <#
+    .SYNOPSIS
+      Generates an ephemeral local username strictly compliant with the Windows 20-character SAM account name limit.
+    .DESCRIPTION
+      Format: 'ozsu_' + 10 lowercase hexadecimal characters from a GUID (15 characters total).
+      Validates length <= 20 and regex format ^[a-z0-9_]{1,20}$.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $suffix = [System.Guid]::NewGuid().ToString('N').Substring(0, 10).ToLowerInvariant()
+    $name = "ozsu_$suffix"
+    if ($name.Length -gt 20 -or $name -notmatch '^[a-z0-9_]{1,20}$') {
+        throw "Generated username '$name' violates SAM account name constraints (Length: $($name.Length), max 20)."
+    }
+    return $name
+}
+
 function Get-NativeTokenElevationState {
     <#
     .SYNOPSIS

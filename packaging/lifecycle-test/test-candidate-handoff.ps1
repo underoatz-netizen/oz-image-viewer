@@ -930,6 +930,24 @@ Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$false -TestScratchRo
     Assert-Condition ($repSaved.cleanup.scratchRootRemoved -eq $true) "Scratch root removal must succeed"
     Pass "Controller state regression: Fixed initialized state completes cleanup, fails closed on unknown profile, removes scratch root, and persists durable failed report."
 
+    # 8.7: Ephemeral username generator unit tests & length regression
+    # Verify literal old prefix length vs new prefix length
+    $oldSample = "oztestuser_$([System.Guid]::NewGuid().ToString('N').Substring(0, 10))"
+    Assert-Condition ($oldSample.Length -eq 21) "Old prefix pattern must produce exactly 21 characters (violating Windows 20-char SAM limit)"
+    Pass "Username format regression: Confirmed old username pattern length is 21 (> 20 characters)."
+
+    # Test 100 generated names from New-EphemeralStandardUserName
+    $generatedSet = [System.Collections.Generic.HashSet[string]]::new()
+    for ($i = 0; $i -lt 100; $i++) {
+        $uName = New-EphemeralStandardUserName
+        Assert-Condition ($uName.Length -eq 15) "Generated username '$uName' length is $($uName.Length), expected exactly 15 chars"
+        Assert-Condition ($uName.Length -le 20) "Generated username '$uName' must be <= 20 chars"
+        Assert-Condition ($uName -match '^ozsu_[0-9a-f]{10}$') "Generated username '$uName' must match regex '^ozsu_[0-9a-f]{10}$'"
+        Assert-Condition (-not $generatedSet.Contains($uName)) "Generated username '$uName' collision detected among 100 samples"
+        $generatedSet.Add($uName) | Out-Null
+    }
+    Pass "Username generator: 100 generated names verified safe (length 15 <= 20, regex compliant, 100% unique, zero local accounts created)."
+
     Write-Host "`nALL CANDIDATE HANDOFF AND WORKFLOW SECURITY TESTS PASSED!" -ForegroundColor Green
     exit 0
 } catch {
