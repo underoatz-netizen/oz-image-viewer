@@ -371,6 +371,86 @@ try {
 
     Pass "Workflow YAML security architecture assertions verified."
 
+    # =========================================================================
+    # Part 5: Inline PowerShell Blocks AST Parsing & Regression Test
+    # =========================================================================
+    # 5.1: Verify unfixed syntax pattern triggers AST parser error
+    $unfixedSnippet = @'
+function Verify-Hex64([string]$filename, [string]$hash) {
+    throw "Invalid expected SHA-256 hash syntax for $filename: '$hash' (must be 64 lowercase hex digits)."
+    Write-Host "Verified $filename: $actual"
+}
+'@
+    $failTokens = $null
+    $failErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($unfixedSnippet, [ref]$failTokens, [ref]$failErrors)
+    Assert-Condition ($failErrors.Count -gt 0) "Parser regression assertion failed: unfixed snippet unexpectedly parsed without error!"
+    Pass "AST Parser regression: Confirmed original unescaped colon snippet triggers $($failErrors.Count) parser error(s)."
+
+    # 5.2: Extract and parse all inline run: | PowerShell blocks from the workflow
+    $yamlLines = [System.IO.File]::ReadAllLines($workflowYamlPath)
+    $blocks = [System.Collections.Generic.List[string]]::new()
+    $inBlock = $false
+    $currentBlock = [System.Text.StringBuilder]::new()
+    $blockIndent = 0
+
+    for ($i = 0; $i -lt $yamlLines.Length; $i++) {
+        $line = $yamlLines[$i]
+        if (-not $inBlock) {
+            if ($line -match '^(\s*)run:\s*\|\s*$') {
+                $inBlock = $true
+                $blockIndent = $matches[1].Length
+                $currentBlock.Clear() | Out-Null
+            }
+        } else {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                $currentBlock.AppendLine("") | Out-Null
+            } else {
+                $null = ($line -match '^(\s*)')
+                $indent = $matches[0].Length
+                if ($indent -gt $blockIndent) {
+                    $content = $line.Substring([math]::Min($blockIndent + 2, $line.Length))
+                    $currentBlock.AppendLine($content) | Out-Null
+                } else {
+                    $blocks.Add($currentBlock.ToString())
+                    $inBlock = $false
+                    $currentBlock.Clear() | Out-Null
+                    if ($line -match '^(\s*)run:\s*\|\s*$') {
+                        $inBlock = $true
+                        $blockIndent = $matches[1].Length
+                    }
+                }
+            }
+        }
+    }
+    if ($inBlock -and $currentBlock.Length -gt 0) {
+        $blocks.Add($currentBlock.ToString())
+    }
+
+    Assert-Condition ($blocks.Count -eq 9) "Expected 9 run: | blocks in workflow, found $($blocks.Count)"
+    $blockIdx = 0
+    foreach ($b in $blocks) {
+        $blockIdx++
+        # Replace legitimate GitHub Actions interpolation expressions with harmless placeholder strings
+        $sanitized = [regex]::Replace($b, '\$\{\{[\s\S]*?\}\}', "'github_placeholder'")
+        $bTokens = $null
+        $bErrors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($sanitized, [ref]$bTokens, [ref]$bErrors)
+        Assert-Condition ($bErrors.Count -eq 0) "Workflow inline run: | block $blockIdx contains $($bErrors.Count) PowerShell syntax error(s): $(($bErrors | ForEach-Object { $_.Message }) -join '; ')"
+    }
+    Pass "Workflow AST Parser: All $($blocks.Count) inline run: | PowerShell blocks parsed cleanly with 0 syntax errors."
+
+    # 5.3: Parse all standalone .ps1 scripts in packaging/lifecycle-test
+    $lifecycleScripts = @(Get-ChildItem -Path $ScriptDir -Filter "*.ps1")
+    foreach ($s in $lifecycleScripts) {
+        $sTokens = $null
+        $sErrors = $null
+        $sContent = [System.IO.File]::ReadAllText($s.FullName)
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($sContent, [ref]$sTokens, [ref]$sErrors)
+        Assert-Condition ($sErrors.Count -eq 0) "Script '$($s.Name)' contains $($sErrors.Count) syntax error(s): $(($sErrors | ForEach-Object { $_.Message }) -join '; ')"
+    }
+    Pass "Script AST Parser: All $($lifecycleScripts.Count) standalone lifecycle scripts parsed cleanly with 0 syntax errors."
+
     Write-Host "`nALL CANDIDATE HANDOFF AND WORKFLOW SECURITY TESTS PASSED!" -ForegroundColor Green
     exit 0
 } catch {
