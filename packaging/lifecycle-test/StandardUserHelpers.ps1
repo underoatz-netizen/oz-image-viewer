@@ -192,7 +192,7 @@ foreach ($k in $cleanKeys) {
 }
 [System.Environment]::SetEnvironmentVariable('CI', 'true', 'Process')
 
-# 2. Strict Child Identity & Elevation Assertions
+# 2. Strict Child Identity & Profile/TEMP Initialization
 $expectedSid = '__EXPECTED_USER_SID__'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ($identity.User.Value -ne $expectedSid) {
@@ -204,24 +204,6 @@ $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isAdmin) {
     throw "Security policy violation: Child process is running in Administrator role!"
-}
-
-# Verify native TokenElevation is strictly false (fail closed on API failure)
-$inputsDir = '__INPUTS_DIR__'
-$standardUserHelpersScript = Join-Path $inputsDir 'StandardUserHelpers.ps1'
-if (-not (Test-Path -LiteralPath $standardUserHelpersScript -PathType Leaf)) {
-    throw "StandardUserHelpers.ps1 not found in inputs: '$standardUserHelpersScript'"
-}
-. $standardUserHelpersScript
-
-$isTokenElevated = $null
-try {
-    $isTokenElevated = Get-NativeTokenElevationState
-} catch {
-    throw "Security policy violation: Native token elevation check failed closed: $_"
-}
-if ($isTokenElevated -ne $false) {
-    throw "Security policy violation: Child process native token is elevated (isTokenElevated=$isTokenElevated)!"
 }
 
 # Verify ProfileList binding in HKLM
@@ -249,6 +231,21 @@ if (-not (Test-Path -LiteralPath $userTemp)) {
     New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
 }
 
+# Prove user TEMP is writable by child standard user before ANY CodeDom/Add-Type compilation
+$tempTestFile = Join-Path $userTemp "oz_temp_probe_$([System.Guid]::NewGuid().ToString('N')).tmp"
+try {
+    [System.IO.File]::WriteAllText($tempTestFile, "TEMP_WRITE_OK")
+    if (-not (Test-Path -LiteralPath $tempTestFile -PathType Leaf)) {
+        throw "Failed to create temp probe file in '$userTemp'"
+    }
+} catch {
+    throw "Child user TEMP directory '$userTemp' is not writable: $_"
+} finally {
+    if (Test-Path -LiteralPath $tempTestFile) {
+        Remove-Item -LiteralPath $tempTestFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $systemRoot = [System.Environment]::GetEnvironmentVariable('SystemRoot', 'Process')
 $system32 = Join-Path $systemRoot "System32"
 [System.Environment]::SetEnvironmentVariable('USERPROFILE', $userProfile, 'Process')
@@ -258,7 +255,26 @@ $system32 = Join-Path $systemRoot "System32"
 [System.Environment]::SetEnvironmentVariable('TMP', $userTemp, 'Process')
 [System.Environment]::SetEnvironmentVariable('PATH', "$system32;$systemRoot", 'Process')
 
-# 3. Verify actual HKCU registry binding via unique GUID evidence key & HKU\$expectedSid read
+# 3. Verify native TokenElevation is strictly false (fail closed on API failure)
+# Invoked only AFTER TEMP and TMP environment variables point to writable user temp directory
+$inputsDir = '__INPUTS_DIR__'
+$standardUserHelpersScript = Join-Path $inputsDir 'StandardUserHelpers.ps1'
+if (-not (Test-Path -LiteralPath $standardUserHelpersScript -PathType Leaf)) {
+    throw "StandardUserHelpers.ps1 not found in inputs: '$standardUserHelpersScript'"
+}
+. $standardUserHelpersScript
+
+$isTokenElevated = $null
+try {
+    $isTokenElevated = Get-NativeTokenElevationState
+} catch {
+    throw "Security policy violation: Native token elevation check failed closed: $_"
+}
+if ($isTokenElevated -ne $false) {
+    throw "Security policy violation: Child process native token is elevated (isTokenElevated=$isTokenElevated)!"
+}
+
+# 4. Verify actual HKCU registry binding via unique GUID evidence key & HKU\$expectedSid read
 $uniqueGuid = [System.Guid]::NewGuid().ToString('D')
 $evidenceSubKey = "Software\OZImageViewer_Evidence_$uniqueGuid"
 $nonceVal = [System.Guid]::NewGuid().ToString('D')

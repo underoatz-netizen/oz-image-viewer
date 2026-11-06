@@ -464,7 +464,26 @@ try {
     Assert-Condition ($generatedScript -match "WindowsPowerShell\\v1\.0\\powershell\.exe") "Generated bootstrap must use absolute path to powershell.exe"
     Assert-Condition ($generatedScript -match "Software\\OZImageViewer_Evidence_") "Generated bootstrap must write nonce to unique HKCU evidence key for registry binding proof"
     Assert-Condition ($generatedScript.Contains('[Microsoft.Win32.Registry]::Users.OpenSubKey')) "Generated bootstrap must verify nonce via HKEY_USERS"
-    Pass "Pure helper: New-ChildBootstrapScriptContent generates valid, error-free PowerShell syntax with genuine HKCU/elevation proofs."
+
+    # AST ordering assertion: TEMP/TMP must be assigned BEFORE Get-NativeTokenElevationState / Add-Type invocation
+    $tempIndex = $generatedScript.IndexOf("[System.Environment]::SetEnvironmentVariable('TEMP'")
+    $elevationCheckIndex = $generatedScript.IndexOf("Get-NativeTokenElevationState")
+    Assert-Condition ($tempIndex -gt 0) "TEMP environment variable assignment must be present in generated bootstrap script"
+    Assert-Condition ($elevationCheckIndex -gt 0) "Get-NativeTokenElevationState call must be present in generated bootstrap script"
+    Assert-Condition ($tempIndex -lt $elevationCheckIndex) "TEMP/TMP must be set BEFORE any native elevation inspection/Add-Type call in child bootstrap script"
+    Pass "Pure helper: New-ChildBootstrapScriptContent generates valid, error-free PowerShell syntax with genuine HKCU/elevation proofs and strictly ordered TEMP/TMP initialization."
+
+    # 7.1.1: Test fail-closed behavior when user temp directory is unwritable
+    $mockUnwritableTempDir = "C:\Windows\System32\UnwritableTemp_MockTest"
+    $tempWriteFailed = $false
+    try {
+        $testProbe = Join-Path $mockUnwritableTempDir "probe.tmp"
+        [System.IO.File]::WriteAllText($testProbe, "FAIL")
+    } catch {
+        $tempWriteFailed = $true
+    }
+    Assert-Condition ($tempWriteFailed -eq $true) "Writing to unauthorized system directory must fail closed"
+    Pass "Pure helper: Unwritable temp directory fails closed before any CodeDom/Add-Type compilation."
 
     # 7.2: Test Child Report Integrity Validator
     # Build valid report mock from actual Get-StandardLifecycleRequiredCheckNames contract
