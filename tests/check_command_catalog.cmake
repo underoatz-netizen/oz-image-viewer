@@ -132,4 +132,17 @@ if(paste_helper_pos EQUAL -1)
     message(FATAL_ERROR "ui_command_state.hpp must declare the can_paste_image admission helper")
 endif()
 
-message(STATUS "check_command_catalog: OK (distinct Paste Image ID, authoritative admission policy, thin dispatch adapter routes zoom/navigation/paste to existing paths, disabled commands are no-ops, and Ctrl+V is never synthesized)")
+# 8. Reset Crop accepts both the stable catalog ID and the legacy crop-strip
+#    command ID through the same production WM_COMMAND branch, which calls the
+#    existing reset handler once.
+string(FIND "${content}" "if (oz::viewer::is_crop_reset_command(id)) {" reset_route_pos)
+if(reset_route_pos EQUAL -1)
+    message(FATAL_ERROR "WM_COMMAND must route Reset Crop through is_crop_reset_command(id)")
+endif()
+string(SUBSTRING "${content}" ${reset_route_pos} 200 reset_route_body)
+string(FIND "${reset_route_body}" "reset_crop_mode(*app);" reset_handler_pos)
+if(reset_handler_pos EQUAL -1)
+    message(FATAL_ERROR "Reset Crop branch must invoke the existing reset_crop_mode(*app) handler once")
+endif()
+
+message(STATUS "check_command_catalog: OK (distinct Paste Image ID, authoritative admission policy, thin dispatch adapter routes zoom/navigation/paste to existing paths, disabled commands are no-ops, Ctrl+V is never synthesized, and both Reset Crop IDs use one production branch)")

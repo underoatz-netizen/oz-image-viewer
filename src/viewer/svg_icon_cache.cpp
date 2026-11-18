@@ -3,91 +3,122 @@
 
 #include <shlwapi.h> // SHCreateMemStream
 #include <d2d1_3.h> // ID2D1DeviceContext5, ID2D1SvgDocument
+#include <d2d1helper.h>
+
+#include <cstdio>
+#include <cstring>
 
 namespace oz::viewer {
 
-std::string_view get_svg_icon_data(icon_id id) noexcept {
-    switch (id) {
-        case icon_id::open:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>)";
-        case icon_id::save:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>)";
-        case icon_id::undo:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>)";
-        case icon_id::redo:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>)";
-        case icon_id::rotate_left:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>)";
-        case icon_id::rotate_right:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>)";
-        case icon_id::crop:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>)";
-        case icon_id::resize:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>)";
-        case icon_id::fit:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>)";
-        case icon_id::one_to_one:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>)";
-        case icon_id::fullscreen:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>)";
-        case icon_id::paste_image:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1"/><line x1="12" y1="11" x2="12" y2="16"/><polyline points="9.5 13.5 12 16 14.5 13.5"/></svg>)";
-        case icon_id::save_as:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><line x1="14" y1="9" x2="18" y2="5"/><line x1="16" y1="5" x2="18" y2="5"/><line x1="18" y1="5" x2="18" y2="7"/></svg>)";
-        case icon_id::open_location:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><circle cx="13" cy="13" r="3"/><line x1="15.2" y1="15.2" x2="18.5" y2="18.5"/></svg>)";
-        case icon_id::copy_image:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/><circle cx="13" cy="13" r="1.1"/><polyline points="9 19 12 16 14 18 16 16 21 21"/></svg>)";
-        case icon_id::copy_file:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6l4 4v3"/><line x1="12" y1="13" x2="18" y2="13"/><line x1="12" y1="16" x2="16" y2="16"/></svg>)";
-        case icon_id::copy_path:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>)";
-        case icon_id::print:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>)";
-        case icon_id::delete_image:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>)";
-        case icon_id::flip_h:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 7 4 12 8 17"/><polyline points="16 7 20 12 16 17"/></svg>)";
-        case icon_id::flip_v:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><polyline points="7 8 12 4 17 8"/><polyline points="7 16 12 20 17 16"/></svg>)";
-        case icon_id::zoom_in:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>)";
-        case icon_id::zoom_out:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="8" y1="12" x2="16" y2="12"/></svg>)";
-        case icon_id::nav_first:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="5" x2="6" y2="19"/><polyline points="18 5 11 12 18 19"/></svg>)";
-        case icon_id::nav_prev:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg>)";
-        case icon_id::nav_next:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>)";
-        case icon_id::nav_last:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="5" x2="18" y2="19"/><polyline points="6 5 13 12 6 19"/></svg>)";
-        case icon_id::crop_free:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><path d="M9 12h6"/></svg>)";
-        case icon_id::crop_original:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8" cy="10" r="1.5"/><path d="m21 15-5-5L5 19"/></svg>)";
-        case icon_id::crop_1x1:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>)";
-        case icon_id::crop_3x2:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="1"/></svg>)";
-        case icon_id::crop_4x3:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1"/></svg>)";
-        case icon_id::crop_5x4:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="1"/></svg>)";
-        case icon_id::crop_16x9:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="1"/></svg>)";
-        case icon_id::crop_9x16:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="1"/></svg>)";
-        case icon_id::crop_a_series:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><polyline points="14 3 14 9 20 9"/></svg>)";
-        case icon_id::crop_reset:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>)";
-        case icon_id::crop_apply:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>)";
-        case icon_id::crop_cancel:
-            return R"(<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>)";
-        default:
-            return {};
+namespace {
+
+void format_svg_hex_color(COLORREF color, wchar_t (&out)[8]) noexcept {
+    std::swprintf(out, 8, L"#%02X%02X%02X",
+                  static_cast<unsigned>(GetRValue(color)),
+                  static_cast<unsigned>(GetGValue(color)),
+                  static_cast<unsigned>(GetBValue(color)));
+}
+
+ComPtr<ID2D1Bitmap1> render_svg_bitmap(ID2D1DeviceContext* d2d_context,
+                                       icon_id id,
+                                       std::int32_t size_px,
+                                       COLORREF color) {
+    if (!d2d_context || size_px <= 0) {
+        return nullptr;
+    }
+
+    ComPtr<ID2D1DeviceContext5> d2d5;
+    if (FAILED(d2d_context->QueryInterface(IID_PPV_ARGS(&d2d5)))) {
+        return nullptr;
+    }
+
+    const std::string svg_data = get_svg_icon_data(id);
+    if (svg_data.empty()) {
+        return nullptr;
+    }
+
+    IStream* stream = SHCreateMemStream(
+        reinterpret_cast<const BYTE*>(svg_data.data()),
+        static_cast<UINT>(svg_data.size()));
+    if (!stream) {
+        return nullptr;
+    }
+
+    const float grid = static_cast<float>(lucide::kGridUnits);
+    ComPtr<ID2D1SvgDocument> svg_doc;
+    const HRESULT hr = d2d5->CreateSvgDocument(
+        stream,
+        D2D1::SizeF(grid, grid),
+        &svg_doc);
+    stream->Release();
+
+    if (FAILED(hr) || !svg_doc) {
+        return nullptr;
+    }
+
+    ComPtr<ID2D1SvgElement> root;
+    svg_doc->GetRoot(&root);
+    if (root) {
+        wchar_t hex[8]{};
+        format_svg_hex_color(color, hex);
+        root->SetAttributeValue(L"stroke", D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, hex);
+    }
+
+    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+    ComPtr<ID2D1Bitmap1> target_bmp;
+    if (FAILED(d2d_context->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT>(size_px), static_cast<UINT>(size_px)),
+            nullptr, 0, &props, &target_bmp))) {
+        return nullptr;
+    }
+
+    ComPtr<ID2D1Image> old_target;
+    d2d_context->GetTarget(&old_target);
+    float old_dpi_x = 96.0f;
+    float old_dpi_y = 96.0f;
+    d2d_context->GetDpi(&old_dpi_x, &old_dpi_y);
+    D2D1_MATRIX_3X2_F old_transform{};
+    d2d_context->GetTransform(&old_transform);
+
+    const float scale = static_cast<float>(size_px) / grid;
+    d2d_context->SetTarget(target_bmp.Get());
+    d2d_context->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+
+    d2d_context->BeginDraw();
+    d2d_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    d2d5->DrawSvgDocument(svg_doc.Get());
+    const HRESULT draw_hr = d2d_context->EndDraw();
+
+    d2d_context->SetTransform(old_transform);
+    d2d_context->SetTarget(old_target.Get());
+    d2d_context->SetDpi(old_dpi_x, old_dpi_y);
+
+    if (FAILED(draw_hr)) {
+        return nullptr;
+    }
+    return target_bmp;
+}
+
+}  // namespace
+
+std::string get_svg_icon_data(icon_id id) noexcept {
+    const lucide::icon_asset* asset = lucide::FindAsset(id);
+    if (!asset || !asset->markup || asset->markup[0] == '\0') {
+        return {};
+    }
+    try {
+        std::string svg =
+            "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" "
+            "stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" "
+            "stroke-linejoin=\"round\">";
+        svg += asset->markup;
+        svg += "</svg>";
+        return svg;
+    } catch (...) {
+        return {};
     }
 }
 
@@ -120,6 +151,7 @@ std::wstring_view get_icon_fallback_label(icon_id id) noexcept {
         case icon_id::nav_prev: return L"Prev";
         case icon_id::nav_next: return L"Next";
         case icon_id::nav_last: return L"Last";
+        case icon_id::overflow: return L"More";
         case icon_id::crop_free: return L"Free";
         case icon_id::crop_original: return L"Orig";
         case icon_id::crop_1x1: return L"1:1";
@@ -169,73 +201,10 @@ ID2D1Bitmap* svg_icon_cache::get_or_render_icon(ID2D1DeviceContext* d2d_context,
         return nullptr;
     }
 
-    ComPtr<ID2D1DeviceContext5> d2d5;
-    if (FAILED(d2d_context->QueryInterface(IID_PPV_ARGS(&d2d5)))) {
+    ComPtr<ID2D1Bitmap1> target_bmp = render_svg_bitmap(d2d_context, id, size_px, color);
+    if (!target_bmp) {
         return nullptr;
     }
-
-    const std::string_view svg_data = get_svg_icon_data(id);
-    if (svg_data.empty()) {
-        return nullptr;
-    }
-
-    // Wrap in stream
-    IStream* stream = SHCreateMemStream(
-        reinterpret_cast<const BYTE*>(svg_data.data()),
-        static_cast<UINT>(svg_data.size()));
-    if (!stream) {
-        return nullptr;
-    }
-
-    ComPtr<ID2D1SvgDocument> svg_doc;
-    const HRESULT hr = d2d5->CreateSvgDocument(
-        stream,
-        D2D1::SizeF(static_cast<float>(size_px), static_cast<float>(size_px)),
-        &svg_doc);
-    stream->Release();
-
-    if (FAILED(hr) || !svg_doc) {
-        return nullptr;
-    }
-
-    // Set SVG root stroke color to the requested color
-    ComPtr<ID2D1SvgElement> root;
-    svg_doc->GetRoot(&root);
-    if (root) {
-        const D2D1_COLOR_F d2d_color = D2D1::ColorF(
-            GetRValue(color) / 255.0f,
-            GetGValue(color) / 255.0f,
-            GetBValue(color) / 255.0f,
-            1.0f);
-        root->SetAttributeValue(L"stroke", D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG,
-                                (color == RGB(235, 235, 235)) ? L"#EBEBEB" :
-                                (color == RGB(32, 32, 32)) ? L"#202020" :
-                                (color == RGB(160, 160, 160)) ? L"#A0A0A0" : L"#707070");
-    }
-
-    // Create intermediate bitmap target to render the SVG document
-    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
-        D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-
-    ComPtr<ID2D1Bitmap1> target_bmp;
-    if (FAILED(d2d_context->CreateBitmap(
-            D2D1::SizeU(static_cast<UINT>(size_px), static_cast<UINT>(size_px)),
-            nullptr, 0, &props, &target_bmp))) {
-        return nullptr;
-    }
-
-    // Save previous target and render SVG
-    ComPtr<ID2D1Image> old_target;
-    d2d_context->GetTarget(&old_target);
-    d2d_context->SetTarget(target_bmp.Get());
-
-    d2d_context->BeginDraw();
-    d2d_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f)); // Transparent
-    d2d5->DrawSvgDocument(svg_doc.Get());
-    d2d_context->EndDraw();
-
-    d2d_context->SetTarget(old_target.Get());
 
     cache_[key] = target_bmp;
     return target_bmp.Get();
@@ -254,70 +223,11 @@ bool svg_icon_cache::rasterize_icon_pixels(ID2D1DeviceContext* d2d_context,
         return false;
     }
 
-    ComPtr<ID2D1DeviceContext5> d2d5;
-    if (FAILED(d2d_context->QueryInterface(IID_PPV_ARGS(&d2d5)))) {
+    ComPtr<ID2D1Bitmap1> render_bmp = render_svg_bitmap(d2d_context, id, size_px, color);
+    if (!render_bmp) {
         return false;
     }
 
-    const std::string_view svg_data = get_svg_icon_data(id);
-    if (svg_data.empty()) {
-        return false;
-    }
-
-    IStream* stream = SHCreateMemStream(
-        reinterpret_cast<const BYTE*>(svg_data.data()),
-        static_cast<UINT>(svg_data.size()));
-    if (!stream) {
-        return false;
-    }
-
-    ComPtr<ID2D1SvgDocument> svg_doc;
-    const HRESULT hr = d2d5->CreateSvgDocument(
-        stream,
-        D2D1::SizeF(static_cast<float>(size_px), static_cast<float>(size_px)),
-        &svg_doc);
-    stream->Release();
-
-    if (FAILED(hr) || !svg_doc) {
-        return false;
-    }
-
-    ComPtr<ID2D1SvgElement> root;
-    svg_doc->GetRoot(&root);
-    if (root) {
-        root->SetAttributeValue(L"stroke", D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG,
-                                (color == RGB(235, 235, 235)) ? L"#EBEBEB" :
-                                (color == RGB(32, 32, 32)) ? L"#202020" :
-                                (color == RGB(160, 160, 160)) ? L"#A0A0A0" : L"#707070");
-    }
-
-    // 1. Render SVG into a TARGET-capable drawing bitmap
-    D2D1_BITMAP_PROPERTIES1 render_props = D2D1::BitmapProperties1(
-        D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-
-    ComPtr<ID2D1Bitmap1> render_bmp;
-    if (FAILED(d2d_context->CreateBitmap(
-            D2D1::SizeU(static_cast<UINT>(size_px), static_cast<UINT>(size_px)),
-            nullptr, 0, &render_props, &render_bmp))) {
-        return false;
-    }
-
-    ComPtr<ID2D1Image> old_target;
-    d2d_context->GetTarget(&old_target);
-    d2d_context->SetTarget(render_bmp.Get());
-
-    d2d_context->BeginDraw();
-    d2d_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-    d2d5->DrawSvgDocument(svg_doc.Get());
-    if (FAILED(d2d_context->EndDraw())) {
-        d2d_context->SetTarget(old_target.Get());
-        return false;
-    }
-
-    d2d_context->SetTarget(old_target.Get());
-
-    // 2. Copy into a separate staging bitmap configured with CPU_READ | CANNOT_DRAW
     D2D1_BITMAP_PROPERTIES1 staging_props = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_CANNOT_DRAW | D2D1_BITMAP_OPTIONS_CPU_READ,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));

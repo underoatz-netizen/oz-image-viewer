@@ -192,7 +192,7 @@ if(OZVIEWER_ENABLE_EDITING)
                    ${CMAKE_SOURCE_DIR}/src/viewer/shortcut_routing.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp
                    ${CMAKE_SOURCE_DIR}/src/viewer/viewer_strings.cpp)
-    target_link_libraries(ozviewer_stage7_seam_tests PRIVATE ozviewer_core d2d1 comctl32 shell32)
+    target_link_libraries(ozviewer_stage7_seam_tests PRIVATE ozviewer_core d2d1 gdiplus comctl32 shell32)
     target_include_directories(ozviewer_stage7_seam_tests PRIVATE
                                ${CMAKE_CURRENT_SOURCE_DIR}
                                ${CMAKE_SOURCE_DIR}/src/viewer)
@@ -243,7 +243,7 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
             ${CMAKE_SOURCE_DIR}/src/viewer/svg_icon_cache.cpp
             ${CMAKE_SOURCE_DIR}/src/viewer/modern_dialogs.cpp
             ${CMAKE_SOURCE_DIR}/src/viewer/context_menu.cpp)
-        target_link_libraries(ozviewer_core_tests PRIVATE d2d1 comctl32)
+        target_link_libraries(ozviewer_core_tests PRIVATE d2d1 gdiplus comctl32)
         target_include_directories(ozviewer_core_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/viewer)
     endif()
 
@@ -558,3 +558,12 @@ add_test(NAME dependency_provenance_tests
                  -File ${CMAKE_SOURCE_DIR}/packaging/test-dependency-provenance.ps1
                  -ScratchDir ${CMAKE_BINARY_DIR}/dependency-provenance-tests)
 set_tests_properties(dependency_provenance_tests PROPERTIES TIMEOUT 600)
+
+# Deterministic PikaView application icon regression test (requires Python 3 + Pillow;
+# exits 77 if Pillow is unavailable).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME ozviewer_icon_asset_tests
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/icon_asset_tests.py)
+    set_tests_properties(ozviewer_icon_asset_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()

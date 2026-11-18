@@ -1,6 +1,7 @@
 // oz/viewer/modern_dialogs.cpp - Native modern file and task dialog adapters implementation.
 #include "modern_dialogs.hpp"
 
+#include "ozviewer_resources.h"
 #include "viewer_strings.hpp"
 
 #include <commctrl.h>
@@ -432,6 +433,11 @@ prompt_result show_prompt(
                 tc.pszMainIcon = TD_ERROR_ICON;
             } else if (icon == MB_ICONINFORMATION) {
                 tc.pszMainIcon = TD_INFORMATION_ICON;
+            } else if (icon == 0) {
+                if (HICON app_icon = LoadIconW(tc.hInstance, MAKEINTRESOURCEW(IDI_OZVIEWER_APPICON))) {
+                    tc.dwFlags |= TDF_USE_HICON_MAIN;
+                    tc.hMainIcon = app_icon;
+                }
             }
 
             int button_pressed = 0;

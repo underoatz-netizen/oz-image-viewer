@@ -103,6 +103,69 @@ const std::vector<crop_button_desc>& get_crop_button_descriptors() noexcept {
 
 }  // namespace
 
+namespace {
+constexpr wchar_t kStripClassName[] = L"PikaCropStripBand";
+}  // namespace
+
+void crop_strip::register_strip_class(HINSTANCE instance) noexcept {
+    static bool s_registered = false;
+    if (s_registered) return;
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = &crop_strip::strip_wnd_proc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.lpszClassName = kStripClassName;
+    RegisterClassExW(&wc);
+    s_registered = true;
+}
+
+LRESULT CALLBACK crop_strip::strip_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    auto* self = reinterpret_cast<crop_strip*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!self) {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    switch (msg) {
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wparam);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            if (self->brush_strip_bg_) {
+                FillRect(hdc, &rc, self->brush_strip_bg_);
+            }
+            if (rc.bottom - rc.top > 1) {
+                RECT sep_rc{0, rc.bottom - 1, rc.right, rc.bottom};
+                HBRUSH sep = CreateSolidBrush(self->palette_.separator);
+                FillRect(hdc, &sep_rc, sep);
+                DeleteObject(sep);
+            }
+            return 1;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HBRUSH br = self->handle_ctl_color(reinterpret_cast<HDC>(wparam), reinterpret_cast<HWND>(lparam));
+            if (br) return reinterpret_cast<LRESULT>(br);
+            break;
+        }
+        case WM_NOTIFY:
+            return self->handle_notify(lparam);
+        case WM_HSCROLL:
+            self->handle_hscroll(wparam, lparam);
+            return 0;
+        case WM_COMMAND:
+            if (self->parent_) {
+                return SendMessageW(self->parent_, WM_COMMAND, wparam, lparam);
+            }
+            break;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
 bool crop_strip::create(HWND parent, HINSTANCE instance, float dpi) {
     destroy();
     parent_ = parent;
@@ -111,18 +174,19 @@ bool crop_strip::create(HWND parent, HINSTANCE instance, float dpi) {
     palette_ = get_theme_palette(theme_mode_);
 
     rebuild_fonts_and_brushes();
+    register_strip_class(instance);
 
     // Contextual crop strip container window
     hwnd_strip_ = CreateWindowExW(
         0,
-        L"STATIC",
+        kStripClassName,
         L"",
-        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | SS_NOTIFY,
+        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
         0, 0, 0, 0,
         parent_,
         nullptr,
         instance,
-        nullptr);
+        this);
 
     if (!hwnd_strip_) {
         return false;
@@ -177,6 +241,11 @@ bool crop_strip::create(HWND parent, HINSTANCE instance, float dpi) {
             SendMessageW(hwnd_txt_dim_, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
         }
     }
+
+    // WM_SETFONT relayouts text-only toolbar buttons from their font metrics and
+    // discards the cell size applied while the buttons were added, so the cell
+    // must be re-asserted after the font is installed.
+    apply_command_button_size();
 
     return true;
 }
@@ -234,6 +303,21 @@ void crop_strip::rebuild_fonts_and_brushes() noexcept {
 void crop_strip::apply_command_button_size() noexcept {
     if (!hwnd_toolbar_) return;
     const int cell_px = dip_to_physical_round(kCropIconCellDip, dpi_);
+
+    // TB_SETBUTTONSIZE establishes the cell height and the default width. It is
+    // not sticky: a later WM_SETFONT (or TB_SETIMAGELIST) relayout recomputes
+    // I_IMAGENONE buttons from their (suppressed) text metrics and collapses
+    // them to ~23 x 22 px. Pin every command button's width explicitly, then
+    // re-assert the cell so both dimensions always meet the 40 DIP hit target.
+    SendMessageW(hwnd_toolbar_, TB_SETBUTTONSIZE, 0, MAKELPARAM(cell_px, cell_px));
+    const auto& descs = get_crop_button_descriptors();
+    for (const auto& desc : descs) {
+        TBBUTTONINFOW tbinfo{sizeof(tbinfo)};
+        tbinfo.dwMask = TBIF_SIZE;
+        tbinfo.cx = static_cast<WORD>((std::max)(1, cell_px));
+        SendMessageW(hwnd_toolbar_, TB_SETBUTTONINFOW, desc.command_int_id,
+                     reinterpret_cast<LPARAM>(&tbinfo));
+    }
     SendMessageW(hwnd_toolbar_, TB_SETBUTTONSIZE, 0, MAKELPARAM(cell_px, cell_px));
 }
 
@@ -267,6 +351,7 @@ void crop_strip::setup_toolbar_buttons() noexcept {
 
     SendMessageW(hwnd_toolbar_, TB_ADDBUTTONSW, static_cast<WPARAM>(buttons.size()), reinterpret_cast<LPARAM>(buttons.data()));
     SendMessageW(hwnd_toolbar_, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS);
+    SendMessageW(hwnd_toolbar_, TB_SETMAXTEXTROWS, 0, 0);
     apply_command_button_size();
 }
 
@@ -327,7 +412,7 @@ void crop_strip::update_icons(ID2D1DeviceContext* d2d_context) noexcept {
     }
 
     const int icon_size_px = dip_to_physical_round(20.0f, dpi_);
-    HIMAGELIST new_himl = ImageList_Create(icon_size_px, icon_size_px, ILC_COLOR32 | ILC_MASK, static_cast<int>(descs.size()), 0);
+    HIMAGELIST new_himl = ImageList_Create(icon_size_px, icon_size_px, ILC_COLOR32, static_cast<int>(descs.size()), 0);
     if (!new_himl) {
         apply_fallback_labels();
         return;
@@ -341,7 +426,7 @@ void crop_strip::update_icons(ID2D1DeviceContext* d2d_context) noexcept {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    COLORREF icon_color = palette_.text_normal;
+    COLORREF icon_color = palette_.glyph_normal;
     bool all_succeeded = true;
 
     for (const auto& desc : descs) {
@@ -374,14 +459,18 @@ void crop_strip::update_icons(ID2D1DeviceContext* d2d_context) noexcept {
         ImageList_Destroy(old_himl);
     }
 
-    for (const auto& desc : descs) {
+    SendMessageW(hwnd_toolbar_, TB_SETMAXTEXTROWS, 0, 0);
+    for (std::size_t idx = 0; idx < descs.size(); ++idx) {
+        const auto& desc = descs[idx];
         std::wstring acc_name(desc.accessible_name ? desc.accessible_name : L"");
         TBBUTTONINFOW tbinfo{sizeof(tbinfo)};
-        tbinfo.dwMask = TBIF_TEXT;
+        tbinfo.dwMask = TBIF_IMAGE | TBIF_TEXT;
+        tbinfo.iImage = static_cast<int>(idx);
         tbinfo.pszText = acc_name.data();
         SendMessageW(hwnd_toolbar_, TB_SETBUTTONINFOW, desc.command_int_id, reinterpret_cast<LPARAM>(&tbinfo));
     }
     apply_command_button_size();
+    InvalidateRect(hwnd_toolbar_, nullptr, TRUE);
 }
 
 void crop_strip::reposition_toolbar() noexcept {
@@ -614,6 +703,98 @@ LRESULT crop_strip::handle_notify(LPARAM lparam) noexcept {
                 disp->lpszText = s_tip_buf;
                 return 0;
             }
+        }
+    }
+
+    if (hdr->hwndFrom == hwnd_toolbar_ && hdr->code == NM_CUSTOMDRAW) {
+        auto* nmcd = reinterpret_cast<NMTBCUSTOMDRAW*>(lparam);
+        switch (nmcd->nmcd.dwDrawStage) {
+            case CDDS_PREPAINT:
+                if (brush_strip_bg_) {
+                    FillRect(nmcd->nmcd.hdc, &nmcd->nmcd.rc, brush_strip_bg_);
+                }
+                return CDRF_NOTIFYITEMDRAW;
+            case CDDS_ITEMPREPAINT: {
+                nmcd->clrText = palette_.text_normal;
+                nmcd->clrBtnFace = palette_.bg_chrome;
+                nmcd->clrHighlightHotTrack = palette_.btn_hover;
+
+                if (brush_strip_bg_) {
+                    FillRect(nmcd->nmcd.hdc, &nmcd->nmcd.rc, brush_strip_bg_);
+                }
+                const int cmd_id = static_cast<int>(nmcd->nmcd.dwItemSpec);
+                const int btn_idx = static_cast<int>(
+                    SendMessageW(hwnd_toolbar_, TB_COMMANDTOINDEX,
+                                 static_cast<WPARAM>(cmd_id), 0));
+                TBBUTTON tb{};
+                if (btn_idx < 0 ||
+                    !SendMessageW(hwnd_toolbar_, TB_GETBUTTON,
+                                  static_cast<WPARAM>(btn_idx),
+                                  reinterpret_cast<LPARAM>(&tb))) {
+                    return CDRF_DODEFAULT;
+                }
+                if ((tb.fsStyle & BTNS_SEP) != 0 || cmd_id == 0) {
+                    const int cx = (nmcd->nmcd.rc.left + nmcd->nmcd.rc.right) / 2;
+                    RECT sep_rc{cx, nmcd->nmcd.rc.top + 6, cx + 1, nmcd->nmcd.rc.bottom - 6};
+                    HBRUSH sbr = CreateSolidBrush(palette_.separator);
+                    FillRect(nmcd->nmcd.hdc, &sep_rc, sbr);
+                    DeleteObject(sbr);
+                    return CDRF_SKIPDEFAULT;
+                }
+
+                const crop_button_desc* desc = nullptr;
+                for (const auto& candidate : get_crop_button_descriptors()) {
+                    if (candidate.command_int_id == cmd_id) {
+                        desc = &candidate;
+                        break;
+                    }
+                }
+                if (!desc) {
+                    // Text-only/fallback toolbar item: let the toolbar paint it.
+                    return CDRF_DODEFAULT;
+                }
+
+                if ((nmcd->nmcd.uItemState & (CDIS_HOT | CDIS_SELECTED | CDIS_CHECKED)) != 0) {
+                    const COLORREF plate = (nmcd->nmcd.uItemState & CDIS_SELECTED)
+                                               ? palette_.btn_pressed
+                                               : ((nmcd->nmcd.uItemState & CDIS_CHECKED) &&
+                                                          !(nmcd->nmcd.uItemState & CDIS_HOT)
+                                                      ? palette_.btn_checked
+                                                      : palette_.btn_hover);
+                    HBRUSH br = CreateSolidBrush(plate);
+                    RECT rc = nmcd->nmcd.rc;
+                    InflateRect(&rc, -3, -3);
+                    FillRect(nmcd->nmcd.hdc, &rc, br);
+                    DeleteObject(br);
+                }
+
+                // Draw the glyph through the shared GDI+ Lucide stroker used by
+                // the command bar instead of blitting the D2D-rasterised 20x20
+                // ImageList bitmap, whose stroke edges were clipped at the
+                // bitmap boundary. The HIMAGELIST remains populated by
+                // update_icons() for accessibility/fallback consumers, and
+                // TB_GETITEMRECT still reports the fixed 40 DIP cell.
+                const int btn_w = nmcd->nmcd.rc.right - nmcd->nmcd.rc.left;
+                const int btn_h = nmcd->nmcd.rc.bottom - nmcd->nmcd.rc.top;
+                const int glyph_px = (std::min)(
+                    dip_to_physical_round(20.0f, dpi_),
+                    (std::min)(btn_w, btn_h));
+                if (glyph_px > 0) {
+                    RECT glyph_rc{};
+                    glyph_rc.left = nmcd->nmcd.rc.left + (btn_w - glyph_px) / 2;
+                    glyph_rc.top = nmcd->nmcd.rc.top + (btn_h - glyph_px) / 2;
+                    glyph_rc.right = glyph_rc.left + glyph_px;
+                    glyph_rc.bottom = glyph_rc.top + glyph_px;
+                    const COLORREF icon_color =
+                        (nmcd->nmcd.uItemState & CDIS_DISABLED) != 0
+                            ? palette_.text_disabled
+                            : palette_.glyph_normal;
+                    lucide::DrawIcon(nmcd->nmcd.hdc, glyph_rc, desc->icon, icon_color);
+                }
+                return CDRF_SKIPDEFAULT;
+            }
+            default:
+                return CDRF_DODEFAULT;
         }
     }
 

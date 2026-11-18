@@ -1,34 +1,30 @@
-// oz/viewer/ui_chrome.cpp - modular native Win32 toolbar and status bar chrome implementation.
+// oz/viewer/ui_chrome.cpp - Single-row Lucide command bar, overflow menu, and clean status bar chrome.
 #include "ui_chrome.hpp"
 
-#include "std_icon_bar.hpp"
 #include "viewer_strings.hpp"
 
-#include <shellapi.h>
-#include <uxtheme.h>
 #include <commctrl.h>
 
 #include <algorithm>
-#include <cmath>
+#include <cwchar>
 
 namespace oz::viewer {
 
 namespace {
 
-constexpr int kToolbarControlId = 3001;
-constexpr int kStatusControlId  = 3002;
-constexpr int kBarScrollControlId = 3003;
+constexpr int kBandControlId = 3001;
+constexpr int kStatusControlId = 3002;
+constexpr int kNameLabelId = 3010;
+constexpr int kNavLabelId = 3011;
+constexpr int kZoomLabelId = 3012;
+
+constexpr UINT kMsgRestoreFocus = WM_APP + 10;
+
+constexpr const wchar_t* kBandClassName = L"PikaCommandBarBand";
+constexpr const wchar_t* kStatusClassName = L"PikaCleanStatusBar";
 
 constexpr std::size_t kToolbarButtonCount = 27;
 
-// Stable ownership for retained toolbar/tooltip/accessibility text (Stage
-// 10.3): the toolbar keeps raw const wchar_t* pointers (TBBUTTON iString and
-// TB_SETBUTTONINFOW pszText are consumed synchronously by SendMessageW), so
-// the pointed-to storage must outlive every use. These owning buffers are
-// initialized once from the string accessor and never mutated afterwards, so
-// no temporary c_str() is ever retained. Entries are in std_icon_bar catalog
-// order. Commands without a keyboard shortcut keep an empty shortcut string so
-// their tooltip is the plain command name (never a dangling parenthetical).
 struct toolbar_text_store {
     std::wstring tooltip[kToolbarButtonCount]{};
     std::wstring shortcut[kToolbarButtonCount]{};
@@ -71,9 +67,7 @@ const toolbar_text_store& get_toolbar_text_store() noexcept {
             store.shortcut[1]  = viewer_string(IDS_TB_SHORTCUT_PASTE_IMAGE);
             store.shortcut[2]  = viewer_string(IDS_TB_SHORTCUT_SAVE);
             store.shortcut[3]  = viewer_string(IDS_TB_SHORTCUT_SAVE_AS);
-            // 4 Open File Location: no keyboard shortcut.
             store.shortcut[5]  = viewer_string(IDS_TB_SHORTCUT_COPY_IMAGE);
-            // 6 Copy File, 7 Copy File Path: no keyboard shortcut.
             store.shortcut[8]  = viewer_string(IDS_TB_SHORTCUT_PRINT);
             store.shortcut[9]  = viewer_string(IDS_TB_SHORTCUT_DELETE);
             store.shortcut[10] = viewer_string(IDS_TB_SHORTCUT_UNDO);
@@ -128,44 +122,93 @@ const toolbar_text_store& get_toolbar_text_store() noexcept {
     return s_store;
 }
 
+WNDPROC g_button_orig_proc = nullptr;
+
+std::wstring format_button_tip(const toolbar_button_desc& desc) {
+    return format_tooltip_with_shortcut(
+        desc.tooltip ? std::wstring(desc.tooltip) : std::wstring(),
+        desc.shortcut ? std::wstring(desc.shortcut) : std::wstring());
+}
+
+std::wstring compact_zoom_text(const std::wstring& raw) {
+    if (raw.empty()) {
+        return L"--";
+    }
+    // Convert "Fit (68%)" -> "68%" so the command-bar zoom readout stays crisp and fixed-width.
+    const std::size_t open_paren = raw.find(L'(');
+    const std::size_t close_paren = raw.rfind(L')');
+    if (open_paren != std::wstring::npos && close_paren != std::wstring::npos && close_paren > open_paren + 1) {
+        return raw.substr(open_paren + 1, close_paren - open_paren - 1);
+    }
+    return raw;
+}
+
 }  // namespace
 
 const std::vector<toolbar_button_desc>& get_toolbar_button_descriptors() noexcept {
-    // The text store is initialized before the descriptor vector (declaration
-    // order) so every retained pointer below refers to stable storage. The
-    // order MUST match get_std_icon_commands() so the icon image-list index,
-    // the group separators, and the command catalog all stay aligned.
     const toolbar_text_store& text = get_toolbar_text_store();
     static const std::vector<toolbar_button_desc> s_buttons = {
-        {ui_command_id::file_open,         101, icon_id::open,         text.tooltip[0].c_str(),  text.shortcut[0].c_str(),  text.accessible[0].c_str()},
-        {ui_command_id::file_paste_image,  111, icon_id::paste_image,  text.tooltip[1].c_str(),  text.shortcut[1].c_str(),  text.accessible[1].c_str()},
-        {ui_command_id::file_save,         103, icon_id::save,         text.tooltip[2].c_str(),  text.shortcut[2].c_str(),  text.accessible[2].c_str()},
-        {ui_command_id::file_save_as,      104, icon_id::save_as,      text.tooltip[3].c_str(),  text.shortcut[3].c_str(),  text.accessible[3].c_str()},
-        {ui_command_id::file_open_location,105, icon_id::open_location,text.tooltip[4].c_str(),  text.shortcut[4].c_str(),  text.accessible[4].c_str()},
-        {ui_command_id::file_copy_image,   108, icon_id::copy_image,   text.tooltip[5].c_str(),  text.shortcut[5].c_str(),  text.accessible[5].c_str()},
-        {ui_command_id::file_copy,         106, icon_id::copy_file,    text.tooltip[6].c_str(),  text.shortcut[6].c_str(),  text.accessible[6].c_str()},
-        {ui_command_id::file_copy_path,    107, icon_id::copy_path,    text.tooltip[7].c_str(),  text.shortcut[7].c_str(),  text.accessible[7].c_str()},
-        {ui_command_id::file_print,        110, icon_id::print,        text.tooltip[8].c_str(),  text.shortcut[8].c_str(),  text.accessible[8].c_str()},
-        {ui_command_id::file_delete,       109, icon_id::delete_image, text.tooltip[9].c_str(),  text.shortcut[9].c_str(),  text.accessible[9].c_str()},
-        {ui_command_id::edit_undo,         205, icon_id::undo,         text.tooltip[10].c_str(), text.shortcut[10].c_str(), text.accessible[10].c_str()},
-        {ui_command_id::edit_redo,         206, icon_id::redo,         text.tooltip[11].c_str(), text.shortcut[11].c_str(), text.accessible[11].c_str()},
-        {ui_command_id::edit_rotate_left,  201, icon_id::rotate_left,  text.tooltip[12].c_str(), text.shortcut[12].c_str(), text.accessible[12].c_str()},
-        {ui_command_id::edit_rotate_right, 202, icon_id::rotate_right, text.tooltip[13].c_str(), text.shortcut[13].c_str(), text.accessible[13].c_str()},
-        {ui_command_id::edit_flip_h,       203, icon_id::flip_h,       text.tooltip[14].c_str(), text.shortcut[14].c_str(), text.accessible[14].c_str()},
-        {ui_command_id::edit_flip_v,       204, icon_id::flip_v,       text.tooltip[15].c_str(), text.shortcut[15].c_str(), text.accessible[15].c_str()},
-        {ui_command_id::edit_crop,         207, icon_id::crop,         text.tooltip[16].c_str(), text.shortcut[16].c_str(), text.accessible[16].c_str()},
-        {ui_command_id::edit_resize,       211, icon_id::resize,       text.tooltip[17].c_str(), text.shortcut[17].c_str(), text.accessible[17].c_str()},
-        {ui_command_id::view_fit,          302, icon_id::fit,          text.tooltip[18].c_str(), text.shortcut[18].c_str(), text.accessible[18].c_str(), true},
-        {ui_command_id::view_actual_size,  301, icon_id::one_to_one,   text.tooltip[19].c_str(), text.shortcut[19].c_str(), text.accessible[19].c_str(), true},
-        {ui_command_id::view_zoom_in,      303, icon_id::zoom_in,      text.tooltip[20].c_str(), text.shortcut[20].c_str(), text.accessible[20].c_str()},
-        {ui_command_id::view_zoom_out,     304, icon_id::zoom_out,     text.tooltip[21].c_str(), text.shortcut[21].c_str(), text.accessible[21].c_str()},
-        {ui_command_id::nav_first,         307, icon_id::nav_first,    text.tooltip[22].c_str(), text.shortcut[22].c_str(), text.accessible[22].c_str()},
-        {ui_command_id::nav_prev,          305, icon_id::nav_prev,     text.tooltip[23].c_str(), text.shortcut[23].c_str(), text.accessible[23].c_str()},
-        {ui_command_id::nav_next,          306, icon_id::nav_next,     text.tooltip[24].c_str(), text.shortcut[24].c_str(), text.accessible[24].c_str()},
-        {ui_command_id::nav_last,          308, icon_id::nav_last,     text.tooltip[25].c_str(), text.shortcut[25].c_str(), text.accessible[25].c_str()},
-        {ui_command_id::view_fullscreen,   309, icon_id::fullscreen,   text.tooltip[26].c_str(), text.shortcut[26].c_str(), text.accessible[26].c_str(), true}
+        {ui_command_id::file_open,          101, icon_id::open,          text.tooltip[0].c_str(),  text.shortcut[0].c_str(),  text.accessible[0].c_str()},
+        {ui_command_id::file_paste_image,   111, icon_id::paste_image,   text.tooltip[1].c_str(),  text.shortcut[1].c_str(),  text.accessible[1].c_str()},
+        {ui_command_id::file_save,          103, icon_id::save,          text.tooltip[2].c_str(),  text.shortcut[2].c_str(),  text.accessible[2].c_str()},
+        {ui_command_id::file_save_as,       104, icon_id::save_as,       text.tooltip[3].c_str(),  text.shortcut[3].c_str(),  text.accessible[3].c_str()},
+        {ui_command_id::file_open_location, 105, icon_id::open_location, text.tooltip[4].c_str(),  text.shortcut[4].c_str(),  text.accessible[4].c_str()},
+        {ui_command_id::file_copy_image,    108, icon_id::copy_image,    text.tooltip[5].c_str(),  text.shortcut[5].c_str(),  text.accessible[5].c_str()},
+        {ui_command_id::file_copy,          106, icon_id::copy_file,     text.tooltip[6].c_str(),  text.shortcut[6].c_str(),  text.accessible[6].c_str()},
+        {ui_command_id::file_copy_path,     107, icon_id::copy_path,     text.tooltip[7].c_str(),  text.shortcut[7].c_str(),  text.accessible[7].c_str()},
+        {ui_command_id::file_print,         110, icon_id::print,         text.tooltip[8].c_str(),  text.shortcut[8].c_str(),  text.accessible[8].c_str()},
+        {ui_command_id::file_delete,        109, icon_id::delete_image,  text.tooltip[9].c_str(),  text.shortcut[9].c_str(),  text.accessible[9].c_str()},
+        {ui_command_id::edit_undo,          205, icon_id::undo,          text.tooltip[10].c_str(), text.shortcut[10].c_str(), text.accessible[10].c_str()},
+        {ui_command_id::edit_redo,          206, icon_id::redo,          text.tooltip[11].c_str(), text.shortcut[11].c_str(), text.accessible[11].c_str()},
+        {ui_command_id::edit_rotate_left,   201, icon_id::rotate_left,   text.tooltip[12].c_str(), text.shortcut[12].c_str(), text.accessible[12].c_str()},
+        {ui_command_id::edit_rotate_right,  202, icon_id::rotate_right,  text.tooltip[13].c_str(), text.shortcut[13].c_str(), text.accessible[13].c_str()},
+        {ui_command_id::edit_flip_h,        203, icon_id::flip_h,        text.tooltip[14].c_str(), text.shortcut[14].c_str(), text.accessible[14].c_str()},
+        {ui_command_id::edit_flip_v,        204, icon_id::flip_v,        text.tooltip[15].c_str(), text.shortcut[15].c_str(), text.accessible[15].c_str()},
+        {ui_command_id::edit_crop,          207, icon_id::crop,          text.tooltip[16].c_str(), text.shortcut[16].c_str(), text.accessible[16].c_str(), true},
+        {ui_command_id::edit_resize,        211, icon_id::resize,        text.tooltip[17].c_str(), text.shortcut[17].c_str(), text.accessible[17].c_str()},
+        {ui_command_id::view_fit,           302, icon_id::fit,           text.tooltip[18].c_str(), text.shortcut[18].c_str(), text.accessible[18].c_str(), true},
+        {ui_command_id::view_actual_size,   301, icon_id::one_to_one,    text.tooltip[19].c_str(), text.shortcut[19].c_str(), text.accessible[19].c_str(), true},
+        {ui_command_id::view_zoom_in,       303, icon_id::zoom_in,       text.tooltip[20].c_str(), text.shortcut[20].c_str(), text.accessible[20].c_str()},
+        {ui_command_id::view_zoom_out,      304, icon_id::zoom_out,      text.tooltip[21].c_str(), text.shortcut[21].c_str(), text.accessible[21].c_str()},
+        {ui_command_id::nav_first,          307, icon_id::nav_first,     text.tooltip[22].c_str(), text.shortcut[22].c_str(), text.accessible[22].c_str()},
+        {ui_command_id::nav_prev,           305, icon_id::nav_prev,      text.tooltip[23].c_str(), text.shortcut[23].c_str(), text.accessible[23].c_str()},
+        {ui_command_id::nav_next,           306, icon_id::nav_next,      text.tooltip[24].c_str(), text.shortcut[24].c_str(), text.accessible[24].c_str()},
+        {ui_command_id::nav_last,           308, icon_id::nav_last,      text.tooltip[25].c_str(), text.shortcut[25].c_str(), text.accessible[25].c_str()},
+        {ui_command_id::view_fullscreen,    309, icon_id::fullscreen,    text.tooltip[26].c_str(), text.shortcut[26].c_str(), text.accessible[26].c_str(), true},
     };
     return s_buttons;
+}
+
+const toolbar_button_desc* find_toolbar_button_descriptor(int command_int_id) noexcept {
+    const auto& descs = get_toolbar_button_descriptors();
+    for (const auto& d : descs) {
+        if (d.command_int_id == command_int_id) {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+void ui_chrome::register_window_classes(HINSTANCE instance) noexcept {
+    static bool s_registered = false;
+    if (s_registered) {
+        return;
+    }
+    WNDCLASSEXW band_wc{sizeof(band_wc)};
+    band_wc.lpfnWndProc = &ui_chrome::band_wnd_proc;
+    band_wc.hInstance = instance;
+    band_wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
+    band_wc.lpszClassName = kBandClassName;
+    RegisterClassExW(&band_wc);
+
+    WNDCLASSEXW status_wc{sizeof(status_wc)};
+    status_wc.lpfnWndProc = &ui_chrome::status_wnd_proc;
+    status_wc.hInstance = instance;
+    status_wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
+    status_wc.lpszClassName = kStatusClassName;
+    RegisterClassExW(&status_wc);
+
+    s_registered = true;
 }
 
 bool ui_chrome::create(HWND parent, HINSTANCE instance, float dpi) {
@@ -175,115 +218,80 @@ bool ui_chrome::create(HWND parent, HINSTANCE instance, float dpi) {
     theme_mode_ = query_system_theme_mode();
     palette_ = get_theme_palette(theme_mode_);
 
-    INITCOMMONCONTROLSEX icex{sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES | ICC_TAB_CLASSES};
+    INITCOMMONCONTROLSEX icex{sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES};
     InitCommonControlsEx(&icex);
 
-    rebuild_fonts();
+    register_window_classes(instance);
+    rebuild_fonts_and_brushes();
 
-    // 1. Create native toolbar. TBSTYLE_WRAPABLE lets the standard surface
-    // pack every command into at most two rows; the surface is horizontally
-    // scrolled (via the sibling scrollbar below) whenever two rows cannot fit
-    // in the available width, so no command is ever hidden.
     const std::wstring toolbar_name = viewer_string(IDS_TOOLBAR_NAME);
-    hwnd_toolbar_ = CreateWindowExW(
+    hwnd_band_ = CreateWindowExW(
         0,
-        TOOLBARCLASSNAMEW,
+        kBandClassName,
         toolbar_name.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TBSTYLE_FLAT | TBSTYLE_WRAPABLE | TBSTYLE_TOOLTIPS | CCS_NORESIZE | CCS_NODIVIDER | CCS_NOPARENTALIGN,
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         0, 0, 0, 0,
         parent_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kToolbarControlId)),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBandControlId)),
         instance,
-        nullptr);
-
-    if (!hwnd_toolbar_) {
+        this);
+    if (!hwnd_band_) {
         return false;
     }
 
-    SendMessageW(hwnd_toolbar_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
-
-    // 1b. Create the standard-surface horizontal scrollbar (hidden until two
-    // rows cannot fit every command). It is a native, keyboard-reachable
-    // WS_TABSTOP control so every off-screen command stays reachable.
-    hwnd_bar_scroll_ = CreateWindowExW(
-        0,
-        WC_SCROLLBARW,
-        L"",
-        WS_CHILD | SBS_HORZ | WS_TABSTOP,
-        0, 0, 0, 0,
-        parent_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBarScrollControlId)),
-        instance,
-        nullptr);
-
-    if (!hwnd_bar_scroll_) {
-        destroy();
-        return false;
-    }
-
-    // 2. Create native status bar
     hwnd_status_ = CreateWindowExW(
         0,
-        STATUSCLASSNAMEW,
+        kStatusClassName,
         L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SBARS_SIZEGRIP | CCS_NORESIZE | CCS_NODIVIDER,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0, 0, 0, 0,
         parent_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatusControlId)),
         instance,
-        nullptr);
-
+        this);
     if (!hwnd_status_) {
         destroy();
         return false;
     }
 
-    if (font_ui_) {
-        SendMessageW(hwnd_toolbar_, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
-        SendMessageW(hwnd_status_, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
-    }
-
-    setup_toolbar_buttons();
-    setup_tooltips();
-
-    // Set status bar parts: [0: file/detail, 1: dimensions, 2: zoom, 3: nav]
-    int parts[] = {300, 480, 600, -1};
-    SendMessageW(hwnd_status_, SB_SETPARTS, static_cast<WPARAM>(4), reinterpret_cast<LPARAM>(parts));
+    create_band_controls(instance);
+    create_overflow_menu();
 
     apply_dwm_caption_theme(parent_, theme_mode_);
     return true;
 }
 
 void ui_chrome::destroy() noexcept {
-    if (himl_) {
-        ImageList_Destroy(himl_);
-        himl_ = nullptr;
-    }
-    using_image_list_ = false;
+    destroy_overflow_menu();
 
-    if (hwnd_toolbar_) {
-        DestroyWindow(hwnd_toolbar_);
-        hwnd_toolbar_ = nullptr;
+    if (hwnd_tooltip_) {
+        DestroyWindow(hwnd_tooltip_);
+        hwnd_tooltip_ = nullptr;
+    }
+    if (hwnd_band_) {
+        DestroyWindow(hwnd_band_);
+        hwnd_band_ = nullptr;
     }
     if (hwnd_status_) {
         DestroyWindow(hwnd_status_);
         hwnd_status_ = nullptr;
     }
-    if (hwnd_tooltip_) {
-        DestroyWindow(hwnd_tooltip_);
-        hwnd_tooltip_ = nullptr;
-    }
-    if (hwnd_bar_scroll_) {
-        DestroyWindow(hwnd_bar_scroll_);
-        hwnd_bar_scroll_ = nullptr;
-    }
-    bar_scroll_pos_px_ = 0;
-    bar_scroll_range_px_ = 0;
-    bar_view_width_px_ = 0;
-    bar_band_x_ = bar_band_y_ = bar_band_w_ = bar_band_h_ = 0;
+
+    btn_open_ = lbl_name_ = lbl_nav_ = nullptr;
+    btn_prev_ = btn_next_ = nullptr;
+    btn_zoom_out_ = lbl_zoom_ = btn_zoom_in_ = nullptr;
+    btn_fit_ = btn_actual_ = nullptr;
+    btn_rotate_l_ = btn_rotate_r_ = btn_crop_ = nullptr;
+    btn_delete_ = btn_print_ = btn_overflow_ = nullptr;
+    hover_btn_ = nullptr;
+
     if (font_ui_) {
         DeleteObject(font_ui_);
         font_ui_ = nullptr;
+    }
+    if (font_status_) {
+        DeleteObject(font_status_);
+        font_status_ = nullptr;
     }
     if (brush_chrome_bg_) {
         DeleteObject(brush_chrome_bg_);
@@ -294,13 +302,19 @@ void ui_chrome::destroy() noexcept {
         brush_status_bg_ = nullptr;
     }
     icon_cache_.clear();
+    bar_layout_ = cmd_bar_layout{};
+    last_band_width_px_ = 0;
     parent_ = nullptr;
 }
 
-void ui_chrome::rebuild_fonts() noexcept {
+void ui_chrome::rebuild_fonts_and_brushes() noexcept {
     if (font_ui_) {
         DeleteObject(font_ui_);
         font_ui_ = nullptr;
+    }
+    if (font_status_) {
+        DeleteObject(font_status_);
+        font_status_ = nullptr;
     }
     if (brush_chrome_bg_) {
         DeleteObject(brush_chrome_bg_);
@@ -314,342 +328,397 @@ void ui_chrome::rebuild_fonts() noexcept {
     brush_chrome_bg_ = CreateSolidBrush(palette_.bg_chrome);
     brush_status_bg_ = CreateSolidBrush(palette_.status_bg);
 
-    const int font_height = dip_to_physical_round(12.0f, dpi_);
+    const int ui_h = dip_to_physical_round(13.0f, dpi_);
     font_ui_ = CreateFontW(
-        -font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -ui_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
         L"Segoe UI");
-}
 
-void ui_chrome::apply_command_button_size() noexcept {
-    if (!hwnd_toolbar_) return;
-    // A fixed, DPI-aware square cell guarantees the 40x40 DIP minimum target
-    // and keeps every command equally reachable; BTNS_AUTOSIZE is deliberately
-    // not used so text fallback can never shrink a cell below the minimum.
-    const int cell_px = dip_to_physical_round(kStdIconCellDip, dpi_);
-    SendMessageW(hwnd_toolbar_, TB_SETBUTTONSIZE, 0, MAKELPARAM(cell_px, cell_px));
-}
+    const int status_h = dip_to_physical_round(12.0f, dpi_);
+    font_status_ = CreateFontW(
+        -status_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI");
 
-void ui_chrome::setup_toolbar_buttons() noexcept {
-    if (!hwnd_toolbar_) return;
-
-    const auto& descs = get_toolbar_button_descriptors();
-    const auto& commands = get_std_icon_commands();
-
-    std::vector<TBBUTTON> buttons;
-    buttons.reserve(descs.size() + commands.size());
-
-    // Descriptors and the std_icon_bar catalog share the same order, so walk
-    // them in lock-step: a separator precedes each later group's first command
-    // and never consumes an icon image-list index.
-    bool first = true;
-    for (std::size_t i = 0; i < descs.size(); ++i) {
-        const bool group_start = (i < commands.size()) && commands[i].group_start;
-        if (group_start && !first) {
-            TBBUTTON sep{};
-            sep.iBitmap = 0;
-            sep.idCommand = 0;
-            sep.fsState = TBSTATE_ENABLED;
-            sep.fsStyle = BTNS_SEP;
-            buttons.push_back(sep);
+    if (font_ui_) {
+        for (HWND lbl : {lbl_name_, lbl_nav_, lbl_zoom_}) {
+            if (lbl) {
+                SendMessageW(lbl, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
+            }
         }
-        const auto& desc = descs[i];
-        TBBUTTON tb{};
-        tb.iBitmap = I_IMAGENONE;
-        tb.idCommand = desc.command_int_id;
-        tb.fsState = TBSTATE_ENABLED;
-        tb.fsStyle = BTNS_BUTTON | (desc.is_check_button ? BTNS_CHECK : 0);
-        tb.dwData = static_cast<DWORD_PTR>(desc.cmd_id);
-        tb.iString = reinterpret_cast<INT_PTR>(desc.tooltip);
-        buttons.push_back(tb);
-        first = false;
+    }
+}
+
+void ui_chrome::create_band_controls(HINSTANCE instance) noexcept {
+    if (!hwnd_band_) return;
+
+    const auto make_btn = [&](int cmd_id, const wchar_t* acc_name) -> HWND {
+        HWND btn = CreateWindowExW(
+            0, L"BUTTON", acc_name ? acc_name : L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0,
+            hwnd_band_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(cmd_id)),
+            instance, nullptr);
+        if (btn) {
+            SetWindowLongPtrW(btn, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+            WNDPROC orig = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+                btn, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&ui_chrome::button_subclass_proc)));
+            if (g_button_orig_proc == nullptr) {
+                g_button_orig_proc = orig;
+            }
+        }
+        return btn;
+    };
+
+    const auto acc_for = [](int cmd_id) -> const wchar_t* {
+        const auto* d = find_toolbar_button_descriptor(cmd_id);
+        return (d && d->accessible_name) ? d->accessible_name : L"";
+    };
+
+    btn_open_ = make_btn(static_cast<int>(ui_command_id::file_open), acc_for(101));
+
+    lbl_name_ = CreateWindowExW(
+        0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+        0, 0, 0, 0, hwnd_band_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNameLabelId)),
+        instance, nullptr);
+
+    lbl_nav_ = CreateWindowExW(
+        0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+        0, 0, 0, 0, hwnd_band_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNavLabelId)),
+        instance, nullptr);
+
+    btn_prev_ = make_btn(static_cast<int>(ui_command_id::nav_prev), acc_for(305));
+    btn_next_ = make_btn(static_cast<int>(ui_command_id::nav_next), acc_for(306));
+    btn_zoom_out_ = make_btn(static_cast<int>(ui_command_id::view_zoom_out), acc_for(304));
+
+    lbl_zoom_ = CreateWindowExW(
+        0, L"STATIC", L"--",
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+        0, 0, 0, 0, hwnd_band_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kZoomLabelId)),
+        instance, nullptr);
+
+    btn_zoom_in_ = make_btn(static_cast<int>(ui_command_id::view_zoom_in), acc_for(303));
+    btn_fit_ = make_btn(static_cast<int>(ui_command_id::view_fit), acc_for(302));
+    btn_actual_ = make_btn(static_cast<int>(ui_command_id::view_actual_size), acc_for(301));
+
+#if OZVIEWER_ENABLE_EDITING
+    btn_rotate_l_ = make_btn(static_cast<int>(ui_command_id::edit_rotate_left), acc_for(201));
+    btn_rotate_r_ = make_btn(static_cast<int>(ui_command_id::edit_rotate_right), acc_for(202));
+    btn_crop_ = make_btn(static_cast<int>(ui_command_id::edit_crop), acc_for(207));
+#endif
+
+    btn_delete_ = make_btn(static_cast<int>(ui_command_id::file_delete), acc_for(109));
+    btn_print_ = make_btn(static_cast<int>(ui_command_id::file_print), acc_for(110));
+    btn_overflow_ = make_btn(menu::kIdOverflowMenu, L"More commands");
+
+    if (font_ui_) {
+        for (HWND lbl : {lbl_name_, lbl_nav_, lbl_zoom_}) {
+            if (lbl) {
+                SendMessageW(lbl, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
+            }
+        }
     }
 
-    SendMessageW(hwnd_toolbar_, TB_ADDBUTTONSW, static_cast<WPARAM>(buttons.size()), reinterpret_cast<LPARAM>(buttons.data()));
-    SendMessageW(hwnd_toolbar_, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS);
-    apply_command_button_size();
-    // No TB_AUTOSIZE: update_layout() sizes the band explicitly so the two-row
-    // bound and horizontal scroll range stay deterministic.
+    hwnd_tooltip_ = CreateWindowExW(
+        WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        hwnd_band_, nullptr, instance, nullptr);
+    if (hwnd_tooltip_) {
+        SendMessageW(hwnd_tooltip_, TTM_SETMAXTIPWIDTH, 0,
+                     static_cast<LPARAM>(dip_to_physical_round(400.0f, dpi_)));
+        const auto add_desc_tip = [&](HWND btn, int cmd_id) {
+            if (!btn) return;
+            if (const auto* d = find_toolbar_button_descriptor(cmd_id)) {
+                const std::wstring tip = format_button_tip(*d);
+                add_tooltip(btn, tip.c_str());
+            }
+        };
+        add_desc_tip(btn_open_, 101);
+        add_tooltip(lbl_name_, L"Image file name");
+        add_tooltip(lbl_nav_, L"Image position in folder");
+        add_desc_tip(btn_prev_, 305);
+        add_desc_tip(btn_next_, 306);
+        add_desc_tip(btn_zoom_out_, 304);
+        add_tooltip(lbl_zoom_, L"Current zoom level");
+        add_desc_tip(btn_zoom_in_, 303);
+        add_desc_tip(btn_fit_, 302);
+        add_desc_tip(btn_actual_, 301);
+        add_desc_tip(btn_rotate_l_, 201);
+        add_desc_tip(btn_rotate_r_, 202);
+        add_desc_tip(btn_crop_, 207);
+        add_desc_tip(btn_delete_, 109);
+        add_desc_tip(btn_print_, 110);
+        add_tooltip(btn_overflow_, L"More commands (F10 / Alt)");
+    }
 }
 
-void ui_chrome::setup_tooltips() noexcept {
-    if (!hwnd_toolbar_) return;
-    HWND hTooltip = reinterpret_cast<HWND>(SendMessageW(hwnd_toolbar_, TB_GETTOOLTIPS, 0, 0));
-    if (hTooltip) {
-        hwnd_tooltip_ = hTooltip;
-        SetWindowPos(hTooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+void ui_chrome::add_tooltip(HWND control, const wchar_t* text) noexcept {
+    if (!hwnd_tooltip_ || !control || !text) {
+        return;
+    }
+    TOOLINFOW tip{};
+    tip.cbSize = sizeof(tip);
+    tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tip.hwnd = hwnd_band_;
+    tip.uId = reinterpret_cast<UINT_PTR>(control);
+    tip.lpszText = const_cast<LPWSTR>(text);
+    SendMessageW(hwnd_tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+}
+
+void ui_chrome::update_tooltip_text(HWND control, const std::wstring& text) noexcept {
+    if (!hwnd_tooltip_ || !control) {
+        return;
+    }
+    TOOLINFOW tip{};
+    tip.cbSize = sizeof(tip);
+    tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tip.hwnd = hwnd_band_;
+    tip.uId = reinterpret_cast<UINT_PTR>(control);
+    tip.lpszText = const_cast<LPWSTR>(text.c_str());
+    SendMessageW(hwnd_tooltip_, TTM_SETTOOLINFOW, 0, reinterpret_cast<LPARAM>(&tip));
+}
+
+void ui_chrome::create_overflow_menu() noexcept {
+    destroy_overflow_menu();
+
+#if OZVIEWER_ENABLE_EDITING
+    constexpr bool kEditing = true;
+#else
+    constexpr bool kEditing = false;
+#endif
+
+    copy_submenu_ = CreatePopupMenu();
+    for (std::size_t i = 0; i < menu::kCopySubmenuCount; ++i) {
+        const auto& it = menu::kCopySubmenuItems[i];
+        AppendMenuW(copy_submenu_, MF_STRING, static_cast<UINT_PTR>(it.command), it.label);
+    }
+
+    if (kEditing) {
+        crop_ratio_submenu_ = CreatePopupMenu();
+        for (std::size_t i = 0; i < menu::kCropRatioSubmenuCount; ++i) {
+            const auto& it = menu::kCropRatioSubmenuItems[i];
+            AppendMenuW(crop_ratio_submenu_, MF_STRING, static_cast<UINT_PTR>(it.command), it.label);
+        }
+
+        edit_submenu_ = CreatePopupMenu();
+        for (std::size_t i = 0; i < menu::kEditSubmenuCount; ++i) {
+            const auto& it = menu::kEditSubmenuItems[i];
+            if (it.command == menu::kMenuSeparator) {
+                AppendMenuW(edit_submenu_, MF_SEPARATOR, 0, nullptr);
+            } else if (it.command == menu::kMenuCropRatioPopup) {
+                AppendMenuW(edit_submenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(crop_ratio_submenu_), it.label);
+            } else {
+                AppendMenuW(edit_submenu_, MF_STRING, static_cast<UINT_PTR>(it.command), it.label);
+            }
+        }
+    }
+
+    overflow_menu_ = CreatePopupMenu();
+    for (std::size_t i = 0; i < menu::kOverflowItemCount; ++i) {
+        const auto& it = menu::kOverflowItems[i];
+        if constexpr (!kEditing) {
+            if (it.editing_only) {
+                continue;
+            }
+        }
+        if (it.command == menu::kMenuSeparator) {
+            AppendMenuW(overflow_menu_, MF_SEPARATOR, 0, nullptr);
+        } else if (it.command == menu::kMenuCopyPopup) {
+            AppendMenuW(overflow_menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(copy_submenu_), it.label);
+        } else if (it.command == menu::kMenuEditPopup) {
+            if (edit_submenu_) {
+                AppendMenuW(overflow_menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(edit_submenu_), it.label);
+            }
+        } else {
+            AppendMenuW(overflow_menu_, MF_STRING, static_cast<UINT_PTR>(it.command), it.label);
+        }
+    }
+}
+
+void ui_chrome::destroy_overflow_menu() noexcept {
+    if (overflow_menu_) {
+        // DestroyMenu recursively destroys attached submenus.
+        DestroyMenu(overflow_menu_);
+        overflow_menu_ = nullptr;
+        copy_submenu_ = nullptr;
+        edit_submenu_ = nullptr;
+        crop_ratio_submenu_ = nullptr;
     }
 }
 
 void ui_chrome::set_dpi(float dpi) noexcept {
     if (dpi <= 0.0f) return;
     dpi_ = dpi;
-    rebuild_fonts();
-
-    if (hwnd_toolbar_) {
-        SendMessageW(hwnd_toolbar_, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
-        apply_command_button_size();
+    rebuild_fonts_and_brushes();
+    if (hwnd_tooltip_) {
+        SendMessageW(hwnd_tooltip_, TTM_SETMAXTIPWIDTH, 0,
+                     static_cast<LPARAM>(dip_to_physical_round(400.0f, dpi_)));
     }
-    if (hwnd_status_) {
-        SendMessageW(hwnd_status_, WM_SETFONT, reinterpret_cast<WPARAM>(font_ui_), TRUE);
+    if (last_band_width_px_ > 0) {
+        layout_band_controls(last_band_width_px_);
     }
-    icon_cache_.clear();
+    if (hwnd_band_) InvalidateRect(hwnd_band_, nullptr, TRUE);
+    if (hwnd_status_) InvalidateRect(hwnd_status_, nullptr, TRUE);
 }
 
 void ui_chrome::set_theme(theme_mode mode) noexcept {
     theme_mode_ = mode;
     palette_ = get_theme_palette(theme_mode_);
-    rebuild_fonts();
+    rebuild_fonts_and_brushes();
     icon_cache_.clear();
 
     if (parent_) {
         apply_dwm_caption_theme(parent_, theme_mode_);
     }
-    if (hwnd_toolbar_) {
-        InvalidateRect(hwnd_toolbar_, nullptr, TRUE);
+    if (hwnd_band_) {
+        InvalidateRect(hwnd_band_, nullptr, TRUE);
+        for (HWND child : {btn_open_, lbl_name_, lbl_nav_, btn_prev_, btn_next_,
+                           btn_zoom_out_, lbl_zoom_, btn_zoom_in_, btn_fit_,
+                           btn_actual_, btn_rotate_l_, btn_rotate_r_,
+                           btn_crop_, btn_delete_, btn_print_, btn_overflow_}) {
+            if (child) {
+                InvalidateRect(child, nullptr, TRUE);
+            }
+        }
     }
     if (hwnd_status_) {
         InvalidateRect(hwnd_status_, nullptr, TRUE);
     }
 }
 
-void ui_chrome::update_icons(ID2D1DeviceContext* d2d_context) noexcept {
-    if (!hwnd_toolbar_) return;
+void ui_chrome::update_icons(ID2D1DeviceContext* /*d2d_context*/) noexcept {
+    if (hwnd_band_) {
+        InvalidateRect(hwnd_band_, nullptr, TRUE);
+    }
+}
 
-    auto apply_text_fallback = [this]() {
-        if (using_image_list_) {
-            SendMessageW(hwnd_toolbar_, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(nullptr));
-            if (himl_) {
-                ImageList_Destroy(himl_);
-                himl_ = nullptr;
+HWND ui_chrome::control_for_slot(cmd_bar_item item) const noexcept {
+    switch (item) {
+        case cmd_bar_item::open: return btn_open_;
+        case cmd_bar_item::document_name: return lbl_name_;
+        case cmd_bar_item::nav_counter: return lbl_nav_;
+        case cmd_bar_item::nav_prev: return btn_prev_;
+        case cmd_bar_item::nav_next: return btn_next_;
+        case cmd_bar_item::zoom_out: return btn_zoom_out_;
+        case cmd_bar_item::zoom_label: return lbl_zoom_;
+        case cmd_bar_item::zoom_in: return btn_zoom_in_;
+        case cmd_bar_item::view_fit: return btn_fit_;
+        case cmd_bar_item::view_actual: return btn_actual_;
+        case cmd_bar_item::rotate_left: return btn_rotate_l_;
+        case cmd_bar_item::rotate_right: return btn_rotate_r_;
+        case cmd_bar_item::edit_crop: return btn_crop_;
+        case cmd_bar_item::file_delete: return btn_delete_;
+        case cmd_bar_item::file_print: return btn_print_;
+        case cmd_bar_item::overflow: return btn_overflow_;
+    }
+    return nullptr;
+}
+
+void ui_chrome::layout_band_controls(int band_width_px) noexcept {
+    if (!hwnd_band_ || band_width_px <= 0) {
+        return;
+    }
+    last_band_width_px_ = band_width_px;
+
+    int name_text_w = 0;
+    if (!status_info_.file_name.empty() && font_ui_) {
+        HDC dc = GetDC(hwnd_band_);
+        if (dc) {
+            HGDIOBJ old_font = SelectObject(dc, font_ui_);
+            SIZE ext{};
+            if (GetTextExtentPoint32W(dc, status_info_.file_name.c_str(),
+                                      static_cast<int>(status_info_.file_name.size()),
+                                      &ext)) {
+                name_text_w = ext.cx;
             }
-            using_image_list_ = false;
+            SelectObject(dc, old_font);
+            ReleaseDC(hwnd_band_, dc);
         }
+    }
 
-        const auto& descs = get_toolbar_button_descriptors();
-        for (const auto& desc : descs) {
-            TBBUTTONINFOW tbinfo{sizeof(TBBUTTONINFOW)};
-            tbinfo.dwMask = TBIF_TEXT | TBIF_IMAGE;
-            tbinfo.iImage = I_IMAGENONE;
-            // Use the full accessible name (e.g. "Rotate left 90 degrees") for screen readers,
-            // while preserving readable, complete button text in fallback mode.
-            std::wstring label_str(desc.accessible_name ? desc.accessible_name : desc.tooltip);
-            tbinfo.pszText = label_str.data();
-            SendMessageW(hwnd_toolbar_, TB_SETBUTTONINFOW, desc.command_int_id, reinterpret_cast<LPARAM>(&tbinfo));
+    cmd_bar_input input{};
+    input.client_width_px = band_width_px;
+    input.dpi = static_cast<int>(std::lround(dpi_));
+    input.nav_digits = (std::max)(1, status_info_.nav_digits);
+    input.name_text_width_px = name_text_w;
+    input.has_nav_counter = status_info_.has_nav_counter;
+#if OZVIEWER_ENABLE_EDITING
+    input.editing_enabled = true;
+#else
+    input.editing_enabled = false;
+#endif
+    bar_layout_ = compute_command_bar_layout(input);
+
+    const int band_h = bar_layout_.height_px;
+    const int btn_h = (std::min)(band_h - 4, scale_dip_round(kCommandBarButtonDip, input.dpi));
+    const int btn_top = (band_h - btn_h) / 2;
+    const int lbl_h = (std::min)(band_h - 4, scale_dip_round(kCommandBarLabelHeightDip, input.dpi));
+    const int lbl_top = (band_h - lbl_h) / 2;
+
+    const auto place = [&](HWND ctrl, cmd_bar_item kind, int h, int top) {
+        if (!ctrl) return;
+        const cmd_bar_slot* slot = bar_layout_.find(kind);
+        if (!slot || !slot->visible || slot->width <= 0) {
+            ShowWindow(ctrl, SW_HIDE);
+            return;
         }
-        apply_command_button_size();
+        SetWindowPos(ctrl, nullptr, slot->x, top, slot->width, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(ctrl, SW_SHOW);
+        InvalidateRect(ctrl, nullptr, TRUE);
     };
 
-    // If SVG is not supported or d2d_context is null, ensure buttons use fallback text
-    if (!d2d_context || !icon_cache_.is_svg_supported(d2d_context)) {
-        apply_text_fallback();
-        return;
-    }
+    place(btn_open_, cmd_bar_item::open, btn_h, btn_top);
+    place(lbl_name_, cmd_bar_item::document_name, lbl_h, lbl_top);
+    place(lbl_nav_, cmd_bar_item::nav_counter, lbl_h, lbl_top);
+    place(btn_prev_, cmd_bar_item::nav_prev, btn_h, btn_top);
+    place(btn_next_, cmd_bar_item::nav_next, btn_h, btn_top);
+    place(btn_zoom_out_, cmd_bar_item::zoom_out, btn_h, btn_top);
+    place(lbl_zoom_, cmd_bar_item::zoom_label, lbl_h, lbl_top);
+    place(btn_zoom_in_, cmd_bar_item::zoom_in, btn_h, btn_top);
+    place(btn_fit_, cmd_bar_item::view_fit, btn_h, btn_top);
+    place(btn_actual_, cmd_bar_item::view_actual, btn_h, btn_top);
+    place(btn_rotate_l_, cmd_bar_item::rotate_left, btn_h, btn_top);
+    place(btn_rotate_r_, cmd_bar_item::rotate_right, btn_h, btn_top);
+    place(btn_crop_, cmd_bar_item::edit_crop, btn_h, btn_top);
+    place(btn_delete_, cmd_bar_item::file_delete, btn_h, btn_top);
+    place(btn_print_, cmd_bar_item::file_print, btn_h, btn_top);
+    place(btn_overflow_, cmd_bar_item::overflow, btn_h, btn_top);
 
-    // SVG supported: render icons transactionally into a 32-bit ARGB HBITMAP ImageList
-    const int icon_size_px = dip_to_physical_round(20.0f, dpi_);
-    const auto& descs = get_toolbar_button_descriptors();
-
-    HIMAGELIST new_himl = ImageList_Create(icon_size_px, icon_size_px, ILC_COLOR32 | ILC_MASK, static_cast<int>(descs.size()), 0);
-    if (!new_himl) {
-        apply_text_fallback();
-        return;
-    }
-
-    HDC hdc_screen = GetDC(nullptr);
-    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
-
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = icon_size_px;
-    bmi.bmiHeader.biHeight = -icon_size_px; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    bool all_rendered = true;
-    for (std::size_t i = 0; i < descs.size(); ++i) {
-        const auto& desc = descs[i];
-        void* dib_bits = nullptr;
-        HBITMAP hbmp = CreateDIBSection(hdc_mem, &bmi, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
-        if (hbmp && dib_bits) {
-            std::memset(dib_bits, 0, static_cast<std::size_t>(icon_size_px * icon_size_px * 4));
-            const bool ok = icon_cache_.rasterize_icon_pixels(
-                d2d_context, desc.icon, icon_size_px, palette_.text_normal, dib_bits);
-            if (!ok) {
-                all_rendered = false;
-                DeleteObject(hbmp);
-                break;
-            }
-            ImageList_Add(new_himl, hbmp, nullptr);
-            DeleteObject(hbmp);
-        } else {
-            all_rendered = false;
-            break;
-        }
-    }
-
-    DeleteDC(hdc_mem);
-    ReleaseDC(nullptr, hdc_screen);
-
-    // Transactional check: if any icon failed to rasterize, destroy the partial ImageList
-    // and fall back immediately to clean text-labelled buttons. Never show blank buttons!
-    if (!all_rendered || ImageList_GetImageCount(new_himl) != static_cast<int>(descs.size())) {
-        ImageList_Destroy(new_himl);
-        apply_text_fallback();
-        return;
-    }
-
-    SendMessageW(hwnd_toolbar_, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(new_himl));
-    if (himl_) {
-        ImageList_Destroy(himl_);
-    }
-    himl_ = new_himl;
-    using_image_list_ = true;
-
-    for (std::size_t i = 0; i < descs.size(); ++i) {
-        const auto& desc = descs[i];
-        TBBUTTONINFOW tbinfo{sizeof(TBBUTTONINFOW)};
-        tbinfo.dwMask = TBIF_IMAGE | TBIF_TEXT;
-        tbinfo.iImage = static_cast<int>(i);
-        std::wstring acc_name(desc.accessible_name ? desc.accessible_name : desc.tooltip);
-        tbinfo.pszText = acc_name.data();
-        SendMessageW(hwnd_toolbar_, TB_SETBUTTONINFOW, desc.command_int_id, reinterpret_cast<LPARAM>(&tbinfo));
-    }
-    apply_command_button_size();
-}
-
-void ui_chrome::reposition_bar() noexcept {
-    if (!hwnd_toolbar_ || bar_band_w_ <= 0) {
-        return;
-    }
-    const int content_px = bar_band_w_ + bar_scroll_range_px_;
-    const int toolbar_w = (std::max)(bar_band_w_, content_px);
-    SetWindowPos(hwnd_toolbar_, nullptr,
-                 bar_band_x_ - bar_scroll_pos_px_, bar_band_y_,
-                 toolbar_w, bar_toolbar_height_px_,
-                 SWP_NOZORDER | SWP_SHOWWINDOW);
-
-    if (hwnd_bar_scroll_ && bar_scroll_range_px_ > 0) {
-        SCROLLINFO si{sizeof(si)};
-        si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-        si.nMin = 0;
-        si.nMax = content_px - 1;
-        si.nPage = static_cast<UINT>(bar_band_w_);
-        si.nPos = bar_scroll_pos_px_;
-        SetScrollInfo(hwnd_bar_scroll_, SB_CTL, &si, TRUE);
-    }
-}
-
-void ui_chrome::scroll_to_offset(int pos_px) noexcept {
-    const int clamped = (std::max)(0, (std::min)(pos_px, bar_scroll_range_px_));
-    if (clamped == bar_scroll_pos_px_) {
-        return;
-    }
-    bar_scroll_pos_px_ = clamped;
-    reposition_bar();
-}
-
-void ui_chrome::ensure_command_visible(int command_int_id) noexcept {
-    if (!hwnd_toolbar_ || bar_scroll_range_px_ <= 0 || bar_view_width_px_ <= 0) {
-        return;
-    }
-    const int index = static_cast<int>(
-        SendMessageW(hwnd_toolbar_, TB_COMMANDTOINDEX,
-                     static_cast<WPARAM>(command_int_id), 0));
-    if (index < 0) {
-        return;
-    }
-    RECT item_rc{};
-    if (!SendMessageW(hwnd_toolbar_, TB_GETITEMRECT,
-                      static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item_rc))) {
-        return;
-    }
-    int pos = bar_scroll_pos_px_;
-    if (item_rc.left < pos) {
-        pos = item_rc.left;
-    } else if (item_rc.right > pos + bar_view_width_px_) {
-        pos = item_rc.right - bar_view_width_px_;
-    }
-    scroll_to_offset(pos);
+    InvalidateRect(hwnd_band_, nullptr, TRUE);
 }
 
 void ui_chrome::update_layout(const ui_layout_result& layout, bool is_fullscreen) noexcept {
     if (is_fullscreen) {
-        if (hwnd_toolbar_) ShowWindow(hwnd_toolbar_, SW_HIDE);
+        if (hwnd_band_) ShowWindow(hwnd_band_, SW_HIDE);
         if (hwnd_status_) ShowWindow(hwnd_status_, SW_HIDE);
-        if (hwnd_bar_scroll_) ShowWindow(hwnd_bar_scroll_, SW_HIDE);
         return;
     }
 
-    if (hwnd_toolbar_) {
+    if (hwnd_band_) {
         const auto& tb = layout.toolbar_physical;
         if (tb.height > 0 && tb.width > 0) {
-            const float available_dip = physical_to_dip(tb.width, dpi_);
-            const auto bar = compute_std_icon_bar_layout(available_dip);
-
-            const int scrollbar_px = bar.needs_scroll
-                                         ? dip_to_physical_round(kStdIconScrollbarDip, dpi_)
-                                         : 0;
-            const int toolbar_h = (std::max)(0, tb.height - scrollbar_px);
-            const int content_px = dip_to_physical_round(bar.content_width_dip, dpi_);
-
-            bar_band_x_ = tb.x;
-            bar_band_y_ = tb.y;
-            bar_band_w_ = tb.width;
-            bar_band_h_ = tb.height;
-            bar_view_width_px_ = tb.width;
-            bar_toolbar_height_px_ = toolbar_h;
-            bar_scroll_range_px_ = (std::max)(0, content_px - tb.width);
-            bar_scroll_pos_px_ = (std::max)(0, (std::min)(bar_scroll_pos_px_, bar_scroll_range_px_));
-
-            const int toolbar_w = (std::max)(tb.width, content_px);
-            SetWindowPos(hwnd_toolbar_, nullptr,
-                         tb.x - bar_scroll_pos_px_, tb.y,
-                         toolbar_w, toolbar_h,
-                         SWP_NOZORDER | SWP_SHOWWINDOW);
-
-            if (hwnd_bar_scroll_) {
-                if (bar_scroll_range_px_ > 0) {
-                    SetWindowPos(hwnd_bar_scroll_, nullptr,
-                                 tb.x, tb.y + tb.height - scrollbar_px,
-                                 tb.width, scrollbar_px,
-                                 SWP_NOZORDER | SWP_SHOWWINDOW);
-                } else {
-                    ShowWindow(hwnd_bar_scroll_, SW_HIDE);
-                }
-            }
-            if (hwnd_bar_scroll_) {
-                SCROLLINFO si{sizeof(si)};
-                si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-                si.nMin = 0;
-                si.nMax = (content_px > 0) ? (content_px - 1) : 0;
-                si.nPage = static_cast<UINT>(tb.width);
-                si.nPos = bar_scroll_pos_px_;
-                SetScrollInfo(hwnd_bar_scroll_, SB_CTL, &si, TRUE);
-            }
+            SetWindowPos(hwnd_band_, nullptr, tb.x, tb.y, tb.width, tb.height,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            layout_band_controls(tb.width);
         } else {
-            bar_band_x_ = bar_band_y_ = bar_band_w_ = bar_band_h_ = 0;
-            bar_view_width_px_ = 0;
-            bar_scroll_pos_px_ = 0;
-            bar_scroll_range_px_ = 0;
-            ShowWindow(hwnd_toolbar_, SW_HIDE);
-            if (hwnd_bar_scroll_) ShowWindow(hwnd_bar_scroll_, SW_HIDE);
+            ShowWindow(hwnd_band_, SW_HIDE);
         }
     }
 
     if (hwnd_status_) {
         const auto& sb = layout.status_physical;
-        if (sb.height > 0) {
-            SetWindowPos(hwnd_status_, nullptr, sb.x, sb.y, sb.width, sb.height, SWP_NOZORDER | SWP_SHOWWINDOW);
-
-            // Scale status bar parts proportionally
-            const int p1 = dip_to_physical_round(240.0f, dpi_);
-            const int p2 = p1 + dip_to_physical_round(160.0f, dpi_);
-            const int p3 = p2 + dip_to_physical_round(120.0f, dpi_);
-            int parts[] = {p1, p2, p3, -1};
-            SendMessageW(hwnd_status_, SB_SETPARTS, static_cast<WPARAM>(4), reinterpret_cast<LPARAM>(parts));
+        if (sb.height > 0 && sb.width > 0) {
+            SetWindowPos(hwnd_status_, nullptr, sb.x, sb.y, sb.width, sb.height,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            InvalidateRect(hwnd_status_, nullptr, TRUE);
         } else {
             ShowWindow(hwnd_status_, SW_HIDE);
         }
@@ -657,149 +726,466 @@ void ui_chrome::update_layout(const ui_layout_result& layout, bool is_fullscreen
 }
 
 void ui_chrome::update_command_states(const ui_command_context& ctx) noexcept {
-    if (!hwnd_toolbar_) return;
+    last_ctx_ = ctx;
 
-    const auto& descs = get_toolbar_button_descriptors();
-    for (const auto& desc : descs) {
-        const auto item_state = derive_command_state(desc.cmd_id, ctx);
-        SendMessageW(hwnd_toolbar_, TB_ENABLEBUTTON, desc.command_int_id, item_state.enabled ? TRUE : FALSE);
-        if (desc.is_check_button) {
-            SendMessageW(hwnd_toolbar_, TB_CHECKBUTTON, desc.command_int_id, item_state.checked ? TRUE : FALSE);
-        }
+    const auto set_btn_enabled = [&](HWND btn, ui_command_id id) {
+        if (!btn) return;
+        const auto st = derive_command_state(id, ctx);
+        EnableWindow(btn, st.enabled ? TRUE : FALSE);
+        InvalidateRect(btn, nullptr, TRUE);
+    };
+
+    set_btn_enabled(btn_open_, ui_command_id::file_open);
+    set_btn_enabled(btn_prev_, ui_command_id::nav_prev);
+    set_btn_enabled(btn_next_, ui_command_id::nav_next);
+    set_btn_enabled(btn_zoom_out_, ui_command_id::view_zoom_out);
+    set_btn_enabled(btn_zoom_in_, ui_command_id::view_zoom_in);
+    set_btn_enabled(btn_fit_, ui_command_id::view_fit);
+    set_btn_enabled(btn_actual_, ui_command_id::view_actual_size);
+    set_btn_enabled(btn_rotate_l_, ui_command_id::edit_rotate_left);
+    set_btn_enabled(btn_rotate_r_, ui_command_id::edit_rotate_right);
+    set_btn_enabled(btn_crop_, ui_command_id::edit_crop);
+    set_btn_enabled(btn_delete_, ui_command_id::file_delete);
+    set_btn_enabled(btn_print_, ui_command_id::file_print);
+    if (btn_overflow_) {
+        EnableWindow(btn_overflow_, ctx.benchmark_mode ? FALSE : TRUE);
     }
+
+    // Mirror availability and checkmarks in the overflow popup menu and its submenus.
+    const auto sync_menu = [&](HMENU hmenu, const menu::item* items, std::size_t count) {
+        if (!hmenu) return;
+        for (std::size_t i = 0; i < count; ++i) {
+            const int cmd = items[i].command;
+            if (cmd == menu::kMenuSeparator ||
+                cmd == menu::kMenuCopyPopup ||
+                cmd == menu::kMenuEditPopup ||
+                cmd == menu::kMenuCropRatioPopup) {
+                continue;
+            }
+            const auto st = derive_command_state(static_cast<ui_command_id>(cmd), ctx);
+            EnableMenuItem(hmenu, static_cast<UINT>(cmd),
+                           MF_BYCOMMAND | (st.enabled ? MF_ENABLED : MF_GRAYED));
+            CheckMenuItem(hmenu, static_cast<UINT>(cmd),
+                          MF_BYCOMMAND | (st.checked ? MF_CHECKED : MF_UNCHECKED));
+        }
+    };
+
+    sync_menu(overflow_menu_, menu::kOverflowItems, menu::kOverflowItemCount);
+    sync_menu(copy_submenu_, menu::kCopySubmenuItems, menu::kCopySubmenuCount);
+    sync_menu(edit_submenu_, menu::kEditSubmenuItems, menu::kEditSubmenuCount);
+    sync_menu(crop_ratio_submenu_, menu::kCropRatioSubmenuItems, menu::kCropRatioSubmenuCount);
 }
 
 void ui_chrome::update_status(const status_bar_info& info) noexcept {
-    if (!hwnd_status_) return;
+    const bool name_changed = (status_info_.file_name != info.file_name) ||
+                              (status_info_.full_path != info.full_path) ||
+                              (status_info_.nav_digits != info.nav_digits) ||
+                              (status_info_.has_nav_counter != info.has_nav_counter);
+    status_info_ = info;
 
-    std::wstring part0 = info.file_name;
-    if (!info.state_label.empty()) {
-        if (!part0.empty()) part0 += L"  •  ";
-        part0 += info.state_label;
+    const auto set_label_text = [](HWND ctrl, const std::wstring& text) {
+        if (!ctrl) return;
+        wchar_t buf[512]{};
+        GetWindowTextW(ctrl, buf, static_cast<int>(std::size(buf)));
+        if (std::wstring(buf) != text) {
+            SetWindowTextW(ctrl, text.c_str());
+            InvalidateRect(ctrl, nullptr, TRUE);
+        }
+    };
+
+    set_label_text(lbl_name_, info.file_name);
+    set_label_text(lbl_nav_, info.has_nav_counter ? info.navigation : L"");
+    set_label_text(lbl_zoom_, compact_zoom_text(info.zoom));
+
+    if (name_changed) {
+        const std::wstring tip = !info.full_path.empty()
+                                     ? info.full_path
+                                     : (!info.file_name.empty() ? info.file_name : std::wstring(L"Image file name"));
+        update_tooltip_text(lbl_name_, tip);
+        if (last_band_width_px_ > 0) {
+            layout_band_controls(last_band_width_px_);
+        }
     }
 
-    SendMessageW(hwnd_status_, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(part0.c_str()));
-    SendMessageW(hwnd_status_, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(info.dimensions.c_str()));
-    SendMessageW(hwnd_status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(info.zoom.c_str()));
-    SendMessageW(hwnd_status_, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(info.navigation.c_str()));
+    if (hwnd_status_) {
+        InvalidateRect(hwnd_status_, nullptr, TRUE);
+    }
 }
 
-LRESULT ui_chrome::handle_notify(LPARAM lparam) noexcept {
-    auto* hdr = reinterpret_cast<NMHDR*>(lparam);
-    if (!hdr) return 0;
+void ui_chrome::show_overflow_menu() noexcept {
+    if (!overflow_menu_ || !parent_) {
+        return;
+    }
 
-    // Keyboard/mouse focus moves across the standard surface: when horizontal
-    // scrolling is active, bring the newly hot command fully into view so focus
-    // styling is never clipped and no command becomes unreachable. No-ops when
-    // the whole surface fits.
-    if (hdr->hwndFrom == hwnd_toolbar_) {
-        if (hdr->code == TBN_HOTITEMCHANGE) {
-            auto* hot = reinterpret_cast<NMTBHOTITEM*>(lparam);
-            if (hot) {
-                ensure_command_visible(static_cast<int>(hot->idNew));
+    RECT anchor{};
+    if (btn_overflow_ && IsWindowVisible(btn_overflow_)) {
+        GetWindowRect(btn_overflow_, &anchor);
+    } else if (hwnd_band_) {
+        GetWindowRect(hwnd_band_, &anchor);
+        anchor.left = anchor.right - 32;
+    } else {
+        GetWindowRect(parent_, &anchor);
+        anchor.left = anchor.right - 32;
+        anchor.bottom = anchor.top + 40;
+    }
+
+    RECT work_area{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+    const int row_h = (std::max)(1, GetSystemMetrics(SM_CYMENU));
+    const int est_h = GetMenuItemCount(overflow_menu_) * row_h + 12;
+    const int room_below = work_area.bottom - anchor.bottom;
+    const int room_above = anchor.top - work_area.top;
+    UINT flags = TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD;
+    int y = anchor.bottom;
+    if (est_h > room_below && room_above > room_below) {
+        flags = TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD;
+        y = anchor.top;
+    }
+
+    const UINT selected = TrackPopupMenu(overflow_menu_, flags, anchor.right, y, 0, parent_, nullptr);
+    if (selected != 0) {
+        SendMessageW(parent_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
+    }
+    if (IsWindow(parent_)) {
+        SetFocus(parent_);
+    }
+}
+
+std::vector<HWND> ui_chrome::visible_enabled_buttons() const noexcept {
+    std::vector<HWND> chain;
+    for (HWND btn : {btn_open_, btn_prev_, btn_next_, btn_zoom_out_, btn_zoom_in_,
+                     btn_fit_, btn_actual_, btn_rotate_l_, btn_rotate_r_,
+                     btn_crop_, btn_delete_, btn_print_, btn_overflow_}) {
+        if (btn && IsWindowVisible(btn) && IsWindowEnabled(btn)) {
+            chain.push_back(btn);
+        }
+    }
+    return chain;
+}
+
+HWND ui_chrome::first_tab_stop() const noexcept {
+    const auto chain = visible_enabled_buttons();
+    return chain.empty() ? hwnd_band_ : chain.front();
+}
+
+bool ui_chrome::handle_key_navigation(UINT vk, bool shift) noexcept {
+    const auto chain = visible_enabled_buttons();
+    if (chain.empty()) {
+        return false;
+    }
+    HWND focused = GetFocus();
+    std::size_t idx = 0;
+    bool found = false;
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (chain[i] == focused) {
+            idx = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        SetFocus(chain.front());
+        return true;
+    }
+    const bool backwards = (vk == VK_LEFT) || (vk == VK_TAB && shift);
+    if (vk == VK_TAB) {
+        if (backwards && idx == 0) {
+            return false;  // Let caller advance out of command bar (or wrap cleanly).
+        }
+        if (!backwards && idx + 1 >= chain.size()) {
+            return false;
+        }
+    }
+    const std::size_t next = backwards
+                                 ? (idx == 0 ? chain.size() - 1 : idx - 1)
+                                 : ((idx + 1) % chain.size());
+    SetFocus(chain[next]);
+    return true;
+}
+
+LRESULT ui_chrome::handle_notify(LPARAM /*lparam*/) noexcept {
+    return 0;
+}
+
+void ui_chrome::handle_hscroll(WPARAM /*wparam*/, LPARAM /*lparam*/) noexcept {
+}
+
+HBRUSH ui_chrome::handle_ctl_color(HDC hdc, HWND control) noexcept {
+    if (control == hwnd_band_ || control == lbl_name_ || control == lbl_nav_ || control == lbl_zoom_) {
+        SetBkColor(hdc, palette_.bg_chrome);
+        const bool muted = (control == lbl_nav_ || control == lbl_zoom_);
+        SetTextColor(hdc, muted ? palette_.text_muted : palette_.text_normal);
+        return brush_chrome_bg_;
+    }
+    if (control == hwnd_status_) {
+        SetBkColor(hdc, palette_.status_bg);
+        SetTextColor(hdc, palette_.status_text);
+        return brush_status_bg_;
+    }
+    return nullptr;
+}
+
+void ui_chrome::draw_band(HDC dc, const RECT& client) noexcept {
+    if (!dc) return;
+    FillRect(dc, &client, brush_chrome_bg_ ? brush_chrome_bg_ : GetSysColorBrush(COLOR_BTNFACE));
+
+    const int band_h = client.bottom - client.top;
+    const int margin_y = dip_to_physical_round(8.0f, dpi_);
+    if (!bar_layout_.separators.empty() && band_h > margin_y * 2) {
+        HPEN sep_pen = CreatePen(PS_SOLID, 1, palette_.separator);
+        HGDIOBJ old_pen = SelectObject(dc, sep_pen);
+        for (int x : bar_layout_.separators) {
+            MoveToEx(dc, x, margin_y, nullptr);
+            LineTo(dc, x, band_h - margin_y);
+        }
+        SelectObject(dc, old_pen);
+        DeleteObject(sep_pen);
+    }
+
+    if (band_h > 1) {
+        HPEN border_pen = CreatePen(PS_SOLID, 1, palette_.border);
+        HGDIOBJ old_pen = SelectObject(dc, border_pen);
+        MoveToEx(dc, client.left, client.bottom - 1, nullptr);
+        LineTo(dc, client.right, client.bottom - 1);
+        SelectObject(dc, old_pen);
+        DeleteObject(border_pen);
+    }
+}
+
+void ui_chrome::draw_status(HDC dc, const RECT& client) noexcept {
+    if (!dc) return;
+    FillRect(dc, &client, brush_status_bg_ ? brush_status_bg_ : GetSysColorBrush(COLOR_BTNFACE));
+
+    HPEN border_pen = CreatePen(PS_SOLID, 1, palette_.border);
+    HGDIOBJ old_pen = SelectObject(dc, border_pen);
+    MoveToEx(dc, client.left, client.top, nullptr);
+    LineTo(dc, client.right, client.top);
+    SelectObject(dc, old_pen);
+    DeleteObject(border_pen);
+
+    // Minimal clean status text: dimensions + transient state (or empty-state hint).
+    std::wstring left_text;
+    if (!status_info_.dimensions.empty()) {
+        left_text = status_info_.dimensions;
+        if (!status_info_.state_label.empty()) {
+            left_text += L"  \u2022  ";
+            left_text += status_info_.state_label;
+        }
+    } else if (!status_info_.state_label.empty()) {
+        left_text = status_info_.state_label;
+    } else if (!status_info_.file_name.empty()) {
+        left_text = status_info_.file_name;
+    }
+
+    if (!left_text.empty()) {
+        const int pad_x = dip_to_physical_round(10.0f, dpi_);
+        RECT text_rc{client.left + pad_x, client.top + 1, (std::max)(client.left + pad_x, client.right - pad_x), client.bottom};
+        HFONT font = font_status_ ? font_status_ : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        HGDIOBJ old_font = SelectObject(dc, font);
+        SetTextColor(dc, palette_.status_text);
+        SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, left_text.c_str(), static_cast<int>(left_text.size()),
+                  &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, old_font);
+    }
+}
+
+bool ui_chrome::is_button_checked(int command_int_id) const noexcept {
+    if (command_int_id == static_cast<int>(ui_command_id::view_fit)) {
+        return last_ctx_.have_image && last_ctx_.is_fit_mode;
+    }
+    if (command_int_id == static_cast<int>(ui_command_id::view_actual_size)) {
+        return last_ctx_.have_image && !last_ctx_.is_fit_mode;
+    }
+    if (command_int_id == static_cast<int>(ui_command_id::edit_crop)) {
+        return last_ctx_.crop_active;
+    }
+    return false;
+}
+
+void ui_chrome::draw_button(const DRAWITEMSTRUCT& item) noexcept {
+    if (!item.hDC) return;
+    const int cmd_id = static_cast<int>(item.CtlID);
+
+    icon_id icon = icon_id::overflow;
+    if (cmd_id == menu::kIdOverflowMenu) {
+        icon = icon_id::overflow;
+    } else if (const auto* desc = find_toolbar_button_descriptor(cmd_id)) {
+        icon = desc->icon;
+    } else {
+        return;
+    }
+
+    const bool disabled = (item.itemState & ODS_DISABLED) != 0;
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool hot = (item.itemState & ODS_HOTLIGHT) != 0 || (item.hwndItem == hover_btn_);
+    const bool focused = (item.itemState & ODS_FOCUS) != 0;
+    const bool checked = !disabled && is_button_checked(cmd_id);
+
+    FillRect(item.hDC, &item.rcItem, brush_chrome_bg_ ? brush_chrome_bg_ : GetSysColorBrush(COLOR_BTNFACE));
+
+    if (!disabled && (hot || pressed || checked)) {
+        RECT plate = item.rcItem;
+        InflateRect(&plate, -2, -2);
+        const COLORREF plate_color = pressed
+                                         ? palette_.btn_pressed
+                                         : (checked && !hot ? palette_.btn_checked : palette_.btn_hover);
+        HBRUSH plate_brush = CreateSolidBrush(plate_color);
+        FillRect(item.hDC, &plate, plate_brush);
+        DeleteObject(plate_brush);
+    }
+
+    const COLORREF glyph_color = disabled ? palette_.text_disabled : palette_.glyph_normal;
+    const int btn_w = item.rcItem.right - item.rcItem.left;
+    const int btn_h = item.rcItem.bottom - item.rcItem.top;
+    const int glyph_px = (std::min)(dip_to_physical_round(static_cast<float>(kCommandBarGlyphDip), dpi_),
+                                    (std::min)(btn_w, btn_h));
+    RECT glyph_rc{};
+    glyph_rc.left = item.rcItem.left + (btn_w - glyph_px) / 2;
+    glyph_rc.top = item.rcItem.top + (btn_h - glyph_px) / 2;
+    glyph_rc.right = glyph_rc.left + glyph_px;
+    glyph_rc.bottom = glyph_rc.top + glyph_px;
+
+    lucide::DrawIcon(item.hDC, glyph_rc, icon, glyph_color);
+
+    if (focused) {
+        RECT focus = item.rcItem;
+        InflateRect(&focus, -2, -2);
+        DrawFocusRect(item.hDC, &focus);
+    }
+}
+
+void ui_chrome::restore_focus_after_click(HWND button) noexcept {
+    if (!button || !parent_ || !IsWindow(parent_) || GetFocus() != button) {
+        return;
+    }
+    SetFocus(parent_);
+}
+
+LRESULT CALLBACK ui_chrome::band_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<ui_chrome*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        self = reinterpret_cast<ui_chrome*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if (!self) {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            self->draw_band(dc, client);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_DRAWITEM: {
+            if (lparam) {
+                self->draw_button(*reinterpret_cast<const DRAWITEMSTRUCT*>(lparam));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC:
+            if (HBRUSH br = self->handle_ctl_color(reinterpret_cast<HDC>(wparam), reinterpret_cast<HWND>(lparam))) {
+                return reinterpret_cast<LRESULT>(br);
+            }
+            break;
+        case WM_COMMAND: {
+            const int id = LOWORD(wparam);
+            if (id == menu::kIdOverflowMenu) {
+                self->show_overflow_menu();
+                return 0;
+            }
+            if (self->parent_) {
+                SendMessageW(self->parent_, WM_COMMAND, wparam, lparam);
+            }
+            return 0;
+        }
+        case kMsgRestoreFocus:
+            self->restore_focus_after_click(reinterpret_cast<HWND>(lparam));
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+LRESULT CALLBACK ui_chrome::status_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<ui_chrome*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        self = reinterpret_cast<ui_chrome*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if (!self) {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            self->draw_status(dc, client);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+LRESULT CALLBACK ui_chrome::button_subclass_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<ui_chrome*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_MOUSEMOVE && self) {
+        if (self->hover_btn_ != hwnd) {
+            HWND prev = self->hover_btn_;
+            self->hover_btn_ = hwnd;
+            if (prev && IsWindow(prev)) {
+                InvalidateRect(prev, nullptr, TRUE);
+            }
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+    } else if (msg == WM_MOUSELEAVE && self) {
+        if (self->hover_btn_ == hwnd) {
+            self->hover_btn_ = nullptr;
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+    } else if (msg == WM_LBUTTONUP) {
+        const LRESULT lr = CallWindowProcW(g_button_orig_proc, hwnd, msg, wparam, lparam);
+        if (GetDlgCtrlID(hwnd) != menu::kIdOverflowMenu) {
+            PostMessageW(GetParent(hwnd), kMsgRestoreFocus, 0, reinterpret_cast<LPARAM>(hwnd));
+        }
+        return lr;
+    } else if (msg == WM_KEYDOWN && self) {
+        if (wparam == VK_LEFT || wparam == VK_RIGHT) {
+            self->handle_key_navigation(static_cast<UINT>(wparam), false);
+            return 0;
+        }
+        if (wparam == VK_PRIOR || wparam == VK_NEXT || wparam == VK_HOME ||
+            wparam == VK_END || wparam == VK_UP || wparam == VK_DOWN) {
+            if (self->parent_) {
+                PostMessageW(self->parent_, WM_KEYDOWN, wparam, lparam);
             }
             return 0;
         }
     }
-
-    if (hdr->code == TTN_GETDISPINFOW) {
-        auto* disp = reinterpret_cast<NMTTDISPINFOW*>(lparam);
-        const int cmd_id = static_cast<int>(hdr->idFrom);
-        const auto& descs = get_toolbar_button_descriptors();
-        for (const auto& desc : descs) {
-            if (desc.command_int_id == cmd_id) {
-                // Bounded tooltip composition: inputs are concatenated, never
-                // interpreted as a format string.
-                static wchar_t s_tip[256];
-                const std::wstring tip_in(desc.tooltip ? desc.tooltip : L"");
-                const std::wstring shortcut_in(desc.shortcut ? desc.shortcut : L"");
-                const std::wstring composed =
-                    format_tooltip_with_shortcut(tip_in, shortcut_in);
-                wcsncpy_s(s_tip, composed.c_str(), _TRUNCATE);
-                disp->lpszText = s_tip;
-                return 0;
-            }
-        }
-    }
-
-    // Custom draw for toolbar if needed for high contrast or background colors
-    if (hdr->hwndFrom == hwnd_toolbar_ && hdr->code == NM_CUSTOMDRAW) {
-        auto* nmcd = reinterpret_cast<NMTBCUSTOMDRAW*>(lparam);
-        switch (nmcd->nmcd.dwDrawStage) {
-            case CDDS_PREPAINT:
-                return CDRF_NOTIFYITEMDRAW;
-            case CDDS_ITEMPREPAINT: {
-                if (theme_mode_ == theme_mode::high_contrast) {
-                    nmcd->clrText = palette_.text_normal;
-                    nmcd->clrBtnFace = palette_.bg_chrome;
-                    nmcd->clrHighlightHotTrack = palette_.btn_hover;
-                } else if (theme_mode_ == theme_mode::dark) {
-                    nmcd->clrText = palette_.text_normal;
-                    nmcd->clrBtnFace = palette_.bg_chrome;
-                    nmcd->clrHighlightHotTrack = palette_.btn_hover;
-                }
-                return CDRF_DODEFAULT;
-            }
-            default:
-                return CDRF_DODEFAULT;
-        }
-    }
-
-    return 0;
-}
-
-void ui_chrome::handle_hscroll(WPARAM wparam, LPARAM lparam) noexcept {
-    // Only the standard-surface scrollbar is handled here; the main window
-    // forwards every WM_HSCROLL, and other control scrollbars (none are
-    // horizontal today) would be rejected by this ownership check.
-    if (!hwnd_bar_scroll_ || reinterpret_cast<HWND>(lparam) != hwnd_bar_scroll_ ||
-        bar_scroll_range_px_ <= 0) {
-        return;
-    }
-
-    const int code = LOWORD(wparam);
-    int pos = bar_scroll_pos_px_;
-    switch (code) {
-        case SB_LINELEFT:
-            pos -= dip_to_physical_round(24.0f, dpi_);
-            break;
-        case SB_LINERIGHT:
-            pos += dip_to_physical_round(24.0f, dpi_);
-            break;
-        case SB_PAGELEFT:
-            pos -= bar_view_width_px_;
-            break;
-        case SB_PAGERIGHT:
-            pos += bar_view_width_px_;
-            break;
-        case SB_THUMBTRACK:
-        case SB_THUMBPOSITION: {
-            SCROLLINFO si{sizeof(si)};
-            si.fMask = SIF_TRACKPOS | SIF_POS;
-            if (GetScrollInfo(hwnd_bar_scroll_, SB_CTL, &si)) {
-                pos = (code == SB_THUMBTRACK) ? si.nTrackPos : si.nPos;
-            }
-            break;
-        }
-        case SB_LEFT:
-            pos = 0;
-            break;
-        case SB_RIGHT:
-            pos = bar_scroll_range_px_;
-            break;
-        default:
-            return;
-    }
-    scroll_to_offset(pos);
-}
-
-HBRUSH ui_chrome::handle_ctl_color(HDC hdc, HWND control) noexcept {
-    if (control == hwnd_toolbar_ || control == hwnd_status_) {
-        SetBkColor(hdc, (control == hwnd_status_) ? palette_.status_bg : palette_.bg_chrome);
-        SetTextColor(hdc, (control == hwnd_status_) ? palette_.status_text : palette_.text_normal);
-        return (control == hwnd_status_) ? brush_status_bg_ : brush_chrome_bg_;
-    }
-    return nullptr;
+    return CallWindowProcW(g_button_orig_proc, hwnd, msg, wparam, lparam);
 }
 
 }  // namespace oz::viewer

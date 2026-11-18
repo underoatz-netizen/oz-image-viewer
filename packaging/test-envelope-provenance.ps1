@@ -100,21 +100,23 @@ try {
     # -----------------------------------------------------------------------
     # TEST 1: Version and Package Name Alignment
     # -----------------------------------------------------------------------
+    $liveVersion = '0.1.2'
     $cmakeText = Get-Content -LiteralPath (Join-Path $RepoRoot "CMakeLists.txt") -Raw
-    Assert-True ($cmakeText -match 'project\(ozbench\s+VERSION\s+0\.1\.1') "CMakeLists.txt project version not bumped to 0.1.1"
+    Assert-True ($cmakeText -match 'project\(ozbench\s+VERSION\s+0\.1\.2') "CMakeLists.txt project version not $liveVersion"
 
     $vcpkgJson = Get-Content -LiteralPath (Join-Path $RepoRoot "vcpkg.json") -Raw | ConvertFrom-Json
-    Assert-True ($vcpkgJson."version-string" -eq "0.1.1") "vcpkg.json version-string not 0.1.1"
+    Assert-True ($vcpkgJson."version-string" -eq $liveVersion) "vcpkg.json version-string not $liveVersion"
 
     $portJson = Get-Content -LiteralPath (Join-Path $ScriptDir "portable-package.json") -Raw | ConvertFrom-Json
-    Assert-True ($portJson.version -eq "0.1.1") "portable-package.json version not 0.1.1"
+    Assert-True ($portJson.version -eq $liveVersion) "portable-package.json version not $liveVersion"
     Assert-True ($portJson.packageName -eq "pikaview") "portable-package.json packageName not pikaview"
     Assert-True ($portJson.entrypoint -eq "ozviewer.exe") "portable-package.json entrypoint must remain ozviewer.exe"
 
     $runnerMain = Get-Content -LiteralPath (Join-Path $RepoRoot "src\runner\main.cpp") -Raw
     Assert-True ($runnerMain.Contains('OZBENCH_PROJECT_VERSION')) "src/runner/main.cpp does not use OZBENCH_PROJECT_VERSION macro"
+    Assert-True ($runnerMain.Contains('#define OZBENCH_PROJECT_VERSION "' + $liveVersion + '"')) "src/runner/main.cpp fallback version not $liveVersion"
 
-    Pass "Version 0.1.1 and packageName pikaview aligned across CMakeLists.txt, vcpkg.json, portable-package.json, and runner"
+    Pass "Version $liveVersion and packageName pikaview aligned across CMakeLists.txt, vcpkg.json, portable-package.json, and runner fallback"
 
     # -----------------------------------------------------------------------
     # TEST 2: Old v0.1.0 BUILD-PROVENANCE.json preservation & no root fallback
@@ -144,6 +146,13 @@ try {
     $fixturePkgDir = Join-Path $fixtureRepo "packaging"
     New-Item -ItemType Directory -Path $fixturePkgDir -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $ScriptDir "portable-package.json") -Destination $fixturePkgDir -Force
+    # This isolated generator/E2E fixture is intentionally frozen to v0.1.1, so
+    # its fixed synthetic asset names below are consistent. Live metadata
+    # alignment is asserted separately in TEST 1.
+    $fixtureMetadataPath = Join-Path $fixturePkgDir "portable-package.json"
+    $fixtureMetadata = Get-Content -LiteralPath $fixtureMetadataPath -Raw | ConvertFrom-Json
+    $fixtureMetadata.version = '0.1.1'
+    [System.IO.File]::WriteAllText($fixtureMetadataPath, ($fixtureMetadata | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     Copy-Item -LiteralPath $GeneratorScript -Destination $fixturePkgDir -Force
     Copy-Item -LiteralPath (Join-Path $ScriptDir "lgpl-dependency-policy.json") -Destination $fixturePkgDir -Force
     $fixtureTripletDir = Join-Path $fixtureRepo "triplets"
@@ -342,7 +351,7 @@ try {
 
     # 4b. Fails closed on preexisting stage directory (no destructive overwrite)
     $outPreexist = Join-Path $pkgTestDir "out-preexist"
-    $preStage = Join-Path $outPreexist "pikaview-0.1.1-win-x64-portable"
+    $preStage = Join-Path $outPreexist "pikaview-$liveVersion-win-x64-portable"
     New-Item -ItemType Directory -Path $preStage -Force | Out-Null
     $r = Invoke-Script -ScriptPath $PackageScript -Arguments @('-PayloadDir', $payloadDir, '-OutDir', $outPreexist)
     Assert-True ($r.ExitCode -ne 0) "Packaging overwrote preexisting stage directory"

@@ -157,7 +157,7 @@ bool render_blank(renderer& r) {
         return false;
     }
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     const HRESULT hr = r.d2d_context->EndDraw();
     if (FAILED(hr)) {
         return false;
@@ -372,7 +372,7 @@ bool redraw_retained(renderer& r, const oz::viewer_core::view_geometry& geom) {
                                               dip_rect.y + dip_rect.height);
 
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     if (dip_rect.width > 0.0f && dip_rect.height > 0.0f) {
         r.d2d_context->DrawBitmap(r.source_bitmap.Get(), dest_rect, 1.0f,
                                   D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
@@ -390,7 +390,7 @@ bool redraw_retained_plan(renderer& r, const presentation_plan& plan,
         return false;
     }
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     apply_presentation_plan_drawing(r.d2d_context.Get(), r.source_bitmap.Get(), plan, r.dpi);
     if (overlay != nullptr) {
         draw_crop_overlay(r.d2d_context.Get(), *overlay, plan.canvas_offset_x, plan.canvas_offset_y, r.dpi);
@@ -425,7 +425,7 @@ bool render_and_present_candidate_plan(renderer& r, const std::uint8_t* pixels, 
     }
 
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     apply_presentation_plan_drawing(r.d2d_context.Get(), candidate_bitmap.Get(), plan, r.dpi);
     const HRESULT hr = r.d2d_context->EndDraw();
     if (FAILED(hr)) {
@@ -474,7 +474,7 @@ bool render_and_present_candidate(renderer& r, const std::uint8_t* pixels, std::
                                               dip_rect.y + dip_rect.height);
 
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     if (dip_rect.width > 0.0f && dip_rect.height > 0.0f) {
         r.d2d_context->DrawBitmap(candidate_bitmap.Get(), dest_rect, 1.0f,
                                   D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
@@ -530,7 +530,7 @@ bool render_image(renderer& r, const std::uint8_t* pixels, std::int32_t stride,
     }
 
     r.d2d_context->BeginDraw();
-    r.d2d_context->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    r.d2d_context->Clear(r.clear_color);
     const D2D1_RECT_F dest_rect =
         D2D1::RectF(dest.x, dest.y, dest.x + dest.width, dest.y + dest.height);
     r.d2d_context->DrawBitmap(staging.Get(), dest_rect, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);

@@ -1,4 +1,4 @@
-![OZ Image Viewer](assets/icons/ozviewer.svg)
+![PikaView](assets/icons/pikaview.png)
 
 # OZ Image Viewer
 

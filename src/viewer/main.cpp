@@ -71,6 +71,7 @@
 #include "std_icon_bar.hpp"
 #include "ui_layout.hpp"
 #include "ui_theme.hpp"
+#include "lucide_icons.hpp"
 #include "dpi_fullscreen.hpp"
 #include "ozviewer_resources.h"
 
@@ -102,14 +103,17 @@ bool verify_source_file_metadata(const std::filesystem::path& path,
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 #include <commdlg.h>
 #include <shellapi.h>  // CommandLineToArgvW, DragAcceptFiles, DragQueryFileW, DragFinish
+#include <uxtheme.h>   // SetWindowTheme
 
 #include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cwchar>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -142,6 +146,9 @@ constexpr int kIdFilePrint = 110;
 // Distinct, stable Paste Image command ID (catalog value 111). Routed to the
 // existing clipboard-import behavior; never a synthesized Ctrl+V key event.
 constexpr int kIdFilePasteImage = 111;
+// Empty-state presentation emblem (interactive non-benchmark mode only). The
+// Open button keeps its long-standing kIdBtnOpen identity (102).
+constexpr int kIdEmblemEmpty = 112;
 
 #if OZVIEWER_ENABLE_EDITING
 constexpr int kIdEditRotateLeft  = 201;
@@ -269,7 +276,6 @@ struct app_state {
 
     // Stage 4 UI Document state
     oz::viewer_core::document_state doc;
-    HMENU hMenuFile = nullptr;
 
 #if OZVIEWER_ENABLE_EDITING
     // Stage 5 Slice 3: Domain image document state & edit controller
@@ -282,8 +288,6 @@ struct app_state {
     // transactionally presented. The previous document's command log must not
     // transform that candidate before its own image_document commits.
     bool suppress_edit_presentation = false;
-    HMENU hMenuEdit = nullptr;
-    HMENU hMenuCropRatio = nullptr;
     std::optional<oz::viewer_core::crop_interaction_state> crop;
     std::optional<oz::viewer_core::edit_dimensions> draft_resize;
 
@@ -429,6 +433,14 @@ struct app_state {
     std::unique_ptr<oz::viewer::ui_chrome> chrome;
     std::unique_ptr<oz::viewer::crop_strip> crop_strip_ui;
     HFONT font_open_btn = nullptr;
+    int font_open_btn_px = 0;
+    // Empty-state presentation: owner-drawn Open button and PikaView emblem.
+    // Created only under (!benchmark && !nav_benchmark) and shown only while no
+    // image is open.
+    HWND emblem_empty = nullptr;
+    HICON emblem_empty_icon = nullptr;
+    int emblem_empty_icon_px = 0;
+    bool btn_open_hot = false;
 };
 
 // True in both automated benchmark modes (--benchmark and
@@ -1597,16 +1609,14 @@ static oz::viewer::ui_layout_config current_ui_layout_config(const app_state& ap
         config.show_status = false;
         config.status_height_dip = 0.0f;
     } else {
-        // Standard direct-icon surface: a bounded (<=2 row) band whose height
-        // is derived from the pure std_icon_bar seam so a narrow window keeps
-        // every command reachable (two rows, then horizontal scrolling) rather
-        // than hiding commands. No overflow menu exists.
+        // Single-row Lucide command bar: fixed 40 DIP height (never wraps,
+        // never spawns a horizontal scrollbar); secondary groups drop cleanly
+        // into the overflow popup menu at narrow widths.
         const float dpi = (app.renderer.dpi > 0.0f) ? app.renderer.dpi : 96.0f;
         const float available_dip = oz::viewer::physical_to_dip(client_width_px, dpi);
-        const auto bar = oz::viewer::compute_std_icon_bar_layout(available_dip);
         const auto crop_bar = oz::viewer::compute_crop_icon_bar_layout(available_dip);
         config.show_toolbar = true;
-        config.toolbar_height_dip = bar.valid ? bar.bar_height_dip : 0.0f;
+        config.toolbar_height_dip = static_cast<float>(oz::viewer::kCommandBarHeightDip);
         config.show_crop_strip = is_crop_active;
         config.crop_strip_height_dip = (is_crop_active && crop_bar.valid) ? crop_bar.bar_height_dip : (is_crop_active ? 48.0f : 0.0f);
         config.show_status = true;
@@ -1684,8 +1694,10 @@ static void update_chrome_status(app_state& app) {
     if (app.have_image && app.current) {
         if (!app.doc.active_path.empty()) {
             info.file_name = app.doc.active_path.filename().wstring();
+            info.full_path = app.doc.active_path.wstring();
         } else if (!app.initial_path.empty()) {
             info.file_name = app.initial_path.filename().wstring();
+            info.full_path = app.initial_path.wstring();
         } else {
             info.file_name = oz::viewer::viewer_string(IDS_FALLBACK_IMAGE_NAME);
         }
@@ -1703,8 +1715,13 @@ static void update_chrome_status(app_state& app) {
         }
 
         if (!app.nav.empty() && app.nav.active_index().has_value()) {
-            info.navigation = oz::viewer::format_nav_position(
-                (*app.nav.active_index()) + 1, app.nav.size());
+            const std::size_t current_idx = (*app.nav.active_index()) + 1;
+            const std::size_t total_count = app.nav.size();
+            info.navigation = oz::viewer::format_nav_position(current_idx, total_count);
+            info.has_nav_counter = true;
+            const int d_cur = static_cast<int>(std::to_wstring(current_idx).size());
+            const int d_tot = static_cast<int>(std::to_wstring(total_count).size());
+            info.nav_digits = (std::max)(1, (std::max)(d_cur, d_tot));
         }
 
 #if OZVIEWER_ENABLE_EDITING
@@ -1744,100 +1761,6 @@ static void update_menu_command_state(app_state& app) {
         const bool crop_active = app.crop.has_value() && app.crop->active;
         app.crop_strip_ui->update_layout(layout, crop_active);
         app.crop_strip_ui->sync_state(app.crop.has_value() ? &*app.crop : nullptr);
-    }
-#endif
-
-    if (app.hMenuFile) {
-        const auto copy_img_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_copy_image, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFileCopyImage,
-                       MF_BYCOMMAND | (copy_img_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-        const auto copy_file_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_copy, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFileCopy,
-                       MF_BYCOMMAND | (copy_file_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-        const auto copy_path_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_copy_path, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFileCopyPath,
-                       MF_BYCOMMAND | (copy_path_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-        const auto open_loc_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_open_location, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFileOpenLocation,
-                       MF_BYCOMMAND | (open_loc_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-        const auto delete_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_delete, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFileDelete,
-                       MF_BYCOMMAND | (delete_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-        const auto print_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_print, ctx);
-        EnableMenuItem(app.hMenuFile, kIdFilePrint,
-                       MF_BYCOMMAND | (print_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-#if OZVIEWER_ENABLE_EDITING
-        if (app.image_doc) {
-            const auto save_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_save, ctx);
-            const auto save_as_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::file_save_as, ctx);
-            EnableMenuItem(app.hMenuFile, kIdFileSave,
-                           MF_BYCOMMAND | (save_st.enabled ? MF_ENABLED : MF_GRAYED));
-            EnableMenuItem(app.hMenuFile, kIdFileSaveAs,
-                           MF_BYCOMMAND | (save_as_st.enabled ? MF_ENABLED : MF_GRAYED));
-        }
-#endif
-    }
-
-#if OZVIEWER_ENABLE_EDITING
-    if (!app.hMenuEdit) {
-        return;
-    }
-
-    const auto rot_l_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_rotate_left, ctx);
-    const auto rot_r_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_rotate_right, ctx);
-    const auto flip_h_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_flip_h, ctx);
-    const auto flip_v_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_flip_v, ctx);
-    const auto crop_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_crop, ctx);
-    const auto resize_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_resize, ctx);
-
-    EnableMenuItem(app.hMenuEdit, kIdEditRotateLeft, MF_BYCOMMAND | (rot_l_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditRotateRight, MF_BYCOMMAND | (rot_r_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditFlipH, MF_BYCOMMAND | (flip_h_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditFlipV, MF_BYCOMMAND | (flip_v_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditCrop, MF_BYCOMMAND | (crop_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditResize, MF_BYCOMMAND | (resize_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-    const auto undo_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_undo, ctx);
-    const auto redo_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_redo, ctx);
-
-    EnableMenuItem(app.hMenuEdit, kIdEditUndo, MF_BYCOMMAND | (undo_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditRedo, MF_BYCOMMAND | (redo_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-    const auto crop_apply_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_crop_apply, ctx);
-    const auto crop_cancel_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_crop_cancel, ctx);
-    const auto crop_reset_st = oz::viewer::derive_command_state(oz::viewer::ui_command_id::edit_crop_reset, ctx);
-
-    EnableMenuItem(app.hMenuEdit, kIdEditCropApply, MF_BYCOMMAND | (crop_apply_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditCropCancel, MF_BYCOMMAND | (crop_cancel_st.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(app.hMenuEdit, kIdEditCropReset, MF_BYCOMMAND | (crop_reset_st.enabled ? MF_ENABLED : MF_GRAYED));
-
-    if (app.hMenuCropRatio) {
-        static constexpr struct {
-            int menu_id;
-            oz::viewer::ui_command_id cmd_id;
-        } kRatioMap[] = {
-            {kIdCropRatioFree, oz::viewer::ui_command_id::crop_ratio_free},
-            {kIdCropRatioOriginal, oz::viewer::ui_command_id::crop_ratio_original},
-            {kIdCropRatio1x1, oz::viewer::ui_command_id::crop_ratio_1x1},
-            {kIdCropRatio3x2, oz::viewer::ui_command_id::crop_ratio_3x2},
-            {kIdCropRatio4x3, oz::viewer::ui_command_id::crop_ratio_4x3},
-            {kIdCropRatio5x4, oz::viewer::ui_command_id::crop_ratio_5x4},
-            {kIdCropRatio16x9, oz::viewer::ui_command_id::crop_ratio_16x9},
-            {kIdCropRatio9x16, oz::viewer::ui_command_id::crop_ratio_9x16},
-            {kIdCropRatioASeries, oz::viewer::ui_command_id::crop_ratio_a_series}
-        };
-
-        for (const auto& item : kRatioMap) {
-            const auto st = oz::viewer::derive_command_state(item.cmd_id, ctx);
-            EnableMenuItem(app.hMenuCropRatio, item.menu_id, MF_BYCOMMAND | (st.enabled ? MF_ENABLED : MF_GRAYED));
-            CheckMenuItem(app.hMenuCropRatio, item.menu_id, MF_BYCOMMAND | (st.checked ? MF_CHECKED : MF_UNCHECKED));
-        }
     }
 #endif
 }
@@ -2886,34 +2809,247 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
     }
 }
 #endif
+static void ensure_empty_emblem_icon(app_state& app) noexcept {
+    if (!app.emblem_empty) return;
+    const int icon_px = oz::viewer::dip_to_physical_round(64.0f, app.renderer.dpi);
+    if (app.emblem_empty_icon && app.emblem_empty_icon_px == icon_px) {
+        return;
+    }
+    if (app.emblem_empty_icon) {
+        DestroyIcon(app.emblem_empty_icon);
+        app.emblem_empty_icon = nullptr;
+        app.emblem_empty_icon_px = 0;
+    }
+    // Best-matching frame from the embedded RT_GROUP_ICON, requested at 64 DIP.
+    // A null result simply leaves the emblem area as clean canvas.
+    app.emblem_empty_icon = static_cast<HICON>(LoadImageW(
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_OZVIEWER_APPICON),
+        IMAGE_ICON, icon_px, icon_px, LR_DEFAULTCOLOR));
+    app.emblem_empty_icon_px = app.emblem_empty_icon ? icon_px : 0;
+}
+
 static void update_open_button_layout(app_state& app) {
-    if (!app.btn_open) return;
+    if (!app.btn_open && !app.emblem_empty) return;
     if (app.have_image) {
-        ShowWindow(app.btn_open, SW_HIDE);
-    } else {
-        // Ensure the Open button uses a scalable Segoe UI font matching current DPI
-        if (app.font_open_btn) {
-            DeleteObject(app.font_open_btn);
-            app.font_open_btn = nullptr;
+        if (app.btn_open) {
+            ShowWindow(app.btn_open, SW_HIDE);
         }
+        if (app.emblem_empty) {
+            ShowWindow(app.emblem_empty, SW_HIDE);
+        }
+        app.btn_open_hot = false;
+        return;
+    }
+
+    const auto layout = current_ui_layout(app);
+    const auto& btn = layout.open_btn_physical;
+
+    if (app.btn_open) {
+        // Reuse the scalable Segoe UI font until the DPI-derived pixel height
+        // changes; re-sending WM_SETFONT on every resize caused needless
+        // repaints of the empty state.
         const int font_height = oz::viewer::dip_to_physical_round(13.0f, app.renderer.dpi);
-        app.font_open_btn = CreateFontW(
-            -font_height, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-            L"Segoe UI");
+        if (!app.font_open_btn || app.font_open_btn_px != font_height) {
+            if (app.font_open_btn) {
+                DeleteObject(app.font_open_btn);
+                app.font_open_btn = nullptr;
+            }
+            app.font_open_btn = CreateFontW(
+                -font_height, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                L"Segoe UI");
+            app.font_open_btn_px = app.font_open_btn ? font_height : 0;
+        }
         if (app.font_open_btn) {
-            SendMessageW(app.btn_open, WM_SETFONT, reinterpret_cast<WPARAM>(app.font_open_btn), TRUE);
+            SendMessageW(app.btn_open, WM_SETFONT, reinterpret_cast<WPARAM>(app.font_open_btn), FALSE);
         }
 
-        const auto layout = current_ui_layout(app);
-        const auto& btn = layout.open_btn_physical;
         if (!btn.is_empty()) {
-            SetWindowPos(app.btn_open, nullptr, btn.x, btn.y, btn.width, btn.height, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos(app.btn_open, nullptr, btn.x, btn.y, btn.width, btn.height,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else {
             ShowWindow(app.btn_open, SW_HIDE);
         }
     }
+
+    if (app.emblem_empty) {
+        const int emblem_px = oz::viewer::dip_to_physical_round(64.0f, app.renderer.dpi);
+        const int gap_px = oz::viewer::dip_to_physical_round(16.0f, app.renderer.dpi);
+        const auto& canvas = layout.canvas_physical;
+        const int y = btn.y - gap_px - emblem_px;
+        const bool fits = !btn.is_empty() && !canvas.is_empty() &&
+                          y >= canvas.y + gap_px &&
+                          canvas.width >= emblem_px;
+        if (!fits) {
+            ShowWindow(app.emblem_empty, SW_HIDE);
+            return;
+        }
+        ensure_empty_emblem_icon(app);
+        const int x = canvas.x + (canvas.width - emblem_px) / 2;
+        SetWindowPos(app.emblem_empty, nullptr, x, y, emblem_px, emblem_px,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+}
+
+// Hover tracking for the owner-drawn empty-state Open button: ODS_HOTLIGHT is
+// not delivered reliably to BS_OWNERDRAW buttons, so track WM_MOUSELEAVE and
+// invalidate on entry/exit.
+static LRESULT CALLBACK open_button_subclass_proc(HWND hwnd, UINT msg, WPARAM wparam,
+                                                  LPARAM lparam, UINT_PTR id,
+                                                  DWORD_PTR ref) noexcept {
+    auto* app = reinterpret_cast<app_state*>(ref);
+    switch (msg) {
+        case WM_ERASEBKGND:
+            // The owner-draw handler fills the whole control rect with the
+            // canvas colour; suppressing the class erase removes resize flicker.
+            return 1;
+        case WM_MOUSEMOVE:
+            if (app && !app->btn_open_hot) {
+                app->btn_open_hot = true;
+                TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&track);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        case WM_MOUSELEAVE:
+            if (app) {
+                app->btn_open_hot = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, open_button_subclass_proc, id);
+            break;
+        default:
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+// WM_DRAWITEM target painting: empty-state Open button and PikaView emblem.
+static void draw_open_button(app_state& app, const DRAWITEMSTRUCT& item) noexcept {
+    if (!item.hDC) return;
+
+    const auto mode = oz::viewer::query_system_theme_mode();
+    const auto palette = oz::viewer::get_theme_palette(mode);
+    const bool high_contrast = (mode == oz::viewer::theme_mode::high_contrast);
+
+    // The renderer canvas is a dark surface in both light and dark system
+    // themes (palette.canvas_bg is the same 28,28,31 token); only high contrast
+    // substitutes system colours. Keep the empty-state plate on the elevated
+    // charcoal tokens so it never reverts to a raw Win32 white push button.
+    const COLORREF face = high_contrast ? palette.bg_chrome : RGB(42, 42, 47);
+    const COLORREF hover = high_contrast ? palette.btn_hover : RGB(54, 54, 59);
+    const COLORREF pressed = high_contrast ? palette.btn_pressed : RGB(64, 64, 70);
+    const COLORREF border = high_contrast ? palette.border : RGB(74, 74, 80);
+    const bool disabled = (item.itemState & ODS_DISABLED) != 0;
+    const bool is_pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool is_hot = (item.itemState & ODS_HOTLIGHT) != 0 || app.btn_open_hot;
+    const COLORREF text_color =
+        disabled ? palette.text_disabled : (high_contrast ? palette.text_normal : RGB(236, 236, 238));
+    const COLORREF glyph_color =
+        disabled ? palette.text_disabled : (high_contrast ? palette.glyph_normal : RGB(236, 236, 238));
+
+    HBRUSH canvas_brush = CreateSolidBrush(RGB(28, 28, 31));  // interactive renderer clear colour
+    FillRect(item.hDC, &item.rcItem, canvas_brush);
+    DeleteObject(canvas_brush);
+
+    const int btn_w = item.rcItem.right - item.rcItem.left;
+    const int btn_h = item.rcItem.bottom - item.rcItem.top;
+    if (btn_w <= 0 || btn_h <= 0) return;
+
+    const COLORREF plate = is_pressed ? pressed : (is_hot ? hover : face);
+    HBRUSH plate_brush = CreateSolidBrush(plate);
+    HPEN plate_pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ old_brush = SelectObject(item.hDC, plate_brush);
+    HGDIOBJ old_pen = SelectObject(item.hDC, plate_pen);
+    const int radius = oz::viewer::dip_to_physical_round(6.0f, app.renderer.dpi);
+    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right,
+              item.rcItem.bottom, radius, radius);
+    SelectObject(item.hDC, old_brush);
+    SelectObject(item.hDC, old_pen);
+    DeleteObject(plate_brush);
+    DeleteObject(plate_pen);
+
+    wchar_t label[128]{};
+    const int label_len = GetWindowTextW(item.hwndItem, label, static_cast<int>(std::size(label)));
+    if (label_len <= 0) {
+        const std::wstring fallback = oz::viewer::viewer_string(IDS_OPEN_BUTTON);
+        wcsncpy_s(label, fallback.c_str(), _TRUNCATE);
+    }
+
+    const int pad = oz::viewer::dip_to_physical_round(10.0f, app.renderer.dpi);
+    const int icon_px = (std::min)(
+        oz::viewer::dip_to_physical_round(18.0f, app.renderer.dpi),
+        (std::max)(0, btn_h - pad * 2));
+    const int icon_gap = oz::viewer::dip_to_physical_round(8.0f, app.renderer.dpi);
+
+    HGDIOBJ old_font = nullptr;
+    if (app.font_open_btn) {
+        old_font = SelectObject(item.hDC, app.font_open_btn);
+    }
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, text_color);
+
+    SIZE text_size{};
+    GetTextExtentPoint32W(item.hDC, label, static_cast<int>(wcslen(label)), &text_size);
+
+    const int group_w = icon_px + icon_gap + text_size.cx;
+    int x = item.rcItem.left + (btn_w - group_w) / 2;
+    if (x < item.rcItem.left + pad) x = item.rcItem.left + pad;
+
+    if (icon_px > 0) {
+        RECT icon_rc{};
+        icon_rc.left = x;
+        icon_rc.top = item.rcItem.top + (btn_h - icon_px) / 2;
+        icon_rc.right = icon_rc.left + icon_px;
+        icon_rc.bottom = icon_rc.top + icon_px;
+        oz::viewer::lucide::DrawIcon(item.hDC, icon_rc, oz::viewer::icon_id::open, glyph_color);
+    }
+
+    RECT text_rc{};
+    text_rc.left = x + icon_px + (icon_px > 0 ? icon_gap : 0);
+    text_rc.top = item.rcItem.top;
+    text_rc.right = item.rcItem.right - pad;
+    text_rc.bottom = item.rcItem.bottom;
+    DrawTextW(item.hDC, label, -1, &text_rc,
+              DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+    if ((item.itemState & ODS_FOCUS) != 0) {
+        RECT focus = item.rcItem;
+        InflateRect(&focus, -3, -3);
+        DrawFocusRect(item.hDC, &focus);
+    }
+
+    if (old_font) {
+        SelectObject(item.hDC, old_font);
+    }
+}
+
+static LRESULT CALLBACK emblem_subclass_proc(HWND hwnd, UINT msg, WPARAM wparam,
+                                              LPARAM lparam, UINT_PTR /*id*/,
+                                              DWORD_PTR /*ref*/) noexcept {
+    if (msg == WM_ERASEBKGND) {
+        return 1;
+    }
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+static void draw_empty_emblem(app_state& app, const DRAWITEMSTRUCT& item) noexcept {
+    if (!item.hDC) return;
+    HBRUSH canvas_brush = CreateSolidBrush(RGB(28, 28, 31));  // interactive renderer clear colour
+    FillRect(item.hDC, &item.rcItem, canvas_brush);
+    DeleteObject(canvas_brush);
+
+    if (!app.emblem_empty_icon || app.emblem_empty_icon_px <= 0) return;
+    const int w = item.rcItem.right - item.rcItem.left;
+    const int h = item.rcItem.bottom - item.rcItem.top;
+    if (w <= 0 || h <= 0) return;
+    const int size = (std::min)(app.emblem_empty_icon_px, (std::min)(w, h));
+    const int x = item.rcItem.left + (w - size) / 2;
+    const int y = item.rcItem.top + (h - size) / 2;
+    DrawIconEx(item.hDC, x, y, app.emblem_empty_icon, size, size, 0, nullptr, DI_NORMAL);
 }
 
 // Toggle borderless fullscreen
@@ -4239,7 +4375,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 cancel_crop_mode(*app);
                 return 0;
             }
-            if (id == oz::viewer::kIdCropStripBtnReset) {
+            if (oz::viewer::is_crop_reset_command(id)) {
                 reset_crop_mode(*app);
                 return 0;
             }
@@ -4399,6 +4535,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     app->crop_strip_ui->update_icons(app->renderer.d2d_context.Get());
                 }
 #endif
+                if (app->btn_open) {
+                    InvalidateRect(app->btn_open, nullptr, TRUE);
+                }
+                if (app->emblem_empty) {
+                    InvalidateRect(app->emblem_empty, nullptr, TRUE);
+                }
                 redraw_current_view(*app);
             }
             return 0;
@@ -4430,6 +4572,22 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         }
+        case WM_DRAWITEM: {
+            if (app && lparam) {
+                const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+                if (item.CtlType == ODT_BUTTON && item.CtlID == kIdBtnOpen &&
+                    item.hwndItem == app->btn_open) {
+                    draw_open_button(*app, item);
+                    return TRUE;
+                }
+                if (item.CtlType == ODT_STATIC && item.CtlID == kIdEmblemEmpty &&
+                    item.hwndItem == app->emblem_empty) {
+                    draw_empty_emblem(*app, item);
+                    return TRUE;
+                }
+            }
+            break;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN: {
             if (app) {
@@ -4447,6 +4605,48 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
             }
             break;
+        }
+        case WM_SYSCOMMAND: {
+            if (app) {
+                bool resize_dialog_open = false;
+#if OZVIEWER_ENABLE_EDITING
+                resize_dialog_open = app->resize_dlg != nullptr;
+#endif
+                if (oz::viewer::should_open_overflow_menu_on_syscommand(
+                        wparam, lparam,
+                        !noninteractive_mode(*app), app->is_fullscreen,
+                        app->chrome && app->chrome->is_created(),
+                        resize_dialog_open)) {
+                    app->chrome->show_overflow_menu();
+                    return 0;
+                }
+            }
+            break;
+        }
+        case WM_SYSKEYDOWN: {
+            if (app) {
+                const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                const bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                const bool alt_down = (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+                                      ((lparam & (1 << 29)) != 0);
+                bool resize_dialog_open = false;
+#if OZVIEWER_ENABLE_EDITING
+                resize_dialog_open = app->resize_dlg != nullptr;
+#endif
+                const auto f10_req = oz::viewer::route_f10_overflow_menu(
+                    WM_SYSKEYDOWN, wparam, ctrl_down, shift_down, alt_down,
+                    (lparam & 0x40000000) != 0,
+                    !noninteractive_mode(*app), app->is_fullscreen,
+                    app->chrome && app->chrome->is_created(),
+                    resize_dialog_open);
+                if (f10_req.consume) {
+                    if (f10_req.open) {
+                        app->chrome->show_overflow_menu();
+                    }
+                    return 0;
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         case WM_KEYDOWN: {
             if (!app) return 0;
@@ -4639,6 +4839,30 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 return 0;
             }
 #endif
+
+            // Plain F10 opens the keyboard-reachable More Commands menu even
+            // when the canvas owns focus. A focused Win32 window delivers plain
+            // F10 as WM_KEYDOWN; without this branch the message would be
+            // consumed below and the WM_SYSCOMMAND SC_KEYMENU fallback would
+            // never fire on that path.
+            {
+                bool resize_dialog_open = false;
+#if OZVIEWER_ENABLE_EDITING
+                resize_dialog_open = app->resize_dlg != nullptr;
+#endif
+                const auto f10_req = oz::viewer::route_f10_overflow_menu(
+                    WM_KEYDOWN, wparam, ctrl_down, shift_down, alt_down,
+                    (lparam & 0x40000000) != 0,
+                    !noninteractive_mode(*app), app->is_fullscreen,
+                    app->chrome && app->chrome->is_created(),
+                    resize_dialog_open);
+                if (f10_req.consume) {
+                    if (f10_req.open) {
+                        app->chrome->show_overflow_menu();
+                    }
+                    return 0;
+                }
+            }
 
             // If benchmark or no image, navigation/zoom keys do not apply
             if (app->benchmark || !app->have_image || !app->current) {
@@ -5606,133 +5830,38 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
         hInstance, MAKEINTRESOURCEW(IDI_OZVIEWER_APPICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
     wc.lpszClassName = kClassName;
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    wc.hbrBackground = CreateSolidBrush(RGB(28, 28, 31));
     if (!RegisterClassExW(&wc)) {
         std::fwprintf(stderr, L"ozviewer: RegisterClassExW failed\n");
         return 1;
-    }
-
-    // Minimal native File->Open menu and Edit menu (interactive mode only; benchmark creates NO menu)
-    HMENU hMenu = nullptr;
-    HMENU hFileMenu = nullptr;
-#if OZVIEWER_ENABLE_EDITING
-    HMENU hEditMenu = nullptr;
-    HMENU hCropRatioMenu = nullptr;
-#endif
-    if (!benchmark && !nav_benchmark) {
-        hFileMenu = CreatePopupMenu();
-        const std::wstring m_open = oz::viewer::viewer_string(IDS_MENU_FILE_OPEN);
-        const std::wstring m_open_loc = oz::viewer::viewer_string(IDS_MENU_FILE_OPEN_LOCATION);
-        const std::wstring m_copy_img = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_IMAGE);
-        const std::wstring m_copy_file = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_FILE);
-        const std::wstring m_copy_path = oz::viewer::viewer_string(IDS_MENU_FILE_COPY_PATH);
-        const std::wstring m_delete = oz::viewer::viewer_string(IDS_MENU_FILE_DELETE);
-        const std::wstring m_print = oz::viewer::viewer_string(IDS_MENU_FILE_PRINT);
-
-        AppendMenuW(hFileMenu, MF_STRING, kIdFileOpen, m_open.c_str());
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileOpenLocation, m_open_loc.c_str());
-        AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyImage, m_copy_img.c_str());
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopy, m_copy_file.c_str());
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileCopyPath, m_copy_path.c_str());
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileDelete, m_delete.c_str());
-        AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFilePrint, m_print.c_str()); // kIdFilePrint, L"&Print...\tCtrl+P"
-#if OZVIEWER_ENABLE_EDITING
-        // Save/Save As exist only in interactive editing mode; benchmark mode
-        // creates no menu at all.
-        const std::wstring m_save = oz::viewer::viewer_string(IDS_MENU_FILE_SAVE);
-        const std::wstring m_save_as = oz::viewer::viewer_string(IDS_MENU_FILE_SAVE_AS);
-        AppendMenuW(hFileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSave, m_save.c_str());
-        AppendMenuW(hFileMenu, MF_STRING | MF_GRAYED, kIdFileSaveAs, m_save_as.c_str());
-#endif
-        hMenu = CreateMenu();
-        const std::wstring m_file_popup = oz::viewer::viewer_string(IDS_MENU_FILE_POPUP);
-        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hFileMenu), m_file_popup.c_str());
-
-#if OZVIEWER_ENABLE_EDITING
-        hEditMenu = CreatePopupMenu();
-        const std::wstring m_undo = oz::viewer::viewer_string(IDS_MENU_EDIT_UNDO);
-        const std::wstring m_redo = oz::viewer::viewer_string(IDS_MENU_EDIT_REDO);
-        const std::wstring m_rot_l = oz::viewer::viewer_string(IDS_MENU_EDIT_ROTATE_LEFT);
-        const std::wstring m_rot_r = oz::viewer::viewer_string(IDS_MENU_EDIT_ROTATE_RIGHT);
-        const std::wstring m_flip_h = oz::viewer::viewer_string(IDS_MENU_EDIT_FLIP_H);
-        const std::wstring m_flip_v = oz::viewer::viewer_string(IDS_MENU_EDIT_FLIP_V);
-        const std::wstring m_crop = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP);
-        const std::wstring m_resize = oz::viewer::viewer_string(IDS_MENU_EDIT_RESIZE);
-        const std::wstring m_crop_apply = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_APPLY);
-        const std::wstring m_crop_cancel = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_CANCEL);
-        const std::wstring m_crop_reset = oz::viewer::viewer_string(IDS_MENU_EDIT_CROP_RESET);
-
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditUndo, m_undo.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRedo, m_redo.c_str());
-        AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateLeft, m_rot_l.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditRotateRight, m_rot_r.c_str());
-        AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipH, m_flip_h.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditFlipV, m_flip_v.c_str());
-        AppendMenuW(hEditMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCrop, m_crop.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditResize, m_resize.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropApply, m_crop_apply.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropCancel, m_crop_cancel.c_str());
-        AppendMenuW(hEditMenu, MF_STRING | MF_GRAYED, kIdEditCropReset, m_crop_reset.c_str());
-
-        hCropRatioMenu = CreatePopupMenu();
-        const std::wstring m_r_free = oz::viewer::viewer_string(IDS_MENU_RATIO_FREE);
-        const std::wstring m_r_orig = oz::viewer::viewer_string(IDS_MENU_RATIO_ORIGINAL);
-        const std::wstring m_r_1x1 = oz::viewer::viewer_string(IDS_MENU_RATIO_1X1);
-        const std::wstring m_r_3x2 = oz::viewer::viewer_string(IDS_MENU_RATIO_3X2);
-        const std::wstring m_r_4x3 = oz::viewer::viewer_string(IDS_MENU_RATIO_4X3);
-        const std::wstring m_r_5x4 = oz::viewer::viewer_string(IDS_MENU_RATIO_5X4);
-        const std::wstring m_r_16x9 = oz::viewer::viewer_string(IDS_MENU_RATIO_16X9);
-        const std::wstring m_r_9x16 = oz::viewer::viewer_string(IDS_MENU_RATIO_9X16);
-        const std::wstring m_r_aseries = oz::viewer::viewer_string(IDS_MENU_RATIO_ASERIES);
-
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioFree, m_r_free.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioOriginal, m_r_orig.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio1x1, m_r_1x1.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio3x2, m_r_3x2.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio4x3, m_r_4x3.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio5x4, m_r_5x4.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio16x9, m_r_16x9.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatio9x16, m_r_9x16.c_str());
-        AppendMenuW(hCropRatioMenu, MF_STRING | MF_GRAYED, kIdCropRatioASeries, m_r_aseries.c_str());
-
-        const std::wstring m_ratio_popup = oz::viewer::viewer_string(IDS_MENU_EDIT_RATIO_POPUP);
-        AppendMenuW(hEditMenu, MF_POPUP | MF_GRAYED,
-                    reinterpret_cast<UINT_PTR>(hCropRatioMenu), m_ratio_popup.c_str());
-
-        const std::wstring m_edit_popup = oz::viewer::viewer_string(IDS_MENU_EDIT_POPUP);
-        AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hEditMenu), m_edit_popup.c_str());
-#endif
     }
 
     app_state app;
     app.benchmark = benchmark;
     app.nav_benchmark = nav_benchmark;
     app.markers = &markers;
-    app.hMenuFile = hFileMenu;
-#if OZVIEWER_ENABLE_EDITING
-    app.hMenuEdit = hEditMenu;
-    app.hMenuCropRatio = hCropRatioMenu;
-#endif
     if (!zero_arg_launch) {
         app.initial_path = std::filesystem::path(path_str);
     }
 
+    // No Win32 HMENU menu bar: all commands live in the single-row Lucide
+    // command bar and its overflow ("More commands") popup menu.
     // CreateWindowExW copies the title synchronously, so the owning local is sufficient.
     const std::wstring initial_title = oz::viewer::viewer_string(IDS_APP_TITLE);
-    app.hwnd = CreateWindowExW(0, kClassName, initial_title.c_str(), WS_OVERLAPPEDWINDOW,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, nullptr, hMenu,
+    app.hwnd = CreateWindowExW(0, kClassName, initial_title.c_str(),
+                               WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, nullptr, nullptr,
                                wc.hInstance, &app);
 
     if (!app.hwnd) {
         std::fwprintf(stderr, L"ozviewer: CreateWindowExW failed\n");
-        if (hMenu) DestroyMenu(hMenu);
         return 4;
+    }
+    if (wc.hIcon) {
+        SendMessageW(app.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
+    }
+    if (wc.hIconSm) {
+        SendMessageW(app.hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(wc.hIconSm));
     }
 
     // Interactive Drag & Drop acceptance and zero-arg Open button
@@ -5740,19 +5869,39 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
     if (!benchmark && !nav_benchmark) {
         DragAcceptFiles(app.hwnd, TRUE);
 
-        // Minimal native Open button for zero-arg / no-image window
+        // Theme-aware owner-drawn Open button for the zero-arg / no-image
+        // window. The window text stays IDS_OPEN_BUTTON so WM_COMMAND and
+        // accessibility keep the long-standing kIdBtnOpen identity.
         const std::wstring btn_open_text = oz::viewer::viewer_string(IDS_OPEN_BUTTON);
         app.btn_open = CreateWindowExW(0, L"BUTTON", btn_open_text.c_str(),
-                                       WS_CHILD | BS_PUSHBUTTON,
+                                       WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                                        0, 0, 160, 44,
                                        app.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdBtnOpen)),
                                        wc.hInstance, nullptr);
+        if (app.btn_open) {
+            SetWindowSubclass(app.btn_open, open_button_subclass_proc, 1,
+                              reinterpret_cast<DWORD_PTR>(&app));
+        }
+
+        // Centered PikaView emblem, drawn above the Open button while empty.
+        app.emblem_empty = CreateWindowExW(
+            0, L"STATIC", L"", WS_CHILD | SS_OWNERDRAW, 0, 0, 0, 0, app.hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdEmblemEmpty)),
+            wc.hInstance, nullptr);
+        if (app.emblem_empty) {
+            SetWindowSubclass(app.emblem_empty, emblem_subclass_proc, 1, 0);
+        }
     }
 
     // --- renderer ------------------------------------------------------------
     if (!oz::viewer::create_renderer(app.hwnd, app.renderer)) {
         std::fwprintf(stderr, L"ozviewer: renderer creation failed\n");
         return 4;
+    }
+    if (benchmark || nav_benchmark) {
+        app.renderer.clear_color = D2D1::ColorF(D2D1::ColorF::Black);
+    } else {
+        app.renderer.clear_color = D2D1::ColorF(0.11f, 0.11f, 0.12f, 1.0f);
     }
     markers.record(oz::markers::marker_id::renderer_ready);
 
@@ -5833,6 +5982,34 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
     // --- message loop ----------------------------------------------------------
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        // Plain F10 opens the accessible More Commands menu. A focused Win32
+        // window can deliver plain F10 as WM_KEYDOWN (not only as
+        // WM_SYSKEYDOWN via the system-menu path), so both are routed here;
+        // benchmark modes, fullscreen, a missing command bar, and a modal
+        // Resize dialog keep standard behavior.
+        if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
+            bool resize_dialog_open = false;
+#if OZVIEWER_ENABLE_EDITING
+            resize_dialog_open = app.resize_dlg != nullptr;
+#endif
+            const bool alt_down = (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+                                  (msg.message == WM_SYSKEYDOWN && (msg.lParam & (1 << 29)) != 0);
+            const auto f10_req = oz::viewer::route_f10_overflow_menu(
+                msg.message, msg.wParam,
+                (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                (GetKeyState(VK_SHIFT) & 0x8000) != 0,
+                alt_down,
+                (msg.lParam & 0x40000000) != 0,
+                !noninteractive_mode(app), app.is_fullscreen,
+                app.chrome && app.chrome->is_created(),
+                resize_dialog_open);
+            if (f10_req.consume) {
+                if (f10_req.open) {
+                    app.chrome->show_overflow_menu();
+                }
+                continue;
+            }
+        }
         // Pre-filter keyboard messages for accessibility traversal and shortcut precedence
         if (msg.message == WM_KEYDOWN) {
             const HWND focused = GetFocus();
@@ -5928,7 +6105,7 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
 
                 if (focused == app.hwnd) {
                     if (tb_avail) {
-                        next_target = app.chrome->toolbar_hwnd();
+                        next_target = app.chrome->first_tab_stop();
                     } else if (crop_strip_avail) {
                         next_target = app.crop_strip_ui->first_tab_stop();
                     } else if (open_btn_avail) {
@@ -5968,18 +6145,10 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
                 continue;
             }
 
-            // 4b. Tab Navigation across the standard icon surface and its
-            // horizontal scrollbar. The scrollbar is only present while two
-            // rows cannot fit every command; cycling to it keeps off-screen
-            // commands keyboard-reachable (the scrollbar scrolls with
-            // Left/Right and Page keys).
-            if (msg.wParam == VK_TAB && app.chrome && app.chrome->bar_scrolling_active() &&
-                app.chrome->contains_hwnd(focused)) {
-                HWND toolbar_h = app.chrome->toolbar_hwnd();
-                HWND scroll_h = app.chrome->bar_scrollbar_hwnd();
-                HWND next_ctrl = (focused == scroll_h) ? toolbar_h : scroll_h;
-                if (next_ctrl && IsWindow(next_ctrl)) {
-                    SetFocus(next_ctrl);
+            // 4b. Tab Navigation across the single-row command bar buttons.
+            if (msg.wParam == VK_TAB && app.chrome && app.chrome->contains_hwnd(focused)) {
+                if (!app.chrome->handle_key_navigation(VK_TAB, shift_down)) {
+                    SetFocus(app.hwnd);
                 }
                 continue;
             }
@@ -6041,6 +6210,11 @@ int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine
     if (app.font_open_btn) {
         DeleteObject(app.font_open_btn);
         app.font_open_btn = nullptr;
+    }
+    if (app.emblem_empty_icon) {
+        DestroyIcon(app.emblem_empty_icon);
+        app.emblem_empty_icon = nullptr;
+        app.emblem_empty_icon_px = 0;
     }
     DestroyWindow(app.hwnd);
 

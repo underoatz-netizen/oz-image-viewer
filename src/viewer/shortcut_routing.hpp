@@ -32,4 +32,45 @@ enum class shortcut_action {
     bool crop_active,
     const ui_item_state& copy_image_state) noexcept;
 
+// Stage 7 accessibility: plain F10 ("More Commands") routing decision.
+// A focused Win32 window can receive plain F10 as WM_KEYDOWN, not only as
+// WM_SYSKEYDOWN; both message kinds route through this pure predicate so the
+// prefilter and the window procedure cannot drift apart.
+struct f10_overflow_request {
+    // The message belongs to More Commands and must not reach DefWindowProc
+    // (the SC_KEYMENU fallback) or the navigation key handling.
+    bool consume = false;
+    // Open the overflow menu now. False for key auto-repeat: the repeated
+    // message is still swallowed instead of falling through to Windows.
+    bool open = false;
+};
+
+// Message is either WM_KEYDOWN or WM_SYSKEYDOWN; vk must be VK_F10.
+// Modified F10 keeps its standard meaning (Shift+F10 is the Context Menu key).
+// Benchmark/navigation-benchmark, fullscreen, missing chrome, and an open
+// modal Resize dialog all keep standard Win32 behavior.
+[[nodiscard]] f10_overflow_request route_f10_overflow_menu(
+    UINT msg,
+    WPARAM vk,
+    bool ctrl_down,
+    bool shift_down,
+    bool alt_down,
+    bool key_repeat,
+    bool interactive_mode,
+    bool is_fullscreen,
+    bool chrome_created,
+    bool resize_dialog_open) noexcept;
+
+// Stage 7 accessibility: bare Alt (WM_SYSCOMMAND SC_KEYMENU with lparam == 0)
+// opens the More Commands overflow menu from both welcome and loaded canvas,
+// gated identically on interactive mode, non-fullscreen, created chrome, and
+// no open modal Resize dialog.
+[[nodiscard]] bool should_open_overflow_menu_on_syscommand(
+    WPARAM wparam,
+    LPARAM lparam,
+    bool interactive_mode,
+    bool is_fullscreen,
+    bool chrome_created,
+    bool resize_dialog_open) noexcept;
+
 }  // namespace oz::viewer

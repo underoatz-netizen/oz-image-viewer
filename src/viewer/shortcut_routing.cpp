@@ -83,4 +83,46 @@ shortcut_action route_shortcut_key(
     return shortcut_action::none;
 }
 
+f10_overflow_request route_f10_overflow_menu(
+    UINT msg,
+    WPARAM vk,
+    bool ctrl_down,
+    bool shift_down,
+    bool alt_down,
+    bool key_repeat,
+    bool interactive_mode,
+    bool is_fullscreen,
+    bool chrome_created,
+    bool resize_dialog_open) noexcept {
+    if ((msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) || vk != VK_F10) {
+        return {};
+    }
+    // Shift+F10 is the standard Context Menu key; Ctrl/Alt variants keep their
+    // platform meaning. Only bare F10 belongs to More Commands.
+    if (ctrl_down || shift_down || alt_down) {
+        return {};
+    }
+    // Automated benchmark modes, fullscreen, missing command bar, and a modal
+    // Resize dialog retain standard Win32 behavior.
+    if (!interactive_mode || is_fullscreen || !chrome_created || resize_dialog_open) {
+        return {};
+    }
+    // Consume auto-repeat without re-opening the menu (the popup runs its own
+    // loop, so this is a safety net for synthetic or queued repeats).
+    return f10_overflow_request{true, !key_repeat};
+}
+
+bool should_open_overflow_menu_on_syscommand(
+    WPARAM wparam,
+    LPARAM lparam,
+    bool interactive_mode,
+    bool is_fullscreen,
+    bool chrome_created,
+    bool resize_dialog_open) noexcept {
+    if ((wparam & 0xFFF0) != SC_KEYMENU || lparam != 0) {
+        return false;
+    }
+    return interactive_mode && !is_fullscreen && chrome_created && !resize_dialog_open;
+}
+
 }  // namespace oz::viewer

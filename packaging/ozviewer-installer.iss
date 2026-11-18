@@ -166,11 +166,22 @@ begin
     or RegValueEquals(SubKey, ValueName, LegacyVal);
 end;
 
+// Recognized install-marker versions for an already owned registration. This is
+// deliberately not an ownership check: IsOwned() (AppId) still gates every
+// mutation. It only lets supported prior versions pass preflight and be removed
+// by uninstall. Unknown/future/malformed versions stay fail-closed.
+function IsRecognizedRegistrationVersion(const Value: String): Boolean;
+begin
+  Result := (CompareText(Value, '{#OZ_VERSION}') = 0)
+    or (CompareText(Value, '0.1.0') = 0)
+    or (CompareText(Value, '0.1.1') = 0);
+end;
+
 // Fail-closed collision preflight. Returns '' when registration can proceed and
 // a human-readable reason otherwise. Runs before any file is copied.
 function PreflightRegistration(): String;
 var
-  Value, Ext: String;
+  Value, Ext, VersionValue: String;
   Names: TArrayOfString;
   I: Integer;
 begin
@@ -276,10 +287,14 @@ begin
     Exit;
   end;
 
-  if not IsValueAbsentOrOwned2(OZ_MARKER_SUBKEY, 'Version', '{#OZ_VERSION}', '0.1.0') then
+  if RegValueExists(HKCU, OZ_MARKER_SUBKEY, 'Version') then
   begin
-    Result := 'the install marker Version has been modified';
-    Exit;
+    if not (RegQueryStringValue(HKCU, OZ_MARKER_SUBKEY, 'Version', VersionValue)
+            and IsRecognizedRegistrationVersion(VersionValue)) then
+    begin
+      Result := 'the install marker Version has been modified';
+      Exit;
+    end;
   end;
 end;
 
@@ -432,7 +447,7 @@ end;
 // inferred, changed, or restored.
 procedure UnregisterApplication();
 var
-  Value, Ext: String;
+  Value, Ext, VersionValue: String;
   Names: TArrayOfString;
   I: Integer;
 begin
@@ -485,8 +500,8 @@ begin
     RegDeleteValue(HKCU, OZ_MARKER_SUBKEY, 'ProgID');
   if RegValueEquals(OZ_MARKER_SUBKEY, 'Capabilities', OZ_CAPABILITIES_SUBKEY) then
     RegDeleteValue(HKCU, OZ_MARKER_SUBKEY, 'Capabilities');
-  if RegValueEquals(OZ_MARKER_SUBKEY, 'Version', '{#OZ_VERSION}') or
-     RegValueEquals(OZ_MARKER_SUBKEY, 'Version', '0.1.0') then
+  if RegQueryStringValue(HKCU, OZ_MARKER_SUBKEY, 'Version', VersionValue) and
+     IsRecognizedRegistrationVersion(VersionValue) then
     RegDeleteValue(HKCU, OZ_MARKER_SUBKEY, 'Version');
   if RegValueEquals(OZ_MARKER_SUBKEY, 'AppId', OZ_OWNER_ID) then
     RegDeleteValue(HKCU, OZ_MARKER_SUBKEY, 'AppId');

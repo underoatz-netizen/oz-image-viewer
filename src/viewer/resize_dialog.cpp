@@ -13,6 +13,7 @@
 // - The canvas preview is presentation-only: preview_cb receives the draft
 //   target or nullopt; the dialog never mutates edit history or image state.
 #include "resize_dialog.hpp"
+#include "ozviewer_resources.h"
 #include "ui_theme.hpp"
 #include "viewer_strings.hpp"
 
@@ -70,6 +71,8 @@ struct dialog_state {
 
     HFONT font = nullptr;
     bool font_owned = false;
+    HICON icon_big = nullptr;
+    HICON icon_small = nullptr;
     theme_mode theme = theme_mode::light;
     theme_palette palette{};
     HBRUSH brush_bg = nullptr;
@@ -381,6 +384,18 @@ INT_PTR CALLBACK resize_dialog_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             st->theme = query_system_theme_mode();
             st->palette = get_theme_palette(st->theme);
             apply_dwm_caption_theme(hwnd, st->theme);
+            st->icon_big = static_cast<HICON>(LoadImageW(
+                GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_OZVIEWER_APPICON),
+                IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0));
+            st->icon_small = static_cast<HICON>(LoadImageW(
+                GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_OZVIEWER_APPICON),
+                IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+            if (st->icon_big) {
+                SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(st->icon_big));
+            }
+            if (st->icon_small) {
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(st->icon_small));
+            }
             st->brush_bg = CreateSolidBrush(st->palette.bg_chrome);
             st->brush_edit_bg = CreateSolidBrush(st->theme == theme_mode::dark ? RGB(45, 45, 45) : RGB(255, 255, 255));
 
@@ -637,6 +652,14 @@ INT_PTR CALLBACK resize_dialog_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 if (st->brush_edit_bg) {
                     DeleteObject(st->brush_edit_bg);
                     st->brush_edit_bg = nullptr;
+                }
+                if (st->icon_big) {
+                    DestroyIcon(st->icon_big);
+                    st->icon_big = nullptr;
+                }
+                if (st->icon_small) {
+                    DestroyIcon(st->icon_small);
+                    st->icon_small = nullptr;
                 }
                 SetWindowLongPtrW(hwnd, DWLP_USER, 0);
             }

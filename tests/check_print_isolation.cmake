@@ -22,10 +22,11 @@ set(PRINT_DLG_HPP "${VIEWER_DIR}/print_dialog.hpp")
 set(PRINT_DLG_CPP "${VIEWER_DIR}/print_dialog.cpp")
 set(CMD_STATE_HPP "${VIEWER_DIR}/ui_command_state.hpp")
 set(CMD_STATE_CPP "${VIEWER_DIR}/ui_command_state.cpp")
+set(CMD_MENU_HPP "${VIEWER_DIR}/command_menu.hpp")
 set(VIEWER_CMAKE "${VIEWER_DIR}/CMakeLists.txt")
 foreach(f IN ITEMS "${PRINT_JOB_HPP}" "${PRINT_CTRL_HPP}" "${PRINT_CTRL_CPP}"
                    "${PRINT_DLG_HPP}" "${PRINT_DLG_CPP}"
-                   "${CMD_STATE_HPP}" "${CMD_STATE_CPP}" "${VIEWER_CMAKE}")
+                   "${CMD_STATE_HPP}" "${CMD_STATE_CPP}" "${CMD_MENU_HPP}" "${VIEWER_CMAKE}")
     if(NOT EXISTS "${f}")
         message(FATAL_ERROR "required Stage 9.8 file not found: ${f}")
     endif()
@@ -36,6 +37,7 @@ file(READ "${PRINT_CTRL_CPP}" print_content)
 file(READ "${PRINT_DLG_CPP}" print_dlg_content)
 file(READ "${CMD_STATE_HPP}" cmd_hpp_content)
 file(READ "${CMD_STATE_CPP}" cmd_cpp_content)
+file(READ "${CMD_MENU_HPP}" cmd_menu_content)
 file(READ "${VIEWER_CMAKE}" cmake_content)
 
 # 1. The print entry point exists and refuses both non-interactive modes first.
@@ -240,19 +242,25 @@ if(complete_guard_pos EQUAL -1)
     message(FATAL_ERROR "kMsgPrintComplete handler must guard against benchmark and nav_benchmark")
 endif()
 
-# 12. The File menu Print item is created only in the interactive menu block.
-string(FIND "${content}" "kIdFilePrint, L\"&Print...\\tCtrl+P\"" menu_pos)
+# 12. The overflow menu Print item exists in command_menu.hpp, and the command
+#     bar/overflow chrome is created only in the interactive (!benchmark &&
+#     !nav_benchmark) block in main.cpp (window gets no Win32 HMENU bar).
+string(FIND "${cmd_menu_content}" "ui_command_id::file_print), L\"&Print...\\tCtrl+P\"" menu_pos)
 if(menu_pos EQUAL -1)
-    message(FATAL_ERROR "File menu Print item not found in main.cpp")
+    message(FATAL_ERROR "Overflow menu Print item not found in command_menu.hpp")
 endif()
-math(EXPR menu_window_start "${menu_pos} - 2000")
-if(menu_window_start LESS 0)
-    set(menu_window_start 0)
+string(FIND "${content}" "app.chrome = std::make_unique<oz::viewer::ui_chrome>()" chrome_pos)
+if(chrome_pos EQUAL -1)
+    message(FATAL_ERROR "app.chrome creation not found in main.cpp")
 endif()
-string(SUBSTRING "${content}" ${menu_window_start} 2000 menu_window)
-string(FIND "${menu_window}" "!benchmark && !nav_benchmark" menu_guard_pos)
-if(menu_guard_pos EQUAL -1)
-    message(FATAL_ERROR "File menu Print item is not inside the interactive (!benchmark && !nav_benchmark) menu block")
+math(EXPR chrome_window_start "${chrome_pos} - 400")
+if(chrome_window_start LESS 0)
+    set(chrome_window_start 0)
+endif()
+string(SUBSTRING "${content}" ${chrome_window_start} 400 chrome_window)
+string(FIND "${chrome_window}" "!benchmark && !nav_benchmark" chrome_guard_pos)
+if(chrome_guard_pos EQUAL -1)
+    message(FATAL_ERROR "Command bar / overflow chrome creation is not inside the interactive (!benchmark && !nav_benchmark) block")
 endif()
 
 # 13. Command-state seam: file_print id, print_busy context, and derivation.

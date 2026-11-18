@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(ozbench
-    VERSION 0.1.1
+    VERSION 0.1.2
     DESCRIPTION "PikaView (formerly OZ Image Viewer) benchmark harness and native Windows image viewer"
     LANGUAGES CXX)
 

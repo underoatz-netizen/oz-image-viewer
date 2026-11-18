@@ -22,8 +22,8 @@ if(TARGET libjpeg-turbo::turbojpeg OR TARGET libjpeg-turbo::turbojpeg-static)
     target_compile_definitions(ozviewer PRIVATE UNICODE _UNICODE)
     target_link_libraries(ozviewer PRIVATE ozviewer_core oz_benchmark_markers)
 
-    # Direct2D / Direct3D / DXGI system libraries + Shell / Common Dialogs / Theme / DWM (Stage 4, 7).
-    target_link_libraries(ozviewer PRIVATE d2d1 d3d11 dxgi comdlg32 shell32 comctl32 uxtheme dwmapi)
+    # Direct2D / Direct3D / DXGI / GDI+ system libraries + Shell / Common Dialogs / Theme / DWM (Stage 4, 7).
+    target_link_libraries(ozviewer PRIVATE d2d1 d3d11 dxgi gdiplus comdlg32 shell32 comctl32 uxtheme dwmapi)
 
     # libjpeg-turbo is transitively linked via ozviewer_core; link it explicitly
     # too so the viewer's own decode path is unambiguous (static-MD triplet

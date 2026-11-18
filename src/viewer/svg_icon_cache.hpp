@@ -1,4 +1,4 @@
-// oz/viewer/svg_icon_cache.hpp - SVG icon resources and Direct2D lazy render cache (Stage 7 modern chrome).
+// oz/viewer/svg_icon_cache.hpp - SVG icon resources and Direct2D lazy render cache.
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -14,6 +14,8 @@
 #include <d2d1_1.h>
 #include <wrl/client.h>
 
+#include "lucide_icons.hpp"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -23,58 +25,12 @@ namespace oz::viewer {
 
 using Microsoft::WRL::ComPtr;
 
-enum class icon_id : std::uint8_t {
-    open,
-    save,
-    undo,
-    redo,
-    rotate_left,
-    rotate_right,
-    crop,
-    resize,
-    fit,
-    one_to_one,
-    fullscreen,
-    // Standard direct-icon surface additions (icon-first boundary). One icon
-    // per active non-crop command so every button is a real, distinct glyph.
-    paste_image,
-    save_as,
-    open_location,
-    copy_image,
-    copy_file,
-    copy_path,
-    print,
-    delete_image,
-    flip_h,
-    flip_v,
-    zoom_in,
-    zoom_out,
-    nav_first,
-    nav_prev,
-    nav_next,
-    nav_last,
-    // Active crop direct-icon controls
-    crop_free,
-    crop_original,
-    crop_1x1,
-    crop_3x2,
-    crop_4x3,
-    crop_5x4,
-    crop_16x9,
-    crop_9x16,
-    crop_a_series,
-    crop_reset,
-    crop_apply,
-    crop_cancel
-};
+// Returns standard SVG XML text for an icon (built from pinned Lucide 1.71.0 assets).
+[[nodiscard]] std::string get_svg_icon_data(icon_id id) noexcept;
 
-// Returns standard SVG XML text for an icon
-[[nodiscard]] std::string_view get_svg_icon_data(icon_id id) noexcept;
-
-// Short text fallback label for an icon when SVG drawing or Direct2D 1.3 is unavailable
+// Short text fallback label for an icon when SVG drawing or Direct2D 1.3 is unavailable.
 [[nodiscard]] std::wstring_view get_icon_fallback_label(icon_id id) noexcept;
 
-// Cache key for rasterized icon bitmaps
 struct icon_cache_key {
     icon_id id;
     std::int32_t size_px;
@@ -93,7 +49,6 @@ struct icon_cache_key_hash {
     }
 };
 
-// Lazy, on-demand SVG icon renderer and bitmap cache using Direct2D (ID2D1DeviceContext5 SVG support or software D2D fallback).
 class svg_icon_cache {
 public:
     svg_icon_cache() = default;
@@ -102,23 +57,19 @@ public:
     svg_icon_cache(const svg_icon_cache&) = delete;
     svg_icon_cache& operator=(const svg_icon_cache&) = delete;
 
-    // Check if Direct2D SVG support is available on this system
     [[nodiscard]] bool is_svg_supported(ID2D1DeviceContext* d2d_context) noexcept;
 
-    // Retrieve or rasterize cached D2D bitmap for the icon
     [[nodiscard]] ID2D1Bitmap* get_or_render_icon(ID2D1DeviceContext* d2d_context,
                                                   icon_id id,
                                                   std::int32_t size_px,
                                                   COLORREF color);
 
-    // Rasterize icon directly into an RGBA/BGRA 32-bit pixel buffer for native HBITMAP / ImageList integration
     [[nodiscard]] bool rasterize_icon_pixels(ID2D1DeviceContext* d2d_context,
                                             icon_id id,
                                             std::int32_t size_px,
                                             COLORREF color,
                                             void* out_pixels_bgra32);
 
-    // Invalidate cached bitmaps (e.g. on DPI change or theme change)
     void clear() noexcept {
         cache_.clear();
     }

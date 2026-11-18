@@ -12,6 +12,7 @@
 
 #include "oz/viewer_core/crop_interaction.hpp"
 #include "crop_icon_bar.hpp"
+#include "ui_command_state.hpp"
 #include "svg_icon_cache.hpp"
 #include "ui_layout.hpp"
 #include "ui_theme.hpp"
@@ -30,6 +31,15 @@ constexpr int kIdCropStripBtnApply   = 4004;
 constexpr int kIdCropStripBtnCancel  = 4005;
 constexpr int kIdCropStripToolbar    = 4010;
 constexpr int kIdCropStripScrollBar  = 4011;
+
+// Reset Crop accepts both the stable catalog command ID emitted by the current
+// toolbar / overflow menu and the legacy crop-strip control ID retained for
+// compatibility. The WM_COMMAND route uses this one predicate so either
+// identity reaches the existing reset handler exactly once.
+[[nodiscard]] constexpr bool is_crop_reset_command(int command_id) noexcept {
+    return command_id == static_cast<int>(ui_command_id::edit_crop_reset) ||
+           command_id == kIdCropStripBtnReset;
+}
 
 // Native contextual crop strip manager:
 // Compact bar (<=2 rows, 40 DIP cells) visible solely while crop mode is active.
@@ -100,6 +110,8 @@ public:
     HBRUSH handle_ctl_color(HDC hdc, HWND control) noexcept;
 
 private:
+    static void register_strip_class(HINSTANCE instance) noexcept;
+    static LRESULT CALLBACK strip_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept;
     void rebuild_fonts_and_brushes() noexcept;
     void setup_toolbar_buttons() noexcept;
     void setup_tooltips() noexcept;

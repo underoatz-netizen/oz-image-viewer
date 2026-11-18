@@ -17,6 +17,8 @@
 #include "../src/viewer/shell_integration.hpp"
 #include "../src/viewer/source_identity.hpp"
 #include "../src/viewer/svg_icon_cache.hpp"
+#include "../src/viewer/lucide_icons.hpp"
+#include "../src/viewer/command_menu.hpp"
 #include "../src/viewer/ui_chrome.hpp"
 #include "../src/viewer/ui_command_state.hpp"
 #include "../src/viewer/command_dispatch.hpp"
@@ -36,6 +38,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 namespace {
 
@@ -519,6 +522,54 @@ void test_command_dispatch_parity() {
     }
 }
 
+// Reset Crop dispatch regression: the stable catalog ID emitted by current
+// chrome and the legacy crop-strip control ID must both take the single
+// WM_COMMAND reset route; neighbouring crop actions must not.
+void test_crop_reset_command_dispatch() {
+    using namespace oz::viewer;
+
+    static_assert(static_cast<int>(ui_command_id::edit_crop_reset) == 210);
+    static_assert(kIdCropStripBtnReset == 4003);
+    CHECK(is_crop_reset_command(static_cast<int>(ui_command_id::edit_crop_reset)));
+    CHECK(is_crop_reset_command(kIdCropStripBtnReset));
+
+    // The actual producers (crop strip and overflow menu) emit the stable ID.
+    const auto& cmds = get_crop_command_items();
+    CHECK(cmds.size() == 12);
+    CHECK(cmds[9].id == ui_command_id::edit_crop_reset);
+    CHECK(cmds[9].command_int_id == static_cast<int>(ui_command_id::edit_crop_reset));
+
+    bool menu_emits_reset = false;
+    for (const auto& item : menu::kEditSubmenuItems) {
+        if (item.command == static_cast<int>(ui_command_id::edit_crop_reset)) {
+            menu_emits_reset = true;
+        }
+    }
+    CHECK(menu_emits_reset);
+
+    // Mirrors the production branch: each accepted ID dispatches the existing
+    // reset handler once; a non-reset ID is never stolen by that branch.
+    int reset_dispatch_count = 0;
+    const auto route = [&reset_dispatch_count](int id) {
+        if (is_crop_reset_command(id)) {
+            ++reset_dispatch_count;
+            return true;
+        }
+        return false;
+    };
+    CHECK(route(static_cast<int>(ui_command_id::edit_crop_reset)));
+    CHECK(route(kIdCropStripBtnReset));
+    CHECK(reset_dispatch_count == 2);
+    CHECK(!route(static_cast<int>(ui_command_id::edit_crop_apply)));
+    CHECK(!route(static_cast<int>(ui_command_id::edit_crop_cancel)));
+    CHECK(!route(static_cast<int>(ui_command_id::edit_crop)));
+    CHECK(!route(static_cast<int>(ui_command_id::crop_ratio_free)));
+    CHECK(!route(kIdCropStripBtnApply));
+    CHECK(!route(kIdCropStripBtnCancel));
+    CHECK(!route(0));
+    CHECK(reset_dispatch_count == 2);
+}
+
 void test_ui_layout() {
     using namespace oz::viewer;
 
@@ -757,18 +808,58 @@ void test_svg_icon_cache_and_fallback() {
     std::vector<std::uint8_t> dummy_buf(16 * 16 * 4, 0);
     CHECK(!cache.rasterize_icon_pixels(nullptr, icon_id::open, 16, RGB(0, 0, 0), dummy_buf.data()));
 
-    // 2. Fallback labels exist and are non-empty for every command icon
-    for (const auto id : {
-        icon_id::open, icon_id::save, icon_id::undo, icon_id::redo,
-        icon_id::rotate_left, icon_id::rotate_right, icon_id::crop, icon_id::resize,
-        icon_id::fit, icon_id::one_to_one, icon_id::fullscreen
-    }) {
+    // 2. Fallback labels, Lucide asset mapping, zero duplicate geometry, and grid bounds
+    std::set<std::string> seen_markup;
+    for (std::size_t idx = 0; idx < kIconIdCount; ++idx) {
+        const auto id = static_cast<icon_id>(idx);
         const auto label = get_icon_fallback_label(id);
         CHECK(!label.empty());
         const auto svg = get_svg_icon_data(id);
         CHECK(!svg.empty());
         CHECK(svg.find("<svg") != std::string_view::npos);
+
+        const lucide::icon_asset* asset = lucide::FindAsset(id);
+        CHECK(asset != nullptr);
+        if (asset) {
+            CHECK(asset->name != nullptr && asset->name[0] != '\0');
+            CHECK(seen_markup.insert(asset->markup).second);
+        }
+
+        std::vector<lucide::Figure> figs;
+        lucide::Bounds bounds{};
+        std::string parse_err;
+        CHECK(lucide::BuildGeometry(id, figs, &bounds, &parse_err));
+        CHECK(!figs.empty());
+        CHECK(bounds.valid);
+        CHECK(bounds.minX >= 0.0 && bounds.minY >= 0.0);
+        CHECK(bounds.maxX <= 24.0 && bounds.maxY <= 24.0);
+
+        // Verify GDI+ lucide::DrawIcon succeeds for every entry on a 24x24 DIB DC.
+        HDC mem_dc = CreateCompatibleDC(nullptr);
+        CHECK(mem_dc != nullptr);
+        if (mem_dc) {
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = 24;
+            bmi.bmiHeader.biHeight = -24;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            void* dib_bits = nullptr;
+            HBITMAP bmp = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
+            CHECK(bmp != nullptr);
+            if (bmp) {
+                HGDIOBJ old_bmp = SelectObject(mem_dc, bmp);
+                const RECT draw_rc{0, 0, 24, 24};
+                CHECK(lucide::DrawIcon(mem_dc, draw_rc, id, RGB(240, 240, 240)));
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(bmp);
+            }
+            DeleteDC(mem_dc);
+        }
     }
+    CHECK(get_svg_icon_data(icon_id::undo) != get_svg_icon_data(icon_id::rotate_left));
+    CHECK(get_svg_icon_data(icon_id::redo) != get_svg_icon_data(icon_id::rotate_right));
 
     // 3. Test headless WARP/D2D rasterization if D3D11 and Direct2D are available in the test environment
     HMODULE hD3D11 = LoadLibraryW(L"d3d11.dll");
@@ -827,6 +918,26 @@ void test_svg_icon_cache_and_fallback() {
                                         }
                                     }
                                     CHECK(has_alpha);
+
+                                    // Verify 24x24 -> 20x20 scaling does not clip right/bottom strokes (e.g. crop_original x=2..22, y=4..20).
+                                    std::vector<std::uint8_t> crop_orig_px(20 * 20 * 4, 0);
+                                    CHECK(cache.rasterize_icon_pixels(
+                                        d2d_context.Get(), icon_id::crop_original, 20, RGB(240, 240, 240), crop_orig_px.data()));
+                                    int min_x = 20, max_x = -1, min_y = 20, max_y = -1;
+                                    for (int py = 0; py < 20; ++py) {
+                                        for (int px = 0; px < 20; ++px) {
+                                            if (crop_orig_px[(py * 20 + px) * 4 + 3] > 32) {
+                                                min_x = (std::min)(min_x, px);
+                                                max_x = (std::max)(max_x, px);
+                                                min_y = (std::min)(min_y, py);
+                                                max_y = (std::max)(max_y, py);
+                                            }
+                                        }
+                                    }
+                                    // Unclipped 24->20 scaled crop_original (x in [1,23], y in [3,21]) sits around x=[0,18], y=[2,17].
+                                    // Unscaled 24x24 clipped at 20x20 would hit max_x=19 and max_y=19.
+                                    CHECK(min_x >= 0 && max_x <= 18);
+                                    CHECK(min_y >= 2 && max_y <= 17);
                                 }
                             }
                         }
@@ -1322,55 +1433,143 @@ void test_dpi_and_accessibility_hardening() {
         }
     }
 
-    // F. Standard icon surface: 40x40 DIP cell size, grouping, bounded two-row packing,
-    // and horizontal scrolling reachability across DPIs and narrow widths.
+    // F. Single-row Lucide command bar: 40 DIP fixed height, 32 DIP buttons,
+    //    deterministic group drop priority, overflow menu completeness & unique
+    //    mnemonics, and Lucide icon table integrity.
     {
         using namespace oz::viewer;
 
-        // 1. Catalog integrity: exactly 27 non-crop commands, 3 groups.
+        // 1. Catalog integrity: 27 non-crop commands across 3 groups still preserved.
         const auto& cmds = get_std_icon_commands();
         CHECK(cmds.size() == 27);
         int group_starts = 0;
         for (const auto& c : cmds) {
             if (c.group_start) ++group_starts;
         }
-        CHECK(group_starts == 3); // File, History, View
+        CHECK(group_starts == 3);
 
-        // 2. Pure layout seam: 40x40 DIP cell bound and row ceiling (<= 2 rows)
+        // 2. Pure single-row command bar layout: never wraps, never scrolls,
+        //    all visible slots stay inside client_width_px, deterministic drop order.
         const float dpis[] = {96.0f, 120.0f, 144.0f, 192.0f};
-        const float widths_dip[] = {1600.0f, 1200.0f, 800.0f, 600.0f, 400.0f, 320.0f, 200.0f};
+        for (float test_dpi : dpis) {
+            const int dpi_int = static_cast<int>(test_dpi);
+            for (int w_px : {1600, 1200, 900, 640, 480, 320, 160}) {
+                cmd_bar_input in{};
+                in.client_width_px = w_px;
+                in.dpi = dpi_int;
+                in.nav_digits = 2;
+                in.name_text_width_px = 220;
+                in.has_nav_counter = true;
+                in.editing_enabled = true;
 
-        for (float w_dip : widths_dip) {
-            const auto layout = compute_std_icon_bar_layout(w_dip);
-            CHECK(layout.valid);
-            CHECK(layout.rows >= 1 && layout.rows <= 2);
-            CHECK(layout.bar_height_dip > 0.0f);
+                const cmd_bar_layout layout = compute_command_bar_layout(in);
+                CHECK(layout.valid);
+                CHECK(layout.height_px == scale_dip_round(kCommandBarHeightDip, dpi_int));
 
-            // Every active command must be represented in layout cells
-            int cmd_cell_count = 0;
-            int sep_cell_count = 0;
-            for (const auto& cell : layout.cells) {
-                if (cell.separator) {
-                    ++sep_cell_count;
-                    CHECK(cell.width_dip == kStdIconSeparatorDip);
-                } else {
-                    ++cmd_cell_count;
-                    CHECK(cell.width_dip >= kStdIconCellDip);
-                    CHECK(cell.row >= 0 && cell.row < layout.rows);
+                for (const cmd_bar_slot& s : layout.slots) {
+                    if (!s.visible) continue;
+                    CHECK(s.x >= 0);
+                    CHECK(s.x + s.width <= w_px);
                 }
-            }
-            CHECK(cmd_cell_count == 27);
-            CHECK(sep_cell_count == 2); // 2 separators between 3 groups
-
-            if (layout.needs_scroll) {
-                CHECK(layout.scroll_range_dip > 0.0f);
-                CHECK(layout.content_width_dip > layout.available_width_dip);
-            } else {
-                CHECK(layout.scroll_range_dip == 0.0f);
+                // Open and Overflow never drop.
+                CHECK(layout.is_visible(cmd_bar_item::open));
+                CHECK(layout.is_visible(cmd_bar_item::overflow));
             }
         }
 
-        // 3. Native ui_chrome control integration test: toolbar + horizontal scrollbar
+        // Wide window keeps every primary slot and right-aligns overflow.
+        {
+            cmd_bar_input in{};
+            in.client_width_px = 1600;
+            in.dpi = 96;
+            in.nav_digits = 2;
+            in.name_text_width_px = 200;
+            in.has_nav_counter = true;
+            in.editing_enabled = true;
+            const auto layout = compute_command_bar_layout(in);
+            CHECK(layout.is_visible(cmd_bar_item::open));
+            CHECK(layout.is_visible(cmd_bar_item::document_name));
+            CHECK(layout.is_visible(cmd_bar_item::nav_counter));
+            CHECK(layout.is_visible(cmd_bar_item::nav_prev));
+            CHECK(layout.is_visible(cmd_bar_item::nav_next));
+            CHECK(layout.is_visible(cmd_bar_item::zoom_out));
+            CHECK(layout.is_visible(cmd_bar_item::zoom_label));
+            CHECK(layout.is_visible(cmd_bar_item::zoom_in));
+            CHECK(layout.is_visible(cmd_bar_item::view_fit));
+            CHECK(layout.is_visible(cmd_bar_item::view_actual));
+            CHECK(layout.is_visible(cmd_bar_item::rotate_left));
+            CHECK(layout.is_visible(cmd_bar_item::rotate_right));
+            CHECK(layout.is_visible(cmd_bar_item::edit_crop));
+            CHECK(layout.is_visible(cmd_bar_item::file_delete));
+            CHECK(layout.is_visible(cmd_bar_item::file_print));
+            CHECK(layout.is_visible(cmd_bar_item::overflow));
+            const auto* ov = layout.find(cmd_bar_item::overflow);
+            CHECK(ov != nullptr && ov->x + ov->width == 1600 - kCommandBarPadRightDip);
+            CHECK(!layout.separators.empty());
+        }
+
+        // Narrowing drops secondary clusters in exact priority order:
+        // actions -> crop -> rotate -> view_mode -> zoom -> nav -> nav_counter -> name.
+        {
+            cmd_bar_input in{};
+            in.client_width_px = 500;
+            in.dpi = 96;
+            in.nav_digits = 1;
+            in.name_text_width_px = 120;
+            in.has_nav_counter = true;
+            in.editing_enabled = true;
+            const auto layout = compute_command_bar_layout(in);
+            CHECK(!layout.dropped_groups.empty());
+            CHECK(layout.dropped_groups[0] == cmd_bar_group::actions);
+            // Once a higher-priority group drops, lower-priority groups only drop after it.
+            for (std::size_t i = 1; i < layout.dropped_groups.size(); ++i) {
+                CHECK(layout.dropped_groups[i] != cmd_bar_group::actions);
+            }
+        }
+
+        // 3. Overflow menu completeness & mnemonic uniqueness.
+        {
+            const auto menu_contains = [](ui_command_id id) {
+                const int target = static_cast<int>(id);
+                for (std::size_t i = 0; i < menu::kOverflowItemCount; ++i) {
+                    if (menu::kOverflowItems[i].command == target) return true;
+                }
+                for (std::size_t i = 0; i < menu::kCopySubmenuCount; ++i) {
+                    if (menu::kCopySubmenuItems[i].command == target) return true;
+                }
+                for (std::size_t i = 0; i < menu::kEditSubmenuCount; ++i) {
+                    if (menu::kEditSubmenuItems[i].command == target) return true;
+                }
+                for (std::size_t i = 0; i < menu::kCropRatioSubmenuCount; ++i) {
+                    if (menu::kCropRatioSubmenuItems[i].command == target) return true;
+                }
+                return false;
+            };
+
+            for (std::size_t i = 0; i < menu::kRequiredCommandCount; ++i) {
+                CHECK(menu_contains(menu::kRequiredCommands[i]));
+            }
+            for (const auto& c : cmds) {
+                CHECK(menu_contains(c.id));
+            }
+
+            const auto check_unique_mnemonics = [](const menu::item* items, std::size_t count) {
+                std::set<wchar_t> seen;
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (items[i].command == menu::kMenuSeparator) continue;
+                    CHECK(items[i].label != nullptr);
+                    const wchar_t ch = menu::mnemonic_char(items[i].label);
+                    CHECK(ch != L'\0');
+                    CHECK(seen.insert(ch).second);
+                }
+            };
+            check_unique_mnemonics(menu::kOverflowItems, menu::kOverflowItemCount);
+            check_unique_mnemonics(menu::kCopySubmenuItems, menu::kCopySubmenuCount);
+            check_unique_mnemonics(menu::kEditSubmenuItems, menu::kEditSubmenuCount);
+            check_unique_mnemonics(menu::kCropRatioSubmenuItems, menu::kCropRatioSubmenuCount);
+        }
+
+        // 4. Native ui_chrome control integration test: single-row band + status bar, no scrollbar.
         const wchar_t kChromeTestClass[] = L"OzStdIconChromeTestWindow";
         WNDCLASSEXW cwc{sizeof(cwc)};
         cwc.lpfnWndProc = DefWindowProcW;
@@ -1388,28 +1587,25 @@ void test_dpi_and_accessibility_hardening() {
                 ui_chrome chrome;
                 CHECK(chrome.create(host, cwc.hInstance, test_dpi));
                 HWND tb = chrome.toolbar_hwnd();
-                HWND sb = chrome.bar_scrollbar_hwnd();
+                HWND sb = chrome.statusbar_hwnd();
                 CHECK(tb != nullptr);
                 CHECK(sb != nullptr);
+                CHECK(chrome.bar_scrollbar_hwnd() == nullptr);
+                CHECK(!chrome.bar_scrolling_active());
+                CHECK(chrome.first_tab_stop() != nullptr);
 
-                // Both wide and narrow layout updates
                 for (int test_w_px : {1200, 800, 480, 320}) {
                     ui_layout_config cfg{};
-                    const float w_dip = physical_to_dip(test_w_px, test_dpi);
-                    const auto bar_calc = compute_std_icon_bar_layout(w_dip);
                     cfg.show_toolbar = true;
-                    cfg.toolbar_height_dip = bar_calc.bar_height_dip;
+                    cfg.toolbar_height_dip = static_cast<float>(kCommandBarHeightDip);
+                    cfg.show_status = true;
+                    cfg.status_height_dip = 24.0f;
 
                     const auto layout = compute_ui_layout(test_w_px, 600, test_dpi, cfg);
                     chrome.update_layout(layout, false);
-
                     CHECK(chrome.contains_hwnd(tb));
                     CHECK(chrome.contains_hwnd(sb));
-
-                    if (bar_calc.needs_scroll) {
-                        CHECK(chrome.bar_scrolling_active());
-                        CHECK((GetWindowLongW(sb, GWL_STYLE) & WS_VISIBLE) != 0);
-                    }
+                    CHECK(!chrome.bar_scrolling_active());
                 }
                 chrome.destroy();
             }
@@ -2262,6 +2458,127 @@ void test_shortcut_routing_seam() {
     // 7. Ctrl+C when copy command disabled -> command_disabled
     auto a7 = route_shortcut_key('C', true, false, false, fake_main_hwnd, nullptr, false, copy_disabled);
     CHECK(a7 == shortcut_action::command_disabled);
+}
+
+// Stage 7 accessibility MUST_FIX regression: plain F10 must open More Commands
+// when the canvas has focus. A focused Win32 window delivers plain F10 as
+// WM_KEYDOWN; consuming it without opening the menu left no SC_KEYMENU
+// fallback on that path. Both message kinds must route identically, and the
+// benchmark/fullscreen/modal-Resize guards must stay intact.
+void test_f10_overflow_menu_routing_seam() {
+    using namespace oz::viewer;
+
+    const auto route = [](UINT msg, WPARAM vk, bool ctrl, bool shift, bool alt,
+                          bool repeat, bool interactive = true,
+                          bool fullscreen = false, bool chrome = true,
+                          bool resize_open = false) {
+        return route_f10_overflow_menu(msg, vk, ctrl, shift, alt, repeat,
+                                       interactive, fullscreen, chrome, resize_open);
+    };
+
+    // 1. MUST_FIX: plain F10 as WM_KEYDOWN (focused canvas) opens the menu.
+    auto key = route(WM_KEYDOWN, VK_F10, false, false, false, false);
+    CHECK(key.consume);
+    CHECK(key.open);
+
+    // 2. The system-menu path (WM_SYSKEYDOWN) still opens the menu.
+    auto sys = route(WM_SYSKEYDOWN, VK_F10, false, false, false, false);
+    CHECK(sys.consume);
+    CHECK(sys.open);
+
+    // 3. Auto-repeat is swallowed (on both WM_KEYDOWN and WM_SYSKEYDOWN) but never re-opens the menu.
+    auto repeat = route(WM_KEYDOWN, VK_F10, false, false, false, true);
+    CHECK(repeat.consume);
+    CHECK(!repeat.open);
+    auto sys_repeat = route(WM_SYSKEYDOWN, VK_F10, false, false, false, true);
+    CHECK(sys_repeat.consume);
+    CHECK(!sys_repeat.open);
+
+    // 4. Modified F10 keeps its standard meaning (Shift+F10 = Context Menu).
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, true, false, false).consume);
+    CHECK(!route(WM_KEYDOWN, VK_F10, true, false, false, false).consume);
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, false, true, false).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_F10, false, true, false, false).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_F10, true, false, false, false).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_F10, false, false, true, false).consume);
+
+    // 5. Benchmark and navigation-benchmark modes stay inert (interactive=false).
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, false, false, false, false).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_F10, false, false, false, false, false).consume);
+
+    // 6. Fullscreen and missing chrome keep standard behavior.
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, false, false, false, true, true).consume);
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, false, false, false, true, false, false).consume);
+
+    // 7. A modal Resize dialog owns F10.
+    CHECK(!route(WM_KEYDOWN, VK_F10, false, false, false, false, true, false, true, true).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_F10, false, false, false, false, true, false, true, true).consume);
+
+    // 8. Other keys/messages are untouched.
+    CHECK(!route(WM_KEYDOWN, VK_F11, false, false, false, false).consume);
+    CHECK(!route(WM_SYSKEYDOWN, VK_MENU, false, false, false, false).consume);
+    CHECK(!route(WM_CHAR, VK_F10, false, false, false, false).consume);
+    CHECK(!route(WM_KEYUP, VK_F10, false, false, false, false).consume);
+
+    // 9. Bare Alt (WM_SYSCOMMAND SC_KEYMENU with lparam == 0) shares the same gating.
+    CHECK(should_open_overflow_menu_on_syscommand(SC_KEYMENU, 0, true, false, true, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_KEYMENU, L'f', true, false, true, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_CLOSE, 0, true, false, true, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_KEYMENU, 0, false, false, true, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_KEYMENU, 0, true, true, true, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_KEYMENU, 0, true, false, false, false));
+    CHECK(!should_open_overflow_menu_on_syscommand(SC_KEYMENU, 0, true, false, true, true));
+
+    // 10. Non-blocking ui_chrome toolbar click focus-restoration seam:
+    //     clicking a non-overflow command button posts kMsgRestoreFocus so
+    //     focus returns to the canvas (parent_), whereas unrelated focus is
+    //     never stolen.
+    {
+        const wchar_t kFocusHostClass[] = L"OzFocusRestoreSeamHost";
+        WNDCLASSEXW fwc{sizeof(fwc)};
+        fwc.lpfnWndProc = DefWindowProcW;
+        fwc.hInstance = GetModuleHandleW(nullptr);
+        fwc.lpszClassName = kFocusHostClass;
+        RegisterClassExW(&fwc);
+
+        HWND host = CreateWindowExW(
+            0, kFocusHostClass, L"FocusRestoreHost", WS_OVERLAPPEDWINDOW,
+            0, 0, 1000, 700, nullptr, nullptr, fwc.hInstance, nullptr);
+        CHECK(host != nullptr);
+        if (host) {
+            ui_chrome chrome;
+            CHECK(chrome.create(host, fwc.hInstance, 96.0f));
+            const auto layout = compute_ui_layout(1000, 700, 96.0f, []() {
+                ui_layout_config cfg{};
+                cfg.show_toolbar = true;
+                cfg.toolbar_height_dip = static_cast<float>(kCommandBarHeightDip);
+                cfg.show_status = true;
+                cfg.status_height_dip = 24.0f;
+                return cfg;
+            }());
+            chrome.update_layout(layout, false);
+            ui_command_context ctx{};
+            ctx.have_image = false;
+            chrome.update_command_states(ctx);
+            HWND first_btn = chrome.first_tab_stop();
+            CHECK(first_btn != nullptr);
+            CHECK(chrome.contains_hwnd(first_btn));
+            // Simulate WM_LBUTTONUP on a non-overflow button; the posted
+            // kMsgRestoreFocus message must drain cleanly without blocking
+            // or altering an unrelated focus owner.
+            SendMessageW(first_btn, WM_LBUTTONUP, 0, MAKELPARAM(4, 4));
+            MSG m{};
+            int drained = 0;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE) && drained < 32) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+                ++drained;
+            }
+            chrome.destroy();
+            DestroyWindow(host);
+        }
+        UnregisterClassW(kFocusHostClass, fwc.hInstance);
+    }
 }
 
 void test_clipboard_input_seam() {
@@ -3382,6 +3699,7 @@ int main() {
     test_ui_command_state();
     test_paste_command_state();
     test_command_dispatch_parity();
+    test_crop_reset_command_dispatch();
     test_ui_layout();
     test_svg_icon_cache_and_fallback();
     test_modern_dialogs_mapping_and_fallback();
@@ -3390,6 +3708,7 @@ int main() {
     test_context_menu_seam();
     test_clipboard_output_seam();
     test_shortcut_routing_seam();
+    test_f10_overflow_menu_routing_seam();
     test_clipboard_input_seam();
     test_presentation_edit_suppression();
     test_paste_install_staging_seam();

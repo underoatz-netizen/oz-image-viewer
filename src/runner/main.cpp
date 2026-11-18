@@ -42,7 +42,7 @@ using namespace oz::runner;
 namespace json = oz::json;
 
 #ifndef OZBENCH_PROJECT_VERSION
-#define OZBENCH_PROJECT_VERSION "0.1.1"
+#define OZBENCH_PROJECT_VERSION "0.1.2"
 #endif
 
 namespace {

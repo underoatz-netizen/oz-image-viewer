@@ -9,12 +9,13 @@
   2. Fresh opt-in install: creates PikaView handler registration under HKCU, sets ApplicationName,
      ApplicationDescription, ProgID friendly names, default icon, quoted command, and
      RegisteredApplications\PikaView mapping.
-  3. Upgrade from owned v0.1.0 install with association task UNCHECKED:
+  3. Upgrade from owned v0.1.0/v0.1.1 installs to current 0.1.2, task checked or unchecked:
      - Detects existing owned registration with legacy names (OZ Image Viewer / OZ Image Viewer Image).
      - Automatically updates registered labels to PikaView and RegisteredApplications\PikaView.
      - Removes legacy RegisteredApplications\OZ Image Viewer entry.
      - Reaps obsolete file associations if any.
      - Preserves existing opt-in without creating new consent.
+     - Uninstall removes recognized prior marker versions without leaving owned-version residue.
   4. Foreign / user-modified registry collision handling:
      - Collision on RegisteredApplications\PikaView owned by another program fails closed (preflight aborts).
      - Foreign / unowned legacy RegisteredApplications\OZ Image Viewer fails closed.
@@ -79,6 +80,7 @@ $Policy = @{
     LegacyAppName        = 'OZ Image Viewer'
     TypeName             = 'PikaView Image'
     LegacyTypeName       = 'OZ Image Viewer Image'
+    CurrentVersion       = '0.1.2'
     Extensions           = @('.jpg', '.png', '.webp')
 }
 
@@ -140,6 +142,9 @@ function Mock-IsValueAbsentOrOwned2($reg, [string]$Key, [string]$Name, [string]$
     $v = Mock-GetValue $reg $Key $Name
     return (($v -eq $CurrentVal) -or ($v -eq $LegacyVal))
 }
+function Mock-IsRecognizedRegistrationVersion($p, [string]$v) {
+    return (($v -eq $p.CurrentVersion) -or ($v -eq '0.1.0') -or ($v -eq '0.1.1'))
+}
 function Mock-PreflightError($reg, $p, [string]$CmdVal = $CmdValue, [string]$IconVal = $IconValue) {
     if ((Mock-KeyExists $reg $p.AppKey) -and (-not (Mock-IsOwned $reg $p))) {
         return 'the registry key is not owned'
@@ -190,8 +195,10 @@ function Mock-PreflightError($reg, $p, [string]$CmdVal = $CmdValue, [string]$Ico
     if (-not (Mock-IsValueAbsentOrOwned1 $reg $p.MarkerKey 'Capabilities' $p.CapKey)) {
         return 'the install marker Capabilities has been modified'
     }
-    if (-not (Mock-IsValueAbsentOrOwned2 $reg $p.MarkerKey 'Version' '0.1.1' '0.1.0')) {
-        return 'the install marker Version has been modified'
+    if (Mock-ValueExists $reg $p.MarkerKey 'Version') {
+        if (-not (Mock-IsRecognizedRegistrationVersion $p (Mock-GetValue $reg $p.MarkerKey 'Version'))) {
+            return 'the install marker Version has been modified'
+        }
     }
     return ''
 }
@@ -237,7 +244,7 @@ function Mock-Register($reg, $p) {
     Mock-SetValue $reg $p.MarkerKey 'AppId' $p.OwnerId
     Mock-SetValue $reg $p.MarkerKey 'ProgID' $p.ProgID
     Mock-SetValue $reg $p.MarkerKey 'Capabilities' $p.CapKey
-    Mock-SetValue $reg $p.MarkerKey 'Version' '0.1.1'
+    Mock-SetValue $reg $p.MarkerKey 'Version' $p.CurrentVersion
 }
 function Mock-NeedsLegacyMigration($reg, $p) {
     if (-not (Mock-IsOwned $reg $p)) { return $false }
@@ -292,7 +299,10 @@ function Mock-Unregister($reg, $p) {
     Mock-DeleteKeyIfEmpty $reg $p.ProgIDKey
     if ((Mock-GetValue $reg $p.MarkerKey 'ProgID') -eq $p.ProgID) { Mock-DeleteValue $reg $p.MarkerKey 'ProgID' }
     if ((Mock-GetValue $reg $p.MarkerKey 'Capabilities') -eq $p.CapKey) { Mock-DeleteValue $reg $p.MarkerKey 'Capabilities' }
-    if ((Mock-GetValue $reg $p.MarkerKey 'Version') -eq '0.1.1') { Mock-DeleteValue $reg $p.MarkerKey 'Version' }
+    if ((Mock-ValueExists $reg $p.MarkerKey 'Version') -and
+        (Mock-IsRecognizedRegistrationVersion $p (Mock-GetValue $reg $p.MarkerKey 'Version'))) {
+        Mock-DeleteValue $reg $p.MarkerKey 'Version'
+    }
     if ((Mock-GetValue $reg $p.MarkerKey 'AppId') -eq $p.OwnerId) { Mock-DeleteValue $reg $p.MarkerKey 'AppId' }
     Mock-DeleteKeyIfEmpty $reg $p.MarkerKey
     Mock-DeleteKeyIfEmpty $reg $p.AppKey
@@ -316,6 +326,7 @@ try {
     Assert-True ((Mock-PreflightError $reg $Policy) -eq '') "fresh preflight failed"
     Mock-Register $reg $Policy
     Assert-True (Mock-IsOwned $reg $Policy) "fresh opt-in missing AppId ownership marker"
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq $Policy.CurrentVersion) "fresh opt-in marker version is not $($Policy.CurrentVersion)"
     Assert-True ((Mock-GetValue $reg $Policy.CapKey 'ApplicationName') -eq 'PikaView') "ApplicationName is not PikaView"
     Assert-True ((Mock-GetValue $reg $Policy.CapKey 'ApplicationDescription') -eq 'View and edit images with PikaView') "Description mismatch"
     Assert-True ((Mock-GetValue $reg $Policy.ProgIDKey 'FriendlyTypeName') -eq 'PikaView Image') "FriendlyTypeName is not PikaView Image"
@@ -346,8 +357,85 @@ try {
     Assert-True (-not (Mock-ValueExists $reg $Policy.RegisteredApps $Policy.LegacyRegisteredName)) "Legacy RegisteredApplications value was not reaped"
     Assert-True ((Mock-GetValue $reg $Policy.CapKey 'ApplicationName') -eq 'PikaView') "ApplicationName not updated to PikaView"
     Assert-True ((Mock-GetValue $reg $Policy.ProgIDKey 'FriendlyTypeName') -eq 'PikaView Image') "FriendlyTypeName not updated to PikaView Image"
-    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq '0.1.1') "Marker version not updated to 0.1.1"
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq $Policy.CurrentVersion) "Marker version not updated to $($Policy.CurrentVersion)"
     Pass "Upgrade with unchecked association task automatically migrates owned registration to PikaView"
+
+    # -----------------------------------------------------------------------
+    # TEST 3b: Upgrade from owned v0.1.0 with task CHECKED
+    # -----------------------------------------------------------------------
+    $reg = New-MockRegistry
+    Mock-SetValue $reg $Policy.ProgIDKey '' $Policy.LegacyTypeName
+    Mock-SetValue $reg $Policy.ProgIDKey 'FriendlyTypeName' $Policy.LegacyTypeName
+    Mock-SetValue $reg $Policy.ProgIDKey 'DefaultIcon' $IconValue
+    Mock-SetValue $reg $Policy.CommandKey '' $CmdValue
+    Mock-SetValue $reg $Policy.CapKey 'ApplicationName' $Policy.LegacyAppName
+    Mock-SetValue $reg $Policy.CapKey 'ApplicationDescription' ('View and edit images with ' + $Policy.LegacyAppName)
+    foreach ($e in $Policy.Extensions) { Mock-SetValue $reg $Policy.FileAssocKey $e $Policy.ProgID }
+    Mock-SetValue $reg $Policy.RegisteredApps $Policy.LegacyRegisteredName $Policy.CapKey
+    Mock-SetValue $reg $Policy.MarkerKey 'AppId' $Policy.OwnerId
+    Mock-SetValue $reg $Policy.MarkerKey 'ProgID' $Policy.ProgID
+    Mock-SetValue $reg $Policy.MarkerKey 'Capabilities' $Policy.CapKey
+    Mock-SetValue $reg $Policy.MarkerKey 'Version' '0.1.0'
+
+    Assert-True ((Mock-PreflightError $reg $Policy) -eq '') "owned v0.1.0 checked upgrade preflight rejected recognized version"
+    Mock-Register $reg $Policy
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq $Policy.CurrentVersion) "checked v0.1.0 upgrade marker version not $($Policy.CurrentVersion)"
+    Assert-True ((Mock-GetValue $reg $Policy.CapKey 'ApplicationName') -eq $Policy.AppName) "checked v0.1.0 upgrade did not refresh PikaView labels"
+    Pass "Upgrade from owned v0.1.0 with association task checked refreshes registration to $($Policy.CurrentVersion)"
+
+    # -----------------------------------------------------------------------
+    # TEST 3c: Upgrade from owned modern v0.1.1 with task CHECKED
+    # -----------------------------------------------------------------------
+    $reg = New-MockRegistry
+    Mock-Register $reg $Policy
+    Mock-SetValue $reg $Policy.MarkerKey 'Version' '0.1.1'
+    Assert-True ((Mock-PreflightError $reg $Policy) -eq '') "owned v0.1.1 checked upgrade preflight rejected recognized version"
+    Mock-Register $reg $Policy
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq $Policy.CurrentVersion) "checked v0.1.1 upgrade marker version not $($Policy.CurrentVersion)"
+    Mock-Unregister $reg $Policy
+    Assert-True (-not (Mock-ValueExists $reg $Policy.MarkerKey 'Version')) "checked v0.1.1 upgrade left owned-version residue after uninstall"
+    Assert-True (-not (Mock-KeyExists $reg $Policy.MarkerKey)) "checked v0.1.1 upgrade left non-empty marker key after uninstall"
+    Pass "Upgrade from owned v0.1.1 with task checked reaches $($Policy.CurrentVersion) and uninstalls without owned-version residue"
+
+    # -----------------------------------------------------------------------
+    # TEST 3d: Upgrade from owned modern v0.1.1 with task UNCHECKED, then uninstall
+    # -----------------------------------------------------------------------
+    $reg = New-MockRegistry
+    Mock-Register $reg $Policy
+    Mock-SetValue $reg $Policy.MarkerKey 'Version' '0.1.1'
+    Assert-True (-not (Mock-NeedsLegacyMigration $reg $Policy)) "modern v0.1.1 registration must not trigger legacy migration"
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq '0.1.1') "unchecked upgrade unexpectedly rewrote marker version"
+    Mock-Unregister $reg $Policy
+    Assert-True (-not (Mock-ValueExists $reg $Policy.MarkerKey 'Version')) "unchecked v0.1.1 upgrade left recognized marker version after uninstall"
+    Assert-True (-not (Mock-KeyExists $reg $Policy.MarkerKey)) "unchecked v0.1.1 upgrade left non-empty marker key after uninstall"
+    Pass "Unchecked modern v0.1.1 upgrade retains registration safely and uninstall removes it without residue"
+
+    # -----------------------------------------------------------------------
+    # TEST 3e: Current-version reinstall
+    # -----------------------------------------------------------------------
+    $reg = New-MockRegistry
+    Mock-Register $reg $Policy
+    Assert-True ((Mock-PreflightError $reg $Policy) -eq '') "current-version reinstall preflight rejected $($Policy.CurrentVersion)"
+    Mock-Register $reg $Policy
+    Assert-True ((Mock-GetValue $reg $Policy.MarkerKey 'Version') -eq $Policy.CurrentVersion) "current-version reinstall marker mismatch"
+    Pass "Reinstall over current $($Policy.CurrentVersion) registration is accepted and stays current"
+
+    # -----------------------------------------------------------------------
+    # TEST 3f: Defaults / UserChoice / OpenWith data are never touched
+    # -----------------------------------------------------------------------
+    $reg = New-MockRegistry
+    $defaultsKey = 'software\classes\.jpg'
+    $userChoiceKey = 'software\microsoft\windows\currentversion\explorer\fileexts\.jpg\userchoice'
+    $openWithKey = 'software\classes\.jpg\openwithprogids'
+    Mock-SetValue $reg $defaultsKey '' 'Foreign.Viewer'
+    Mock-SetValue $reg $userChoiceKey 'ProgId' 'Foreign.Viewer'
+    Mock-SetValue $reg $openWithKey 'Foreign.Viewer' ''
+    Mock-Register $reg $Policy
+    Mock-Unregister $reg $Policy
+    Assert-True ((Mock-GetValue $reg $defaultsKey '') -eq 'Foreign.Viewer') "default handler value was modified"
+    Assert-True ((Mock-GetValue $reg $userChoiceKey 'ProgId') -eq 'Foreign.Viewer') "UserChoice value was modified"
+    Assert-True ((Mock-GetValue $reg $openWithKey 'Foreign.Viewer') -eq '') "OpenWithProgids value was modified"
+    Pass "Register/unregister leave defaults, UserChoice, and OpenWithProgids data unchanged"
 
     # -----------------------------------------------------------------------
     # TEST 4: Collision detection on RegisteredApplications\PikaView
@@ -403,6 +491,35 @@ try {
     Pass "Modified DefaultIcon on unchecked legacy upgrade fails preflight before file copy"
 
     # -----------------------------------------------------------------------
+    # TEST 7b-ii: Missing ownership and modified owned values fail closed
+    # -----------------------------------------------------------------------
+    $reg8b = New-MockRegistry
+    Mock-SetValue $reg8b $Policy.AppKey 'Sentinel' 'KeepMe'
+    Assert-True ((Mock-PreflightError $reg8b $Policy) -ne '') "missing AppId must fail preflight"
+    Mock-Unregister $reg8b $Policy
+    Assert-True ((Mock-GetValue $reg8b $Policy.AppKey 'Sentinel') -eq 'KeepMe') "missing-AppId unregister must preserve foreign data"
+
+    $modifiedCases = @(
+        @{ Key = $Policy.CommandKey; Name = ''; Value = '"C:\Other\app.exe" "%1"'; Label = 'open command' },
+        @{ Key = $Policy.ProgIDKey; Name = ''; Value = 'Other.Type'; Label = 'ProgID default' },
+        @{ Key = $Policy.ProgIDKey; Name = 'FriendlyTypeName'; Value = 'Other Image'; Label = 'ProgID FriendlyTypeName' },
+        @{ Key = $Policy.CapKey; Name = 'ApplicationName'; Value = 'Other App'; Label = 'capabilities ApplicationName' },
+        @{ Key = $Policy.CapKey; Name = 'ApplicationDescription'; Value = 'Other description'; Label = 'capabilities ApplicationDescription' },
+        @{ Key = $Policy.FileAssocKey; Name = '.jpg'; Value = 'Other.Type'; Label = 'extension' }
+    )
+    foreach ($c in $modifiedCases) {
+        $r = New-MockRegistry
+        Mock-SetValue $r $Policy.MarkerKey 'AppId' $Policy.OwnerId
+        Mock-SetValue $r $c.Key $c.Name $c.Value
+        Assert-True ((Mock-PreflightError $r $Policy) -ne '') "modified $($c.Label) must fail preflight"
+    }
+    $reg8c = New-MockRegistry
+    Mock-SetValue $reg8c $Policy.MarkerKey 'AppId' $Policy.OwnerId
+    Mock-SetValue $reg8c $Policy.MarkerKey 'ProgID' 'Custom.ProgID'
+    Assert-True ((Mock-PreflightError $reg8c $Policy) -ne '') "modified marker ProgID must fail preflight"
+    Pass "Missing AppId and modified command/ProgID/capabilities/extensions fail closed"
+
+    # -----------------------------------------------------------------------
     # TEST 7c: Uninstall preserves modified marker values
     # -----------------------------------------------------------------------
     $reg9 = New-MockRegistry
@@ -424,13 +541,21 @@ try {
     Pass "Same-value unowned RegisteredApplications\PikaView fails closed"
 
     # -----------------------------------------------------------------------
-    # TEST 7e: Modified marker Version fails closed
+    # TEST 7e: Recognized marker Versions pass; unknown/future/malformed fail
     # -----------------------------------------------------------------------
-    $reg11 = New-MockRegistry
-    Mock-SetValue $reg11 $Policy.MarkerKey 'AppId' $Policy.OwnerId
-    Mock-SetValue $reg11 $Policy.MarkerKey 'Version' '9.9.9-custom'
-    Assert-True ((Mock-PreflightError $reg11 $Policy) -ne '') "Modified marker Version must fail closed"
-    Pass "Modified marker Version fails closed"
+    foreach ($recognized in @('0.1.0', '0.1.1', $Policy.CurrentVersion)) {
+        $r = New-MockRegistry
+        Mock-SetValue $r $Policy.MarkerKey 'AppId' $Policy.OwnerId
+        Mock-SetValue $r $Policy.MarkerKey 'Version' $recognized
+        Assert-True ((Mock-PreflightError $r $Policy) -eq '') "recognized marker Version $recognized was rejected"
+    }
+    foreach ($badVersion in @('0.1.3', '0.2.0', '0.1', 'v0.1.1', '9.9.9-custom', '')) {
+        $r = New-MockRegistry
+        Mock-SetValue $r $Policy.MarkerKey 'AppId' $Policy.OwnerId
+        Mock-SetValue $r $Policy.MarkerKey 'Version' $badVersion
+        Assert-True ((Mock-PreflightError $r $Policy) -ne '') "unknown/future/malformed marker Version '$badVersion' must fail closed"
+    }
+    Pass "Version allowlist accepts only $($Policy.CurrentVersion), 0.1.0, and 0.1.1; all others fail closed"
 
     # -----------------------------------------------------------------------
     # TEST 7f: Shortcut ownership policy (marker-present-but-foreign, modified args/icon)
@@ -501,6 +626,11 @@ try {
     Assert-True ($issContent -match 'OZ_PROGID = ''OZImageViewer\.Image''') "ProgID modified (breaks compatibility)"
     Assert-True ($issContent -match 'OZ_REGISTERED_NAME = ''PikaView''') "OZ_REGISTERED_NAME is not PikaView"
     Assert-True ($issContent -match 'OZ_LEGACY_REGISTERED_NAME = ''OZ Image Viewer''') "OZ_LEGACY_REGISTERED_NAME is missing"
+    Assert-True ($issContent.Contains('function IsRecognizedRegistrationVersion(const Value: String): Boolean;')) "recognized-registration-version predicate is missing"
+    Assert-True ([regex]::Matches($issContent, 'IsRecognizedRegistrationVersion\(').Count -ge 3) "recognized-registration-version predicate is not used by preflight and uninstall"
+    foreach ($recognizedLiteral in @("'0.1.0'", "'0.1.1'", "'{#OZ_VERSION}'")) {
+        Assert-True ($issContent.Contains("CompareText(Value, $recognizedLiteral) = 0")) "recognized-registration-version predicate is missing $recognizedLiteral"
+    }
     Pass "Static Inno Setup script matches architect compatibility policy exactly"
 
     # -----------------------------------------------------------------------
@@ -515,12 +645,12 @@ try {
 
     # Write mock generated include
     $fakeGenContent = @"
-#define OZ_VERSION "0.1.1"
+#define OZ_VERSION "$($Policy.CurrentVersion)"
 #define OZ_EXE_NAME "ozviewer.exe"
 #define OZ_EXT_LIST ".jpg .png .webp"
 #define OZ_EXT_COUNT 3
 #define OZ_OUTPUT_DIR "$($compileStage.Replace('\', '/'))"
-#define OZ_OUTPUT_BASENAME "pikaview-0.1.1-win-x64-installer"
+#define OZ_OUTPUT_BASENAME "pikaview-$($Policy.CurrentVersion)-win-x64-installer"
 #define OZ_SETUP_ICON "$iconPath"
 
 [Files]
@@ -533,9 +663,9 @@ Source: "$licensePath"; DestDir: "{app}"; Flags: ignoreversion
     if (Test-Path -LiteralPath $iscc -PathType Leaf) {
         $compileRes = & $iscc "/Qp" (Join-Path $compileStage "ozviewer-installer.iss") 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "ISCC compile failed:`n$($compileRes -join "`n")"
-        $compiledExe = Join-Path $compileStage "pikaview-0.1.1-win-x64-installer.exe"
+        $compiledExe = Join-Path $compileStage "pikaview-$($Policy.CurrentVersion)-win-x64-installer.exe"
         Assert-True (Test-Path -LiteralPath $compiledExe -PathType Leaf) "Compiled installer executable not found at $compiledExe"
-        Pass "Inno Setup compilation succeeded with ISCC.exe producing pikaview-0.1.1-win-x64-installer.exe"
+        Pass "Inno Setup compilation succeeded with ISCC.exe producing pikaview-$($Policy.CurrentVersion)-win-x64-installer.exe"
     }
     else {
         Write-Host "migration-test: NOTE: ISCC not found at expected location; skipping binary compile" -ForegroundColor Yellow

@@ -57,6 +57,7 @@ struct renderer {
     // context on every target (re)creation so physical-pixel fit/DrawBitmap
     // coordinates stay correct at per-monitor-v2 DPI. Defaults to 96 (1:1).
     float dpi = 96.0f;
+    D2D1_COLOR_F clear_color = D2D1::ColorF(0.11f, 0.11f, 0.12f, 1.0f);
 };
 
 // Create the D3D11/DXGI/D2D renderer for the given HWND. Tries the hardware

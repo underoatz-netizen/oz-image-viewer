@@ -119,9 +119,10 @@ function Invoke-Wrapper {
         [Parameter(Mandatory = $true)][string]$WrapperPath,
         [Parameter(Mandatory = $true)][string]$BuildDir,
         [string]$MockExit = '0',
-        [string]$CreateAmbiguous = '0'
+        [string]$CreateAmbiguous = '0',
+        [string]$GitCeilingDirectories = ''
     )
-    $names = @('MOCK_CMAKE_EXIT', 'MOCK_CMAKE_CREATE_AMBIGUOUS')
+    $names = @('MOCK_CMAKE_EXIT', 'MOCK_CMAKE_CREATE_AMBIGUOUS', 'GIT_CEILING_DIRECTORIES')
     $previous = @{}
     foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $previousPreference = $ErrorActionPreference
@@ -129,6 +130,20 @@ function Invoke-Wrapper {
         $ErrorActionPreference = 'Continue'
         [Environment]::SetEnvironmentVariable('MOCK_CMAKE_EXIT', $MockExit, 'Process')
         [Environment]::SetEnvironmentVariable('MOCK_CMAKE_CREATE_AMBIGUOUS', $CreateAmbiguous, 'Process')
+        if (-not [string]::IsNullOrWhiteSpace($GitCeilingDirectories)) {
+            # Git stops directory discovery only at a parent of the start path;
+            # setting the ceiling to the start path itself still lets Git ascend.
+            $ceiling = [System.IO.Path]::GetFullPath($GitCeilingDirectories)
+            $existing = $previous['GIT_CEILING_DIRECTORIES']
+            if ([string]::IsNullOrWhiteSpace($existing)) {
+                $ceilingValue = $ceiling
+            }
+            else {
+                $separator = [string][System.IO.Path]::PathSeparator
+                $ceilingValue = $existing.Trim().TrimEnd([char[]]@([char]$separator, [char]':')) + $separator + $ceiling
+            }
+            [Environment]::SetEnvironmentVariable('GIT_CEILING_DIRECTORIES', $ceilingValue, 'Process')
+        }
         $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $WrapperPath,
                        '-BuildDir', $BuildDir, '-CmakeExe', $MockCmake)
         $output = & powershell @arguments 2>&1
@@ -173,7 +188,10 @@ try {
     # --- 3. Git command failure is reported honestly -------------------------
     $gitErrorBuild = Join-Path $WorkDir 'git-error-build'
     Write-MockCache -BuildDir $gitErrorBuild -SourceDir $NoGitRoot -Diagnostics 'OFF'
-    $r = Invoke-Wrapper -WrapperPath $NoGitWrapper -BuildDir $gitErrorBuild
+    # Ceiling must be the parent of the fixture root, not the fixture root
+    # itself, so Git cannot discover the enclosing user worktree.
+    $gitCeiling = Split-Path -Parent $NoGitRoot
+    $r = Invoke-Wrapper -WrapperPath $NoGitWrapper -BuildDir $gitErrorBuild -GitCeilingDirectories $gitCeiling
     Assert-True ($r.ExitCode -ne 0) "wrapper accepted a non-Git worktree"
     Assert-True ($r.Output -match 'git status --porcelain failed \(exit [0-9]+\)') "Git command failure was not reported explicitly:`n$($r.Output)"
     Assert-True ($r.Output -notmatch 'Source working tree is not clean') "Git command failure was misreported as a dirty tree:`n$($r.Output)"
