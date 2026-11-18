@@ -222,6 +222,23 @@ function Compare-UserChoiceSnapshotAll {
     return $mismatches.ToArray()
 }
 
+function Wait-UninstallComplete {
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetDir,
+        [int]$TimeoutSeconds = 15
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $dirExists = Test-Path -LiteralPath $TargetDir
+        $iuProcs = @(Get-Process -Name "_iu*" -ErrorAction SilentlyContinue)
+        if (-not $dirExists -and $iuProcs.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Start-Sleep -Milliseconds 300
+}
+
 $script:Report = [ordered]@{
     testSuite = "installer-lifecycle"
     timestamp = [System.DateTime]::UtcNow.ToString("o")
@@ -658,11 +675,7 @@ try {
     Record-Check -Name "stage4_uninstaller_exit_code" -Status "pass" -Details "Uninstaller exited cleanly with code 0."
 
     # Allow bounded settle period for Inno's self-deleting helper process
-    $settleSeconds = 0
-    while ((Test-Path -LiteralPath $exePath) -and ($settleSeconds -lt 15)) {
-        Start-Sleep -Seconds 1
-        $settleSeconds++
-    }
+    Wait-UninstallComplete -TargetDir $installDir -TimeoutSeconds 15
 
     if (Test-Path -LiteralPath $exePath) {
         Record-Check -Name "stage4_exe_removed" -Status "fail" -Details "Executable ozviewer.exe still exists after uninstall settle."
@@ -758,6 +771,7 @@ try {
         Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "fail" -Details "Uninstaller missing for the user-modified desktop shortcut test: $uninstDesktopMod"
     }
     $desktopModUninstRes = Invoke-ProcessSafe -FilePath $uninstDesktopMod -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120
+    Wait-UninstallComplete -TargetDir $installDir -TimeoutSeconds 15
     $desktopAfterModUninstall = Get-ShortcutSnapshot -Path $desktopShortcutPath
     if ($desktopModUninstRes.ExitCode -ne 0 -or
         $null -eq $desktopAfterModUninstall -or
@@ -913,6 +927,7 @@ try {
         # Clean uninstall of upgraded instance
         $uninstUpg = Join-Path $upgradeCustomDir "unins000.exe"
         $resUninstUpg = Invoke-ProcessSafe -FilePath $uninstUpg -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120
+        Wait-UninstallComplete -TargetDir $upgradeCustomDir -TimeoutSeconds 15
         if ($resUninstUpg.ExitCode -ne 0) {
             Record-Check -Name "stage5_v011_uninstall" -Status "fail" -Details "Upgraded uninstall failed with exit code $($resUninstUpg.ExitCode)"
         }
@@ -958,6 +973,7 @@ try {
         $uninstOptOut = Join-Path $installDir "unins000.exe"
         if (Test-Path -LiteralPath $uninstOptOut) {
             Invoke-ProcessSafe -FilePath $uninstOptOut -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120 | Out-Null
+            Wait-UninstallComplete -TargetDir $installDir -TimeoutSeconds 15
         }
 
         if ($upgPngCreated) {
