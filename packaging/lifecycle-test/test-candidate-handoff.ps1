@@ -128,6 +128,9 @@ try {
     $h2 = (Get-FileHash -LiteralPath (Join-Path $testDir $f2) -Algorithm SHA256).Hash.ToLowerInvariant()
     $h3 = (Get-FileHash -LiteralPath (Join-Path $testDir $f3) -Algorithm SHA256).Hash.ToLowerInvariant()
 
+    $expectedCandidateCommit = ("a" * 40)
+    $expectedCandidateTree = ("b" * 40)
+    $expectedTagCommit = ("c" * 40)
     $manifestPath = Join-Path $testDir "candidate-handoff-manifest.json"
     New-CandidateHandoffManifest `
         -Repository "underoatz-netizen/oz-image-viewer" `
@@ -138,7 +141,10 @@ try {
         -CandidateTag "v0.1.0" `
         -CandidateDir $testDir `
         -FixedAssetNames @($f1, $f2, $f3) `
-        -ManifestPath $manifestPath
+        -ManifestPath $manifestPath `
+        -ExpectedCommitSha $expectedCandidateCommit `
+        -ExpectedTreeSha $expectedCandidateTree `
+        -TagCommitSha $expectedTagCommit
 
     Assert-Condition (Test-Path -LiteralPath $manifestPath) "Manifest was not generated"
     Pass "Manifest creation happy path completed."
@@ -163,8 +169,26 @@ try {
             $f1 = $h1
             $f2 = $h2
             $f3 = $h3
-        }
+        } `
+        -ExpectedCommitSha $expectedCandidateCommit `
+        -ExpectedTreeSha $expectedCandidateTree `
+        -ExpectedTagCommitSha $expectedTagCommit
     Pass "Inner directory validation happy path passed."
+
+    Assert-Throws {
+        Test-CandidateHandoffDirectory `
+            -CandidateDir $resolvedDir `
+            -ExpectedRepository "underoatz-netizen/oz-image-viewer" `
+            -ExpectedWorkflowSha "11d5960a326750d5838078e36cf38b85af677262" `
+            -ExpectedRunId "12345678" `
+            -ExpectedRunAttempt "1" `
+            -ExpectedCandidateReleaseId "436240766" `
+            -ExpectedCandidateTag "v0.1.0" `
+            -ExpectedHashesByName @{ $f1 = $h1; $f2 = $h2; $f3 = $h3 } `
+            -ExpectedCommitSha $expectedCandidateCommit `
+            -ExpectedTreeSha ("d" * 40) `
+            -ExpectedTagCommitSha $expectedTagCommit
+    } "Manifest expectedSourceTreeSha mismatch" "Manifest rejects mismatched independently supplied tree identity"
 
     # =========================================================================
     # Part 2: Resolve-CandidateHandoffDirectory security failure modes
@@ -436,6 +460,18 @@ try {
     Assert-Condition ($yaml -match "Run genuine standard-user lifecycle verification gate") "Workflow must include standard-user verification step"
     Assert-Condition ($yaml -match "Invoke-StandardUserLifecycle\.ps1") "Workflow must invoke Invoke-StandardUserLifecycle.ps1"
 
+    # Independently controlled source identity and pinned closure contract
+    Assert-Condition ($yaml -match "expected_candidate_commit_sha") "Workflow must define expected_candidate_commit_sha"
+    Assert-Condition ($yaml -match "expected_candidate_tree_sha") "Workflow must define expected_candidate_tree_sha"
+    Assert-Condition ($yaml -match "EXPECTED_CANDIDATE_COMMIT_SHA" -and $yaml -match "EXPECTED_CANDIDATE_TREE_SHA") "Workflow must carry expected candidate commit/tree separately from workflow SHA"
+    $validateJobYaml = $yaml.Substring($yaml.IndexOf("validate-candidate:"))
+    Assert-Condition ($validateJobYaml -match "-ExpectedCommitSha\s+\`$identity\.commitSha") "Portable validator must receive the normalized expected commit SHA"
+    Assert-Condition ($validateJobYaml -match "-ExpectedTreeSha\s+\`$identity\.treeSha") "Portable validator must receive the normalized expected tree SHA"
+    Assert-Condition ($validateJobYaml -match "-ExpectedLgplSourceSha256\s+\`$env:EXPECTED_SOURCE_SHA256") "Workflow must pass the trusted source ZIP hash to validate-portable-payload.ps1"
+    Assert-Condition ($yaml -match "New-PortableClosureManifest") "Workflow must create a pinned closure after portable validation"
+    Assert-Condition ($yaml -match "Test-LifecycleReportContract") "Workflow must enforce the exact lifecycle report contract"
+    Assert-Condition ($validateJobYaml -notmatch "GH_TOKEN|github\.token|secrets\.") "Candidate execution job must not receive a token or secret"
+
     # Hardening options
     Assert-Condition ($yaml -match "persist-credentials:\s*false") "Checkout must specify persist-credentials: false"
     Assert-Condition ($yaml -match 'refs/heads/main') "Workflow must enforce execution on refs/heads/main only"
@@ -471,6 +507,31 @@ try {
     Assert-Condition ($tempIndex -gt 0) "TEMP environment variable assignment must be present in generated bootstrap script"
     Assert-Condition ($elevationCheckIndex -gt 0) "Get-NativeTokenElevationState call must be present in generated bootstrap script"
     Assert-Condition ($tempIndex -lt $elevationCheckIndex) "TEMP/TMP must be set BEFORE any native elevation inspection/Add-Type call in child bootstrap script"
+    $closureScript = New-ChildBootstrapScriptContent `
+        -ExpectedUserSid $dummySid `
+        -InputsDir "C:\scratch\inputs" `
+        -OutputDir "C:\scratch\output" `
+        -InstallerFileName "pikaview-0.1.1-win-x64-installer.exe" `
+        -FixtureFileName "bench_64x48.webp" `
+        -ChildReportFileName "child-lifecycle-report.json" `
+        -ChildProofFileName "child-identity-proof.json" `
+        -ExpectedVersion "0.1.1" `
+        -UpgradeFromInstallerFileName "ozviewer-0.1.0-win-x64-installer.exe" `
+        -PortableClosureFileName "portable-closure.json" `
+        -ExpectedPortableClosureSha256 ("e" * 64) `
+        -ExpectedCandidateCommitSha ("a" * 40) `
+        -ExpectedCandidateTreeSha ("b" * 40) `
+        -ExpectedPortableSha256 ("f" * 64) `
+        -ExpectedPackageName "pikaview"
+    $closureTokens = $null
+    $closureErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($closureScript, [ref]$closureTokens, [ref]$closureErrors)
+    Assert-Condition ($closureErrors.Count -eq 0) "Generated closure bootstrap script has $($closureErrors.Count) syntax error(s): $(($closureErrors | ForEach-Object { $_.Message }) -join '; ')"
+    Assert-Condition ($closureScript.Contains("-PortableClosurePath")) "Generated bootstrap must pass the pinned closure path"
+    Assert-Condition ($closureScript.Contains("portable-closure.json")) "Generated bootstrap must reference the pinned closure filename"
+    Assert-Condition ($closureScript.Contains("-UpgradeFromInstallerPath")) "Generated bootstrap must pass the historical upgrade installer when provided"
+    Pass "Pure helper: New-ChildBootstrapScriptContent forwards pinned closure and upgrade inputs in valid PowerShell syntax."
+
     Pass "Pure helper: New-ChildBootstrapScriptContent generates valid, error-free PowerShell syntax with genuine HKCU/elevation proofs and strictly ordered TEMP/TMP initialization."
 
     # 7.1.1: Test fail-closed behavior when user temp directory is unwritable
@@ -487,9 +548,9 @@ try {
 
     # 7.2: Test Child Report Integrity Validator
     # Build valid report mock from actual Get-StandardLifecycleRequiredCheckNames contract
-    $req28Names = Get-StandardLifecycleRequiredCheckNames
+    $reqBaseNames = Get-StandardLifecycleRequiredCheckNames
     $validChecks = @()
-    foreach ($cn in $req28Names) {
+    foreach ($cn in $reqBaseNames) {
         $validChecks += [ordered]@{ name = $cn; status = "pass"; details = "ok" }
     }
 
@@ -523,7 +584,7 @@ try {
         -ControllerSid "S-1-5-21-9999999999-9999999999-9999999999-1001" `
         -ExpectedProfileImagePath "C:\Users\testuser"
     Assert-Condition ($valPass -eq $true) "Test-ChildReportIntegrity failed valid report"
-    Pass "Pure helper: Test-ChildReportIntegrity accepts complete 28-check standard user report with mandatory proof."
+    Pass "Pure helper: Test-ChildReportIntegrity accepts complete base standard-user report with mandatory proof."
 
     # 7.2.1: Rejects report when proof is null/missing
     Assert-Throws {
@@ -586,14 +647,15 @@ try {
         isElevated = $false
         elevationCheck = "standard-user"
         installer = (Join-Path $testDir $f1)
-        checks = @($validChecks | Select-Object -First 27) # Missing 1 check
+        checks = @($validChecks | Select-Object -First ($validChecks.Count - 1))
     }
     Assert-Throws {
         Test-ChildReportIntegrity -ReportData $incompleteReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
     } "Child report check count mismatch" "Child report validator rejects incomplete checks"
 
-    # 7.2.10: Rejects report with duplicate check
-    $dupChecks = @($validChecks | Select-Object -First 27) + @($validChecks[0])
+    # 7.2.10: Rejects report with duplicate check (same length, last replaced by first)
+    $dupChecks = @($validChecks)
+    $dupChecks[$dupChecks.Count - 1] = $dupChecks[0]
     $dupReport = [ordered]@{
         summary = "passed"
         isElevated = $false
@@ -630,19 +692,56 @@ try {
         Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha "0000000000000000000000000000000000000000000000000000000000000000" -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
     } "does not match expected" "Child report validator rejects mismatched installer hash"
 
+    # 7.2.12b: Bind the child report to the same pinned closure and source identity
+    $expectedClosureSha = ("e" * 64)
+    $expectedPayloadSha = ("f" * 64)
+    $identityReport = [ordered]@{
+        summary = "passed"
+        isElevated = $false
+        elevationCheck = "standard-user"
+        installer = (Join-Path $testDir $f1)
+        portableClosureSha256 = $expectedClosureSha
+        expectedCandidateCommitSha = $expectedCandidateCommit
+        expectedCandidateTreeSha = $expectedCandidateTree
+        portablePayloadSha256 = $expectedPayloadSha
+        checks = $validChecks
+    }
+    $identityPass = Test-ChildReportIntegrity `
+        -ReportData $identityReport `
+        -ExpectedUserSid $dummySid `
+        -ExpectedInstallerSha $h1 `
+        -ProofData $validProof `
+        -ExpectedProfileImagePath "C:\Users\testuser" `
+        -ExpectedPortableClosureSha256 $expectedClosureSha `
+        -ExpectedCandidateCommitSha $expectedCandidateCommit `
+        -ExpectedCandidateTreeSha $expectedCandidateTree `
+        -ExpectedPortableSha256 $expectedPayloadSha
+    Assert-Condition ($identityPass -eq $true) "Child report identity binding rejected matching values"
+    Assert-Throws {
+        Test-ChildReportIntegrity `
+            -ReportData $identityReport `
+            -ExpectedUserSid $dummySid `
+            -ExpectedInstallerSha $h1 `
+            -ProofData $validProof `
+            -ExpectedProfileImagePath "C:\Users\testuser" `
+            -ExpectedPortableClosureSha256 ("0" * 64) `
+            -ExpectedCandidateCommitSha $expectedCandidateCommit `
+            -ExpectedCandidateTreeSha $expectedCandidateTree `
+            -ExpectedPortableSha256 $expectedPayloadSha
+    } "portableClosureSha256 mismatch" "Child report validator rejects a mismatched pinned closure hash"
+
     # 7.2.13: Test with REAL previous admin CI report from run 42193452936
     $realAdminReportPath = "C:\Users\USER\AppData\Local\Temp\opencode\ci-lifecycle-report-42193452936\candidate-release-assets-42193452936-1\installer-lifecycle-report.json"
     if (Test-Path -LiteralPath $realAdminReportPath) {
         $realReport = Get-Content -LiteralPath $realAdminReportPath -Raw | ConvertFrom-Json
         $realReport.installer = (Join-Path $testDir $f1)
 
-        $reqNames = Get-StandardLifecycleRequiredCheckNames
-        Assert-Condition ($realReport.checks.Count -eq $reqNames.Count) "Real admin report should have exactly $($reqNames.Count) checks"
+        Assert-Condition (@($realReport.checks).Count -gt 0) "Real admin report should contain checks"
 
         Assert-Throws {
             Test-ChildReportIntegrity -ReportData $realReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser"
         } "Child report reports isElevated is true" "Real admin CI report fails standard-user validation solely due to elevation"
-        Pass "Real admin CI report (run 42193452936) verified against 28-check contract; correctly fails standard-user gate solely due to admin elevation."
+        Pass "Real admin CI report (run 42193452936) correctly fails the standard-user gate solely due to admin elevation."
     }
 
     Pass "Pure helper: All Test-ChildReportIntegrity fail-closed rejection tests passed."
@@ -703,7 +802,7 @@ function Verify-Hex64([string]$filename, [string]$hash) {
         $blocks.Add($currentBlock.ToString())
     }
 
-    Assert-Condition ($blocks.Count -eq 10) "Expected 10 run: | blocks in workflow, found $($blocks.Count)"
+    Assert-Condition ($blocks.Count -eq 11) "Expected 11 run: | blocks in workflow, found $($blocks.Count)"
     $blockIdx = 0
     foreach ($b in $blocks) {
         $blockIdx++
@@ -1170,6 +1269,124 @@ Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$false -TestScratchRo
     Assert-Condition ($descArgValue.Length -le 48) "Controller Description literal '$descArgValue' length ($($descArgValue.Length)) must be <= 48 chars"
     Assert-Condition ($descArgValue -eq "OZ release test") "Controller Description literal expected 'OZ release test', got '$descArgValue'"
     Pass "AST constraint verification: Controller New-LocalUser Description is '$descArgValue' (length $($descArgValue.Length) <= 48)."
+
+    # 9. Version-aware Release Asset Spec & SHA256SUMS Validation (v0.1.1 vs v0.1.0)
+    $spec011 = Resolve-ReleaseAssetSpec -CandidateTag "v0.1.1"
+    Assert-Condition ($spec011.Version -eq "0.1.1" -and $spec011.PackageFamily -eq "pikaview") "v0.1.1 spec must use pikaview"
+    Assert-Condition ($spec011.ChecksumFileName -eq "SHA256SUMS") "v0.1.1 spec must require SHA256SUMS"
+    Assert-Condition ($spec011.ExpectedAssetNames.Count -eq 4) "v0.1.1 spec must expect 4 assets"
+    Pass "Resolve-ReleaseAssetSpec: v0.1.1 resolves pikaview + SHA256SUMS."
+
+    $spec010 = $null
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.0" | Out-Null } "Unsupported CandidateTag version" "Rejects v0.1.0 as candidate tag (upgrade base only)"
+    Pass "Resolve-ReleaseAssetSpec: v0.1.0 rejected as candidate tag (upgrade base only)."
+
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "0.1.1" | Out-Null } "Invalid CandidateTag syntax" "Rejects tag without v prefix"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.2" | Out-Null } "Unsupported CandidateTag version" "Rejects unsupported version"
+
+    $sumsWork = Join-Path $WorkDir "sha256sums-tests"
+    New-Item -ItemType Directory -Path $sumsWork -Force | Out-Null
+    $expected011Hashes = @{
+        $spec011.InstallerName = ("a" * 64)
+        $spec011.PortableName  = ("b" * 64)
+        $spec011.SourceName    = ("c" * 64)
+    }
+
+    $validSums = Join-Path $sumsWork "SHA256SUMS.valid"
+    @(
+        "$('a' * 64)  $($spec011.InstallerName)"
+        "$('b' * 64)  $($spec011.PortableName)"
+        "$('c' * 64)  $($spec011.SourceName)"
+    ) | Set-Content -LiteralPath $validSums -Encoding UTF8
+    Test-Sha256SumsFile -Sha256SumsPath $validSums -ExpectedHashesByName $expected011Hashes
+    Pass "Test-Sha256SumsFile: Accepts valid 3-entry v0.1.1 SHA256SUMS."
+
+    $dupSums = Join-Path $sumsWork "SHA256SUMS.dup"
+    @(
+        "$('a' * 64)  $($spec011.InstallerName)"
+        "$('a' * 64)  $($spec011.InstallerName)"
+        "$('c' * 64)  $($spec011.SourceName)"
+    ) | Set-Content -LiteralPath $dupSums -Encoding UTF8
+    Assert-Throws { Test-Sha256SumsFile -Sha256SumsPath $dupSums -ExpectedHashesByName $expected011Hashes } "Duplicate entry in SHA256SUMS" "Rejects duplicate entry"
+
+    $travSums = Join-Path $sumsWork "SHA256SUMS.trav"
+    @(
+        "$('a' * 64)  ../$($spec011.InstallerName)"
+        "$('b' * 64)  $($spec011.PortableName)"
+        "$('c' * 64)  $($spec011.SourceName)"
+    ) | Set-Content -LiteralPath $travSums -Encoding UTF8
+    Assert-Throws { Test-Sha256SumsFile -Sha256SumsPath $travSums -ExpectedHashesByName $expected011Hashes } "Malformed line in SHA256SUMS" "Rejects path traversal in SHA256SUMS"
+
+    $mismatchSums = Join-Path $sumsWork "SHA256SUMS.mismatch"
+    @(
+        "$('f' * 64)  $($spec011.InstallerName)"
+        "$('b' * 64)  $($spec011.PortableName)"
+        "$('c' * 64)  $($spec011.SourceName)"
+    ) | Set-Content -LiteralPath $mismatchSums -Encoding UTF8
+    Assert-Throws { Test-Sha256SumsFile -Sha256SumsPath $mismatchSums -ExpectedHashesByName $expected011Hashes } "SHA256SUMS hash mismatch" "Rejects hash mismatch in SHA256SUMS"
+    Pass "Test-Sha256SumsFile: Rejects duplicates, path traversal, and hash mismatches."
+
+    # 10. AST & Contract Verification: no undefined Invoke-BoundedProcess, versioned DisplayName/RegisteredApplications
+    $lifecycleScriptPath = Join-Path $PSScriptRoot "test-installer-lifecycle.ps1"
+    $lifecycleAst = [System.Management.Automation.Language.Parser]::ParseFile($lifecycleScriptPath, [ref]$null, [ref]$null)
+    $cmdCalls = @($lifecycleAst.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+    Assert-Condition ($cmdCalls -notcontains "Invoke-BoundedProcess") "test-installer-lifecycle.ps1 must not call undefined Invoke-BoundedProcess"
+    Assert-Condition ($cmdCalls -contains "Invoke-ProcessSafe") "test-installer-lifecycle.ps1 must call Invoke-ProcessSafe"
+    $lifecycleRaw = Get-Content -LiteralPath $lifecycleScriptPath -Raw
+    Assert-Condition ($lifecycleRaw -match 'PikaView \$ExpectedVersion') "test-installer-lifecycle.ps1 must check versioned DisplayName 'PikaView `$ExpectedVersion'"
+    Assert-Condition ($lifecycleRaw -match '"PikaView"') "test-installer-lifecycle.ps1 must check RegisteredApplications\PikaView for 0.1.1"
+    Pass "AST & Contract Verification: Invoke-ProcessSafe wired, no Invoke-BoundedProcess, versioned DisplayName/RegisteredApplications verified."
+
+    # 11. Version-aware Test-ChildReportIntegrity (base + Stage 5 upgrade checks)
+    Assert-Condition ($lifecycleRaw -match 'WScript\.Shell' -and $lifecycleRaw -match 'CreateShortcut' -and $lifecycleRaw -match 'PikaView\.lnk') "test-installer-lifecycle.ps1 must use WScript.Shell CreateShortcut on PikaView.lnk"
+    Assert-Condition ($lifecycleRaw -notmatch 'WriteAllText.*\.lnk') "test-installer-lifecycle.ps1 must not write plain-text .lnk files"
+    $wfPathCheck = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) ".github\workflows\validate-installer.yml"
+    $wfRawCheck = Get-Content -LiteralPath $wfPathCheck -Raw
+    Assert-Condition ($wfRawCheck -match 'expected_checksums_sha256' -and $wfRawCheck -match 'EXPECTED_CHECKSUMS_SHA256') "validate-installer.yml must bind expected_checksums_sha256"
+    Assert-Condition ($wfRawCheck -match "Get-StandardLifecycleRequiredCheckNames") "Workflow report parser must use the shared required check list"
+    foreach ($requiredCheckName in @("runtime_closure_manifest", "stage1_runtime_closure", "stage1_install_location", "stage3_command_target", "stage5_runtime_closure", "stage5_install_location", "stage5_command_target", "stage3_desktop_shortcut_foreign_preserved", "stage3_desktop_shortcut_optin", "stage3_desktop_shortcut_reinstall_preserved", "stage4_desktop_shortcut_removed", "stage4_desktop_shortcut_user_modified_preserved")) {
+        Assert-Condition ($lifecycleRaw -match [regex]::Escape($requiredCheckName)) "test-installer-lifecycle.ps1 must record '$requiredCheckName'"
+        Assert-Condition ((Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks) -contains $requiredCheckName) "Required check list must include '$requiredCheckName'"
+    }
+
+    $reqUpgradeNames = Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks
+    Assert-Condition ($reqUpgradeNames.Count -eq 48) "Expected 48 required checks for v0.1.1 upgrade, got $($reqUpgradeNames.Count)"
+    $valid36Checks = @($reqUpgradeNames | ForEach-Object { [PSCustomObject]@{ name = $_; status = "pass"; details = "ok" } })
+    $valid36Report = [PSCustomObject]@{
+        suite          = "installer-lifecycle"
+        summary        = "passed"
+        isElevated     = $false
+        user           = "testuser"
+        installerHash  = $h1
+        elevationCheck = "standard-user"
+        installer      = $validReport.installer
+        checks         = $valid36Checks
+    }
+    $val36Pass = Test-ChildReportIntegrity -ReportData $valid36Report -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser" -RequireUpgradeChecks
+    Assert-Condition ($val36Pass -eq $true) "Test-ChildReportIntegrity -RequireUpgradeChecks failed valid upgrade report"
+    Pass "Test-ChildReportIntegrity -RequireUpgradeChecks: Accepts complete v0.1.1 upgrade report."
+
+    # Reject base-only report when -RequireUpgradeChecks is set (missing Stage 5)
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $validReport -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser" -RequireUpgradeChecks
+    } "Child report check count mismatch" "Rejects base-only report when upgrade checks are required"
+
+    # Reject skipped check in upgrade report
+    $skipped36Checks = @($valid36Checks | ForEach-Object {
+        if ($_.name -eq "stage5_v011_upgrade") { [PSCustomObject]@{ name = $_.name; status = "skipped"; details = "skip" } } else { $_ }
+    })
+    $skipped36Report = [PSCustomObject]@{ suite = "installer-lifecycle"; summary = "passed"; isElevated = $false; user = "testuser"; installerHash = $h1; elevationCheck = "standard-user"; installer = $validReport.installer; checks = $skipped36Checks }
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $skipped36Report -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser" -RequireUpgradeChecks
+    } "has non-passing status: 'skipped'" "Rejects skipped Stage 5 check"
+
+    # Reject unrelated extra check in upgrade report
+    $extra37Checks = $valid36Checks + @([PSCustomObject]@{ name = "unrelated_extra_check"; status = "pass"; details = "extra" })
+    $extra37Report = [PSCustomObject]@{ suite = "installer-lifecycle"; summary = "passed"; isElevated = $false; user = "testuser"; installerHash = $h1; elevationCheck = "standard-user"; installer = $validReport.installer; checks = $extra37Checks }
+    Assert-Throws {
+        Test-ChildReportIntegrity -ReportData $extra37Report -ExpectedUserSid $dummySid -ExpectedInstallerSha $h1 -ProofData $validProof -ExpectedProfileImagePath "C:\Users\testuser" -RequireUpgradeChecks
+    } "Child report check count mismatch" "Rejects unrelated extra check in upgrade report"
+    Pass "Test-ChildReportIntegrity -RequireUpgradeChecks: Rejects missing, skipped, and unrelated extra checks."
 
     Write-Host "`nALL CANDIDATE HANDOFF AND WORKFLOW SECURITY TESTS PASSED!" -ForegroundColor Green
     exit 0

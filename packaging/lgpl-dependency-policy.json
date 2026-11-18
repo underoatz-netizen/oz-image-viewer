@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "targetTriplet": "oz-x64-windows-static-md",
+  "tripletFile": "triplets/oz-x64-windows-static-md.cmake",
+  "dependencies": [
+    {
+      "port": "libheif",
+      "version": "1.23.2",
+      "portVersion": 0,
+      "stagedDll": "heif.dll",
+      "installedDllRelativePath": "bin/heif.dll",
+      "archiveName": "strukturag-libheif-v1.23.2.tar.gz",
+      "archiveSha256": "1405ed070421459b569ff49deab109b7f1a30a447e72a9b20a4154f774634a44",
+      "archiveSha512": "d34ccd40d7f7cc48ff8ceddafd8f7c7004ab0df2a657237fcc715c4bcc453a41946d7db542d32b781875868ee116c451b4b63daaf073530245ec7b117ae60e27",
+      "upstreamRepository": "strukturag/libheif"
+    },
+    {
+      "port": "libde265",
+      "version": "1.1.1",
+      "portVersion": 0,
+      "stagedDll": "libde265.dll",
+      "installedDllRelativePath": "bin/libde265.dll",
+      "archiveName": "strukturag-libde265-v1.1.1.tar.gz",
+      "archiveSha256": "5b4fac677018e6074196e8f9889f3e4a5310e46afbf22a893f620d4e24d3510e",
+      "archiveSha512": "fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8",
+      "upstreamRepository": "strukturag/libde265"
+    }
+  ]
+}

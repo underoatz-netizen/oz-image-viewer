@@ -133,6 +133,34 @@ target_include_directories(ozviewer_print_job_tests PRIVATE
 target_compile_features(ozviewer_print_job_tests PRIVATE cxx_std_23)
 add_test(NAME ozviewer_print_job_tests COMMAND ozviewer_print_job_tests)
 
+# Stage 9.8 print controller lifecycle & DC release ordering tests (dependency-free;
+# builds in all presets including no-vcpkg and Editing-OFF).
+add_executable(ozviewer_print_controller_tests
+               print_controller_tests.cpp
+               ${CMAKE_SOURCE_DIR}/src/viewer/print_controller.cpp
+               ${CMAKE_SOURCE_DIR}/src/viewer/source_identity.cpp
+               ${CMAKE_SOURCE_DIR}/src/viewer/viewer_strings.cpp)
+target_link_libraries(ozviewer_print_controller_tests PRIVATE ozviewer_core)
+target_include_directories(ozviewer_print_controller_tests PRIVATE
+                           ${CMAKE_SOURCE_DIR}/src/viewer
+                           ${CMAKE_SOURCE_DIR}/src/viewer_core/include)
+target_compile_features(ozviewer_print_controller_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_print_controller_tests COMMAND ozviewer_print_controller_tests)
+set_tests_properties(ozviewer_print_controller_tests PROPERTIES TIMEOUT 30)
+
+# Stage 9.8 print dialog STA lifecycle, handle cleanup & reentrancy guard tests
+add_executable(ozviewer_print_dialog_tests
+               print_dialog_tests.cpp
+               ${CMAKE_SOURCE_DIR}/src/viewer/print_dialog.cpp
+               ${CMAKE_SOURCE_DIR}/src/viewer/ui_command_state.cpp)
+target_link_libraries(ozviewer_print_dialog_tests PRIVATE ozviewer_core)
+target_include_directories(ozviewer_print_dialog_tests PRIVATE
+                           ${CMAKE_SOURCE_DIR}/src/viewer
+                           ${CMAKE_SOURCE_DIR}/src/viewer_core/include)
+target_compile_features(ozviewer_print_dialog_tests PRIVATE cxx_std_23)
+add_test(NAME ozviewer_print_dialog_tests COMMAND ozviewer_print_dialog_tests)
+set_tests_properties(ozviewer_print_dialog_tests PROPERTIES TIMEOUT 30)
+
 # Stage 9.8 print isolation-scan: the single-flight print controller exists
 # only behind the explicit interactive Print path (zero printer/dialog/GDI/
 # worker/source-acquisition work in benchmark and navigation-benchmark runs,
@@ -471,17 +499,17 @@ endif()
 
 # Stage 9.9 portable packaging boundary: focused script tests (staging,
 # deterministic ZIP, fail-closed on missing/ambiguous dependencies, exclusion
-# of build artifacts) and an isolated smoke run of the staged package with a
-# scrubbed PATH. Both skip (77) when the payload/desktop is unavailable; the
-# smoke is a host test, not a clean-machine validation.
-if(TARGET ozviewer)
-    add_test(NAME package_portable_script_tests
-             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-                     -File ${CMAKE_SOURCE_DIR}/packaging/test-portable-script.ps1
-                     -PayloadDir $<TARGET_FILE_DIR:ozviewer>
-                     -WorkDir ${CMAKE_BINARY_DIR}/package-portable-script-tests)
-    set_tests_properties(package_portable_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+# of build artifacts) against an explicitly synthetic contract-test fixture
+# repository and payload. The script tests need no built target. The smoke is an
+# isolated host test, not a clean-machine validation; it skips (77) when the
+# desktop/payload is unavailable and is registered only when ozviewer exists.
+add_test(NAME package_portable_script_tests
+         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                 -File ${CMAKE_SOURCE_DIR}/packaging/test-portable-script.ps1
+                 -WorkDir ${CMAKE_BINARY_DIR}/package-portable-script-tests)
+set_tests_properties(package_portable_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 
+if(TARGET ozviewer)
     add_test(NAME package_portable_smoke
              COMMAND powershell -NoProfile -ExecutionPolicy Bypass
                      -File ${CMAKE_SOURCE_DIR}/packaging/smoke-portable.ps1
@@ -497,14 +525,36 @@ endif()
 # manifest, asserts the Inno policy statically (stable AppId, per-user lowest,
 # x64, opt-in unchecked association task, quoted commands, ownership/cleanup,
 # prohibited keys), and mock-validates the collision/upgrade/uninstall policy.
-# It never runs a real installer or touches the host registry. Skips (77) when
-# the payload is unavailable; a compile is attempted only when Inno Setup is
-# locally installed.
-if(TARGET ozviewer)
-    add_test(NAME installer_script_tests
-             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-                     -File ${CMAKE_SOURCE_DIR}/packaging/test-installer-script.ps1
-                     -PayloadDir $<TARGET_FILE_DIR:ozviewer>
-                     -WorkDir ${CMAKE_BINARY_DIR}/installer-script-tests)
-    set_tests_properties(installer_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
-endif()
+# It never runs a real installer or touches the host registry. Its payload and
+# provenance are explicitly synthetic contract-test fixtures; a compile is
+# attempted only when Inno Setup is locally installed.
+add_test(NAME installer_script_tests
+         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                 -File ${CMAKE_SOURCE_DIR}/packaging/test-installer-script.ps1
+                 -WorkDir ${CMAKE_BINARY_DIR}/installer-script-tests)
+set_tests_properties(installer_script_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+
+# Controlled Release-build wrapper preconditions: cache source binding, Git
+# error reporting, preexisting/ambiguous target executables, and a valid mock
+# build receipt. Synthetic mock evidence only; no installer or real build.
+add_test(NAME release_build_wrapper_tests
+         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                 -File ${CMAKE_SOURCE_DIR}/packaging/test-release-build-wrapper.ps1
+                 -WorkDir ${CMAKE_BINARY_DIR}/release-build-wrapper-tests)
+set_tests_properties(release_build_wrapper_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+# Stage 10.6+ v0.1.1 release envelope and package provenance boundary tests
+add_test(NAME envelope_provenance_tests
+         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                 -File ${CMAKE_SOURCE_DIR}/packaging/test-envelope-provenance.ps1
+                 -ScratchDir ${CMAKE_BINARY_DIR}/envelope-provenance-tests)
+set_tests_properties(envelope_provenance_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+# Non-installing dependency provenance binding tests: effective vcpkg toolchain,
+# pinned/overlay recipes, installed outputs, staged DLL hashes, and source ZIP
+# archives. Every fixture is explicitly synthetic; the test never silently skips.
+add_test(NAME dependency_provenance_tests
+         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                 -File ${CMAKE_SOURCE_DIR}/packaging/test-dependency-provenance.ps1
+                 -ScratchDir ${CMAKE_BINARY_DIR}/dependency-provenance-tests)
+set_tests_properties(dependency_provenance_tests PROPERTIES TIMEOUT 600)

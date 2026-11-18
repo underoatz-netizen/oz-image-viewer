@@ -37,26 +37,32 @@ void test_promptable_set() {
 }
 
 void test_rejection_text_explicit() {
+    const std::wstring expected_title = L"PikaView";
     for (auto status : {drop_classify_status::invalid_entry, drop_classify_status::mixed,
                         drop_classify_status::multiple_folders,
                         drop_classify_status::overflow}) {
         const auto text = describe_drop_rejection(status);
+        CHECK(text.title != nullptr && std::wstring(text.title) == expected_title);
         CHECK(text.headline != nullptr && text.headline[0] != L'\0');
         CHECK(text.detail != nullptr && text.detail[0] != L'\0');
     }
     // Non-promptable outcomes carry no prompt.
     for (auto status : {drop_classify_status::ok, drop_classify_status::empty}) {
         const auto text = describe_drop_rejection(status);
+        CHECK(text.title != nullptr && std::wstring(text.title) == expected_title);
         CHECK(text.headline != nullptr && text.headline[0] == L'\0');
         CHECK(text.detail == nullptr);
     }
 }
 
 void test_no_supported_images_text() {
+    const std::wstring expected_title = L"PikaView";
     const auto files = describe_no_supported_images(false);
+    CHECK(files.title != nullptr && std::wstring(files.title) == expected_title);
     CHECK(files.headline != nullptr && files.headline[0] != L'\0');
     CHECK(files.detail != nullptr);
     const auto folder = describe_no_supported_images(true);
+    CHECK(folder.title != nullptr && std::wstring(folder.title) == expected_title);
     CHECK(folder.headline != nullptr && folder.headline[0] != L'\0');
     CHECK(folder.detail != nullptr);
     // Folder shortfall (empty folder) reports distinctly from file shortfall.
@@ -67,6 +73,7 @@ void test_no_supported_images_text() {
 // explicit and distinct from every classifier rejection and shortfall text.
 void test_drop_overload_text() {
     const auto overload = describe_drop_overload();
+    CHECK(overload.title != nullptr && std::wstring(overload.title) == L"PikaView");
     CHECK(overload.headline != nullptr && overload.headline[0] != L'\0');
     CHECK(overload.detail != nullptr && overload.detail[0] != L'\0');
     for (auto status : {drop_classify_status::invalid_entry, drop_classify_status::mixed,

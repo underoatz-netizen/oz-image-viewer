@@ -15,14 +15,17 @@
          fails closed immediately if preexisting installation or registry keys exist
          WITHOUT deleting or modifying any preexisting data.
     2. Default installation (tasks unchecked, default associations opt-in NOT selected).
-       - Runs silent install: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
-       - Asserts installation into %LOCALAPPDATA%\Programs\OZ Image Viewer with exit 0.
-       - Asserts presence of entrypoint (ozviewer.exe), runtime DLLs (heif.dll, libde265.dll),
-         uninstaller (unins000.exe), licenses and notices.
-       - Asserts absence of dev/debug artifacts (*.pdb, *.lib, *.obj, *.ilk).
-       - Asserts that default install DID NOT write ProgID or Capabilities to HKCU\Software\Classes
-         or HKCU\Software\RegisteredApplications.
-       - Asserts that HKLM application uninstall key was NOT touched.
+        - Runs silent install: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+        - Asserts installation into %LOCALAPPDATA%\Programs\OZ Image Viewer with exit 0.
+        - Asserts presence of entrypoint (ozviewer.exe), runtime DLLs (heif.dll, libde265.dll),
+          uninstaller (unins000.exe), licenses and notices.
+        - Asserts every installed runtime file matches the runner-validated portable closure
+          digests (not merely file presence), and that HKCU Uninstall\\InstallLocation points
+          at the actual install directory.
+        - Asserts absence of dev/debug artifacts (*.pdb, *.lib, *.obj, *.ilk).
+        - Asserts that default install DID NOT write ProgID or Capabilities to HKCU\Software\Classes
+          or HKCU\Software\RegisteredApplications.
+        - Asserts that HKLM application uninstall key was NOT touched.
     3. Benchmark / FirstPresent application launch smoke.
        - Executes installed ozviewer.exe with --benchmark against a test image fixture.
        - Uses a bounded timeout (max 30s) and strictly checks process exit code 0.
@@ -35,11 +38,13 @@
          it is preserved without overwriting existing associations.
        - Runs installer with /TASKS="associate" over existing install.
        - Verifies exit code 0 and successful reconciliation.
-       - Verifies HKCU\Software\Classes\OZImageViewer.Image ProgID and command keys.
-       - Verifies HKCU\Software\OZImageViewer\Capabilities\FileAssociations entries.
-       - Verifies HKCU\Software\OZImageViewer\Install marker with matching AppId.
-       - Verifies NO user choice or default handler hijack occurred (UserChoice untouched).
-       - Verifies foreign default handler on supported extension was preserved intact.
+        - Verifies HKCU\Software\Classes\OZImageViewer.Image ProgID and command keys.
+        - Verifies the actual shell-open command target is the installed ozviewer.exe.
+        - Verifies HKCU\Software\OZImageViewer\Capabilities\FileAssociations entries.
+        - Verifies HKCU\Software\OZImageViewer\Install marker with matching AppId.
+        - Verifies NO user choice or default handler hijack occurred (all 14 extensions,
+          full value names/kinds/values).
+        - Verifies foreign default handler on supported extension was preserved intact.
     5. Clean uninstallation & cleanup.
        - Runs unins000.exe with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART within bounded timeout.
        - Verifies complete removal of installed binaries, DLLs, and directory.
@@ -62,6 +67,29 @@
   Optional override for the target installation directory (primarily for isolated unit testing).
   Defaults to "$env:LOCALAPPDATA\Programs\OZ Image Viewer".
 
+.PARAMETER UpgradeFromInstallerPath
+  Path to the pinned historical v0.1.0 installer used for the upgrade scenario.
+
+.PARAMETER PortableClosurePath
+  Path to the runner-validated, hash-pinned portable closure manifest. The installed
+  runtime after fresh install and after the v0.1.0 -> v0.1.1 upgrade must match every
+  declared file digest.
+
+.PARAMETER PortableClosureSha256
+  Expected SHA-256 of PortableClosurePath. Required before any install is attempted.
+
+.PARAMETER ExpectedCandidateCommitSha
+  Independently supplied expected candidate source commit (40 hex). Never read from provenance.
+
+.PARAMETER ExpectedCandidateTreeSha
+  Independently supplied expected candidate source tree (40 hex). Never read from provenance.
+
+.PARAMETER ExpectedPortableSha256
+  Expected portable ZIP SHA-256 recorded in the validated closure.
+
+.PARAMETER ExpectedPackageName
+  Expected package name (for example pikaview) recorded in the validated closure.
+
 .PARAMETER RequireStandardUser
   Strict mode: Asserts process token is non-elevated and not in Administrator role.
   Fails closed before executing or modifying anything if elevated.
@@ -76,6 +104,13 @@ param(
     [string]$FixturePath = "",
     [string]$ReportPath = "",
     [string]$OverrideInstallDir = "",
+    [string]$UpgradeFromInstallerPath = "",
+    [string]$PortableClosurePath = "",
+    [string]$PortableClosureSha256 = "",
+    [string]$ExpectedCandidateCommitSha = "",
+    [string]$ExpectedCandidateTreeSha = "",
+    [string]$ExpectedPortableSha256 = "",
+    [string]$ExpectedPackageName = "",
     [switch]$RequireStandardUser,
     [switch]$AllowDisposableExecution
 )
@@ -96,6 +131,12 @@ if (-not (Test-Path -LiteralPath $standardUserHelpers -PathType Leaf)) {
     throw "Required helper StandardUserHelpers.ps1 not found in $ScriptDir"
 }
 . $standardUserHelpers
+
+$handoffHelpers = Join-Path $ScriptDir "candidate-handoff.ps1"
+if (-not (Test-Path -LiteralPath $handoffHelpers -PathType Leaf)) {
+    throw "Required helper candidate-handoff.ps1 not found in $ScriptDir"
+}
+. $handoffHelpers
 
 # Safe Registry Helpers that never throw in StrictMode and distinguish null from absent
 function Get-RegValueSafe {
@@ -132,6 +173,16 @@ function Get-UserChoiceSnapshot {
     }
 }
 
+function Test-RegistryValueExactlyEqual {
+    param($Before, $After)
+    if ($null -eq $Before -and $null -eq $After) { return $true }
+    if ($null -eq $Before -or $null -eq $After) { return $false }
+    if ($Before -is [byte[]] -or $After -is [byte[]]) {
+        return (([byte[]]$Before) -join ',') -eq (([byte[]]$After) -join ',')
+    }
+    return [object]::Equals($Before, $After)
+}
+
 function Compare-UserChoiceSnapshot {
     param(
         $Before,
@@ -146,10 +197,29 @@ function Compare-UserChoiceSnapshot {
     for ($i = 0; $i -lt $bKeys.Count; $i++) {
         if ($bKeys[$i] -ne $aKeys[$i]) { return $false }
         $k = $bKeys[$i]
-        if ($Before[$k].Kind -ne $After[$k].Kind) { return $false }
-        if ($Before[$k].Value -ne $After[$k].Value) { return $false }
+        if ([string]$Before[$k].Kind -ne [string]$After[$k].Kind) { return $false }
+        if (-not (Test-RegistryValueExactlyEqual -Before $Before[$k].Value -After $After[$k].Value)) { return $false }
     }
     return $true
+}
+
+function Compare-UserChoiceSnapshotAll {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Before,
+        [Parameter(Mandatory = $true)][hashtable]$After,
+        [Parameter(Mandatory = $true)][string[]]$Extensions
+    )
+    $mismatches = [System.Collections.Generic.List[string]]::new()
+    foreach ($ext in $Extensions) {
+        $b = $null
+        $a = $null
+        if ($Before.ContainsKey($ext)) { $b = $Before[$ext] }
+        if ($After.ContainsKey($ext)) { $a = $After[$ext] }
+        if (-not (Compare-UserChoiceSnapshot -Before $b -After $a)) {
+            $mismatches.Add($ext)
+        }
+    }
+    return $mismatches.ToArray()
 }
 
 $script:Report = [ordered]@{
@@ -157,6 +227,12 @@ $script:Report = [ordered]@{
     timestamp = [System.DateTime]::UtcNow.ToString("o")
     installer = $InstallerPath
     expectedVersion = $ExpectedVersion
+    expectedPackageName = $ExpectedPackageName
+    portableClosurePath = $PortableClosurePath
+    portableClosureSha256 = $PortableClosureSha256
+    portablePayloadSha256 = $ExpectedPortableSha256
+    expectedCandidateCommitSha = $ExpectedCandidateCommitSha
+    expectedCandidateTreeSha = $ExpectedCandidateTreeSha
     isElevated = $false
     elevationCheck = "unknown"
     checks = @()
@@ -276,6 +352,9 @@ if (-not [string]::IsNullOrWhiteSpace($OverrideInstallDir)) {
 }
 $exePath = Join-Path $installDir "ozviewer.exe"
 $uninstallerPath = Join-Path $installDir "unins000.exe"
+$desktopDir = [Environment]::GetFolderPath("Desktop")
+$desktopShortcutName = if ($ExpectedVersion -eq "0.1.0") { "OZ Image Viewer.lnk" } else { "PikaView.lnk" }
+$desktopShortcutPath = Join-Path $desktopDir $desktopShortcutName
 
 $appId = "{7E3B1C9A-4D2F-4B6E-9C31-0A5F2D8B47E1}"
 $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1"
@@ -310,6 +389,25 @@ foreach ($ext in $declaredExtensions) {
     $initialClassesDefaults[$ext] = Get-RegValueSafe -SubKeyPath "Software\Classes\$ext" -ValueName ""
 }
 
+# --- Guard 5: Require the runner-validated, hash-pinned portable closure ---
+$portableClosure = $null
+if ([string]::IsNullOrWhiteSpace($PortableClosurePath) -or [string]::IsNullOrWhiteSpace($PortableClosureSha256)) {
+    Record-Check -Name "runtime_closure_manifest" -Status "fail" -Details "A validated portable closure and its pinned SHA-256 are required before any install is attempted."
+}
+try {
+    $portableClosure = Test-PortableClosureManifest `
+        -Path $PortableClosurePath `
+        -ExpectedSha256 $PortableClosureSha256 `
+        -ExpectedVersion $ExpectedVersion `
+        -ExpectedPackageName $ExpectedPackageName `
+        -ExpectedPayloadSha256 $ExpectedPortableSha256 `
+        -ExpectedCommitSha $ExpectedCandidateCommitSha `
+        -ExpectedTreeSha $ExpectedCandidateTreeSha
+    Record-Check -Name "runtime_closure_manifest" -Status "pass" -Details "Validated portable closure is pinned by SHA-256 and matches the supplied candidate identity."
+} catch {
+    Record-Check -Name "runtime_closure_manifest" -Status "fail" -Details "Portable closure validation failed: $($_.Exception.Message)"
+}
+
 try {
     # =========================================================================
     # Stage 1: Silent Default Installation (Tasks unchecked by default)
@@ -331,6 +429,21 @@ try {
     }
     Record-Check -Name "stage1_installed_files" -Status "pass" -Details "All core binaries, DLLs, and legal notices present."
 
+    # Installed runtime must match the validated portable closure byte-for-byte.
+    try {
+        Test-InstalledRuntimeClosure -InstallDir $installDir -Closure $portableClosure | Out-Null
+        Record-Check -Name "stage1_runtime_closure" -Status "pass" -Details "Installed runtime matches every validated portable closure digest and package-manifest hash."
+    } catch {
+        Record-Check -Name "stage1_runtime_closure" -Status "fail" -Details "Installed runtime does not match the validated portable closure: $($_.Exception.Message)"
+    }
+
+    # Verify HKCU Uninstall\InstallLocation names the actual installation directory.
+    $installLocation = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "InstallLocation"
+    if (-not (Test-InstallLocationMatches -Actual $installLocation -Expected $installDir)) {
+        Record-Check -Name "stage1_install_location" -Status "fail" -Details "Uninstall InstallLocation mismatch: expected '$installDir', got '$installLocation'."
+    }
+    Record-Check -Name "stage1_install_location" -Status "pass" -Details "Uninstall InstallLocation matches the actual install directory."
+
     # Assert absence of dev artifacts (wrapped in @(...) for StrictMode safety)
     $badFiles = @(Get-ChildItem -Path $installDir -Include "*.pdb", "*.lib", "*.obj", "*.ilk" -Recurse)
     if ($badFiles.Count -gt 0) {
@@ -346,7 +459,12 @@ try {
     if ($dispVer -ne $ExpectedVersion) {
         Record-Check -Name "stage1_uninstall_version" -Status "fail" -Details "DisplayVersion mismatch: expected $ExpectedVersion, got $dispVer"
     }
-    Record-Check -Name "stage1_hkcu_uninstall_registered" -Status "pass" -Details "Uninstall entry registered under HKCU with version $dispVer."
+    $expectedDispName = if ($ExpectedVersion -eq "0.1.1") { "PikaView $ExpectedVersion" } else { "OZ Image Viewer" }
+    $dispName = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "DisplayName"
+    if ($dispName -ne $expectedDispName) {
+        Record-Check -Name "stage1_uninstall_display_name" -Status "fail" -Details "DisplayName mismatch: expected '$expectedDispName', got '$dispName'"
+    }
+    Record-Check -Name "stage1_hkcu_uninstall_registered" -Status "pass" -Details "Uninstall entry registered under HKCU with DisplayName '$dispName' and version $dispVer."
 
     # Assert HKLM application uninstall key was not modified
     if (Test-Path -LiteralPath $hklmUninstallKey) {
@@ -394,6 +512,41 @@ try {
     # =========================================================================
     Write-Host "`n--- STAGE 3: Reinstallation with File Association Opt-In ---"
 
+    # Desktop shortcut collision preflight: never overwrite or delete a real user's shortcut.
+    if (Test-Path -LiteralPath $desktopShortcutPath) {
+        Record-Check -Name "stage3_desktop_shortcut_foreign_preserved" -Status "fail" -Details "A pre-existing desktop shortcut exists at '$desktopShortcutPath'; refusing to overwrite or delete it."
+    }
+    $foreignDesktopTarget = Join-Path $env:SystemRoot "System32\notepad.exe"
+    $foreignDesktopArgs = "FOREIGN_DESKTOP_SHORTCUT_SENTINEL_V1"
+    $foreignDesktopDescription = "FOREIGN_DESKTOP_SHORTCUT_SENTINEL_V1"
+    $desktopShell = New-Object -ComObject WScript.Shell
+    try {
+        $foreignSc = $desktopShell.CreateShortcut($desktopShortcutPath)
+        $foreignSc.TargetPath = $foreignDesktopTarget
+        $foreignSc.Arguments = $foreignDesktopArgs
+        $foreignSc.Description = $foreignDesktopDescription
+        $foreignSc.Save()
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktopShell)
+    }
+    $desktopForeignRes = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"desktopicon`"") -TimeoutSeconds 120
+    $desktopForeignSnapshot = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    $desktopForeignDetails = if ($null -eq $desktopForeignSnapshot) {
+        "shortcut is absent"
+    } else {
+        "Target='$($desktopForeignSnapshot.TargetPath)', Args='$($desktopForeignSnapshot.Arguments)', Description='$($desktopForeignSnapshot.Description)'"
+    }
+    $desktopForeignPreserved = ($null -ne $desktopForeignSnapshot -and
+        [string]::Equals("$($desktopForeignSnapshot.TargetPath)".Trim(), $foreignDesktopTarget.Trim(), [System.StringComparison]::OrdinalIgnoreCase) -and
+        "$($desktopForeignSnapshot.Arguments)" -ceq $foreignDesktopArgs)
+    if ($desktopForeignRes.ExitCode -eq 0 -or -not $desktopForeignPreserved) {
+        Record-Check -Name "stage3_desktop_shortcut_foreign_preserved" -Status "fail" -Details "Foreign desktop shortcut collision failed: ExitCode=$($desktopForeignRes.ExitCode), $desktopForeignDetails."
+    }
+    if ($desktopForeignPreserved) {
+        Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
+    }
+    Record-Check -Name "stage3_desktop_shortcut_foreign_preserved" -Status "pass" -Details "Installer aborted before overwriting or deleting the foreign desktop shortcut; $desktopForeignDetails (Description observed, not asserted)."
+
     # Inspect real supported .png extension in HKCU Classes
     $pngSubKey = "Software\Classes\.png"
     $pngDefaultBefore = Get-RegValueSafe -SubKeyPath $pngSubKey -ValueName ""
@@ -408,9 +561,9 @@ try {
         $createdPngSentinel = $true
     }
 
-    $instRes2 = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"associate`"") -TimeoutSeconds 60
+    $instRes2 = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"associate desktopicon`"") -TimeoutSeconds 60
     if ($instRes2.ExitCode -ne 0) {
-        Record-Check -Name "stage3_reinstall_exit_code" -Status "fail" -Details "Reinstallation with /TASKS=associate failed with code $($instRes2.ExitCode)"
+        Record-Check -Name "stage3_reinstall_exit_code" -Status "fail" -Details "Reinstallation with /TASKS=`"associate desktopicon`" failed with code $($instRes2.ExitCode)"
     }
     Record-Check -Name "stage3_reinstall_exit_code" -Status "pass" -Details "Reinstallation succeeded with code 0."
 
@@ -426,11 +579,12 @@ try {
     Record-Check -Name "stage3_capabilities_registered" -Status "pass" -Details "Capabilities registered."
 
     # Verify registered application entry points to Capabilities
-    $regAppVal = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName "OZ Image Viewer"
+    $expectedRegAppName = if ($ExpectedVersion -eq "0.1.1") { "PikaView" } else { "OZ Image Viewer" }
+    $regAppVal = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName $expectedRegAppName
     if ($regAppVal -ne "Software\OZImageViewer\Capabilities") {
-        Record-Check -Name "stage3_registered_apps_value" -Status "fail" -Details "RegisteredApplications value mismatch: expected 'Software\OZImageViewer\Capabilities', got '$regAppVal'"
+        Record-Check -Name "stage3_registered_apps_value" -Status "fail" -Details "RegisteredApplications\$expectedRegAppName value mismatch: expected 'Software\OZImageViewer\Capabilities', got '$regAppVal'"
     }
-    Record-Check -Name "stage3_registered_apps_value" -Status "pass" -Details "RegisteredApplications correctly registered."
+    Record-Check -Name "stage3_registered_apps_value" -Status "pass" -Details "RegisteredApplications\$expectedRegAppName correctly registered."
 
     # Verify Install marker
     $markerAppId = Get-RegValueSafe -SubKeyPath "Software\OZImageViewer\Install" -ValueName "AppId"
@@ -439,14 +593,21 @@ try {
     }
     Record-Check -Name "stage3_ownership_marker" -Status "pass" -Details "Ownership marker AppId verified."
 
-    # Verify complete UserChoice state remained identical for all declared extensions
+    # Verify the actual registered shell-open command targets the installed executable.
+    $commandValue = Get-RegValueSafe -SubKeyPath "Software\Classes\OZImageViewer.Image\shell\open\command" -ValueName ""
+    if (-not (Test-CommandTargetMatches -CommandValue $commandValue -ExpectedExePath $exePath)) {
+        Record-Check -Name "stage3_command_target" -Status "fail" -Details "ProgID shell-open command target mismatch: expected '\"$exePath\" \"%1\"', got '$commandValue'."
+    }
+    Record-Check -Name "stage3_command_target" -Status "pass" -Details "ProgID shell-open command targets the installed executable with %1."
+
+    # Verify complete UserChoice state remained identical for all declared extensions.
+    $ucAfterInstall = @{}
     foreach ($ext in $declaredExtensions) {
-        $ucAfter = Get-UserChoiceSnapshot -Extension $ext
-        $ucBefore = $initialUserChoices[$ext]
-        $matched = Compare-UserChoiceSnapshot -Before $ucBefore -After $ucAfter
-        if (-not $matched) {
-            Record-Check -Name "stage3_userchoice_unmodified_$ext" -Status "fail" -Details "Complete UserChoice state for '$ext' was altered during installation!"
-        }
+        $ucAfterInstall[$ext] = Get-UserChoiceSnapshot -Extension $ext
+    }
+    $ucMismatches = @(Compare-UserChoiceSnapshotAll -Before $initialUserChoices -After $ucAfterInstall -Extensions $declaredExtensions)
+    if ($ucMismatches.Count -gt 0) {
+        Record-Check -Name "stage3_userchoice_unmodified" -Status "fail" -Details "Complete UserChoice state was altered for: $($ucMismatches -join ', ')"
     }
     Record-Check -Name "stage3_userchoice_unmodified" -Status "pass" -Details "Complete UserChoice state for all declared extensions remained identical (no defaults hijacked)."
 
@@ -456,6 +617,35 @@ try {
         Record-Check -Name "stage3_supported_ext_foreign_handler_preserved" -Status "fail" -Details "Foreign default handler on supported extension .png was altered: expected '$pngDefaultBefore', got '$pngDefaultAfter'"
     }
     Record-Check -Name "stage3_supported_ext_foreign_handler_preserved" -Status "pass" -Details "Foreign default handler for supported extension .png was preserved intact."
+
+    # Desktop shortcut opt-in: observe all fields, assert only explicit installer-owned fields.
+    $desktopOptInSnapshot = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    $desktopOptInDetails = if ($null -eq $desktopOptInSnapshot) {
+        "shortcut is absent"
+    } else {
+        "Target='$($desktopOptInSnapshot.TargetPath)', Args='$($desktopOptInSnapshot.Arguments)', WorkDir='$($desktopOptInSnapshot.WorkingDirectory)', Icon='$($desktopOptInSnapshot.IconLocation)', Description='$($desktopOptInSnapshot.Description)'"
+    }
+    if ($null -eq $desktopOptInSnapshot -or
+        -not (Test-OwnedDesktopShortcutFields -Snapshot $desktopOptInSnapshot -ExpectedExePath $exePath -ExpectedWorkingDirectory $installDir)) {
+        Record-Check -Name "stage3_desktop_shortcut_optin" -Status "fail" -Details "Desktop shortcut opt-in did not create the expected installer-owned shortcut: $desktopOptInDetails."
+    }
+    Record-Check -Name "stage3_desktop_shortcut_optin" -Status "pass" -Details "Desktop shortcut created with expected explicit fields; $desktopOptInDetails (Description observed, not asserted against an Inno default)."
+
+    # Reinstall with the desktop task still selected must not disturb the untouched shortcut.
+    $desktopReinstallRes = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"associate desktopicon`"") -TimeoutSeconds 120
+    $desktopAfterReinstall = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    $desktopReinstallDetails = if ($null -eq $desktopAfterReinstall) {
+        "shortcut is absent"
+    } else {
+        "Target='$($desktopAfterReinstall.TargetPath)', Args='$($desktopAfterReinstall.Arguments)', WorkDir='$($desktopAfterReinstall.WorkingDirectory)', Icon='$($desktopAfterReinstall.IconLocation)', Description='$($desktopAfterReinstall.Description)'"
+    }
+    $desktopFieldsPreserved = ($desktopReinstallRes.ExitCode -eq 0 -and
+        $null -ne $desktopAfterReinstall -and
+        (Test-ShortcutExplicitFieldsEqual -Before $desktopOptInSnapshot -After $desktopAfterReinstall))
+    if (-not $desktopFieldsPreserved) {
+        Record-Check -Name "stage3_desktop_shortcut_reinstall_preserved" -Status "fail" -Details "Installer-created desktop shortcut did not survive its own reinstall with desktopicon selected. ExitCode=$($desktopReinstallRes.ExitCode); after reinstall: $desktopReinstallDetails."
+    }
+    Record-Check -Name "stage3_desktop_shortcut_reinstall_preserved" -Status "pass" -Details "Untouched desktop shortcut survived reinstall with explicit fields unchanged. Before Description='$($desktopOptInSnapshot.Description)', after Description='$($desktopAfterReinstall.Description)' (Description observed, not asserted)."
 
     # =========================================================================
     # Stage 4: Uninstallation & Complete Cleanup
@@ -508,11 +698,11 @@ try {
     }
     Record-Check -Name "stage4_marker_reaped" -Status "pass" -Details "Ownership marker cleanly reaped."
 
-    $regAppAfter = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName "OZ Image Viewer"
+    $regAppAfter = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName $expectedRegAppName
     if ($null -ne $regAppAfter) {
-        Record-Check -Name "stage4_registered_apps_reaped" -Status "fail" -Details "RegisteredApplications value was not reaped."
+        Record-Check -Name "stage4_registered_apps_reaped" -Status "fail" -Details "RegisteredApplications\$expectedRegAppName value was not reaped."
     }
-    Record-Check -Name "stage4_registered_apps_reaped" -Status "pass" -Details "RegisteredApplications entry cleanly removed."
+    Record-Check -Name "stage4_registered_apps_reaped" -Status "pass" -Details "RegisteredApplications\$expectedRegAppName entry cleanly removed."
 
     # Verify foreign handler for .png was preserved after uninstall
     $pngDefaultFinal = Get-RegValueSafe -SubKeyPath $pngSubKey -ValueName ""
@@ -521,12 +711,261 @@ try {
     }
     Record-Check -Name "stage4_png_handler_preserved" -Status "pass" -Details "Foreign default handler on supported extension was preserved through uninstallation."
 
+    # The untouched installer-created desktop shortcut must be removed by uninstall.
+    $desktopAfterUninstall = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    if ($null -ne $desktopAfterUninstall) {
+        Record-Check -Name "stage4_desktop_shortcut_removed" -Status "fail" -Details "Uninstall left the installer-created desktop shortcut in place: Target='$($desktopAfterUninstall.TargetPath)', Args='$($desktopAfterUninstall.Arguments)', WorkDir='$($desktopAfterUninstall.WorkingDirectory)', Icon='$($desktopAfterUninstall.IconLocation)', Description='$($desktopAfterUninstall.Description)' (Description observed, not asserted)."
+    }
+    Record-Check -Name "stage4_desktop_shortcut_removed" -Status "pass" -Details "Uninstall removed the untouched installer-created desktop shortcut."
+
     # Clean up only test-created sentinel value if we created it
     if ($createdPngSentinel) {
         $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($pngSubKey, $true)
         if ($null -ne $k) {
             $k.DeleteValue("", $false)
             $k.Close()
+        }
+    }
+
+    # Stage 4b: a user-modified installer-created desktop shortcut must survive uninstall.
+    $desktopUserModInstallRes = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"desktopicon`"") -TimeoutSeconds 120
+    $desktopUserModInitial = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    $desktopUserModInitialDetails = if ($null -eq $desktopUserModInitial) {
+        "shortcut is absent"
+    } else {
+        "Target='$($desktopUserModInitial.TargetPath)', Args='$($desktopUserModInitial.Arguments)', Description='$($desktopUserModInitial.Description)'"
+    }
+    if ($desktopUserModInstallRes.ExitCode -ne 0 -or
+        $null -eq $desktopUserModInitial -or
+        -not (Test-OwnedDesktopShortcutFields -Snapshot $desktopUserModInitial -ExpectedExePath $exePath -ExpectedWorkingDirectory $installDir)) {
+        Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "fail" -Details "Could not create a removable owned desktop shortcut for the user-modified test: ExitCode=$($desktopUserModInstallRes.ExitCode); $desktopUserModInitialDetails."
+    }
+    $desktopUserModArgs = "--desktop-user-modified-sentinel-v1"
+    $desktopShell = New-Object -ComObject WScript.Shell
+    try {
+        $userModSc = $desktopShell.CreateShortcut($desktopShortcutPath)
+        $userModSc.Arguments = $desktopUserModArgs
+        $userModSc.Save()
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktopShell)
+    }
+    $desktopUserModified = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    if ($null -eq $desktopUserModified -or "$($desktopUserModified.Arguments)" -cne $desktopUserModArgs) {
+        Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "fail" -Details "Could not mark the test-created desktop shortcut as user-modified."
+    }
+    $uninstDesktopMod = Join-Path $installDir "unins000.exe"
+    if (-not (Test-Path -LiteralPath $uninstDesktopMod -PathType Leaf)) {
+        Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "fail" -Details "Uninstaller missing for the user-modified desktop shortcut test: $uninstDesktopMod"
+    }
+    $desktopModUninstRes = Invoke-ProcessSafe -FilePath $uninstDesktopMod -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120
+    $desktopAfterModUninstall = Get-ShortcutSnapshot -Path $desktopShortcutPath
+    if ($desktopModUninstRes.ExitCode -ne 0 -or
+        $null -eq $desktopAfterModUninstall -or
+        "$($desktopAfterModUninstall.Arguments)" -cne $desktopUserModArgs -or
+        -not [string]::Equals("$($desktopAfterModUninstall.TargetPath)".Trim(), $exePath.Trim(), [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-ShortcutExplicitFieldsEqual -Before $desktopUserModified -After $desktopAfterModUninstall)) {
+        $desktopAfterModDetails = if ($null -eq $desktopAfterModUninstall) { "shortcut is absent" } else { "Target='$($desktopAfterModUninstall.TargetPath)', Args='$($desktopAfterModUninstall.Arguments)', Description='$($desktopAfterModUninstall.Description)'" }
+        Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "fail" -Details "User-modified desktop shortcut was not preserved by uninstall: ExitCode=$($desktopModUninstRes.ExitCode); $desktopAfterModDetails."
+    }
+    Record-Check -Name "stage4_desktop_shortcut_user_modified_preserved" -Status "pass" -Details "User-modified desktop shortcut survived uninstall unchanged; Description='$($desktopAfterModUninstall.Description)' (observed, not asserted)."
+    if ($null -ne $desktopAfterModUninstall -and
+        [string]::Equals("$($desktopAfterModUninstall.TargetPath)".Trim(), $exePath.Trim(), [System.StringComparison]::OrdinalIgnoreCase) -and
+        "$($desktopAfterModUninstall.Arguments)" -ceq $desktopUserModArgs) {
+        Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
+    }
+
+    # --- STAGE 5: Separate True v0.1.0 -> v0.1.1 Upgrade Scenario ---
+    if (-not [string]::IsNullOrWhiteSpace($UpgradeFromInstallerPath)) {
+        Write-Host "`n--- STAGE 5: True v0.1.0 -> v0.1.1 Upgrade Scenario ---" -ForegroundColor Cyan
+        if (-not (Test-Path -LiteralPath $UpgradeFromInstallerPath -PathType Leaf)) {
+            Record-Check -Name "stage5_upgrade_base_exists" -Status "fail" -Details "Historical v0.1.0 installer not found: $UpgradeFromInstallerPath"
+        }
+        $histActual = (Get-FileHash -LiteralPath $UpgradeFromInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $histPinned = "25637adf86ab1eeac9a0e5992918bc492c957c7568116f452de8c6a5e2d3b633"
+        if ($histActual -ne $histPinned) {
+            Record-Check -Name "stage5_upgrade_base_hash" -Status "fail" -Details "Historical v0.1.0 installer hash mismatch: expected $histPinned, got $histActual"
+        }
+        Record-Check -Name "stage5_upgrade_base_hash" -Status "pass" -Details "Verified pinned historical v0.1.0 installer ($histActual)."
+
+        $upgradeCustomDir = "${installDir}_UpgradeTest"
+        if (Test-Path -LiteralPath $upgradeCustomDir) {
+            Record-Check -Name "stage5_upgrade_preflight" -Status "fail" -Details "Upgrade test directory already exists: $upgradeCustomDir"
+        }
+
+        # Use the single canonical full-value/type snapshot function for all 14 extensions.
+        $ucBefore = @{}
+        foreach ($ext in $declaredExtensions) {
+            $ucBefore[$ext] = Get-UserChoiceSnapshot -Extension $ext
+        }
+
+        # Foreign shortcut collision test at exact {userprograms}\PikaView.lnk using WScript.Shell
+        $programsDir = [Environment]::GetFolderPath("Programs")
+        $shortcutPath = Join-Path $programsDir "PikaView.lnk"
+        $wsh = New-Object -ComObject WScript.Shell
+        $foreignTarget = Join-Path $env:SystemRoot "System32\notepad.exe"
+        $foreignArgs = "FOREIGN_SHORTCUT_SENTINEL_V1"
+        if (-not (Test-Path -LiteralPath $shortcutPath)) {
+            $sc = $wsh.CreateShortcut($shortcutPath)
+            $sc.TargetPath = $foreignTarget
+            $sc.Arguments = $foreignArgs
+            $sc.Save()
+            $resCol = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"!associate`"") -TimeoutSeconds 120
+            $scCheck = $wsh.CreateShortcut($shortcutPath)
+            if ($resCol.ExitCode -eq 0 -or $scCheck.TargetPath -ne $foreignTarget -or $scCheck.Arguments -ne $foreignArgs) {
+                Record-Check -Name "stage5_shortcut_foreign_preserved" -Status "fail" -Details "Foreign shortcut collision failed: ExitCode=$($resCol.ExitCode), Target=$($scCheck.TargetPath), Args=$($scCheck.Arguments)"
+            } else {
+                Record-Check -Name "stage5_shortcut_foreign_preserved" -Status "pass" -Details "Installer aborted before overwriting foreign PikaView.lnk."
+            }
+            if (($scCheck.TargetPath -eq $foreignTarget) -and ($scCheck.Arguments -eq $foreignArgs)) {
+                Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            Record-Check -Name "stage5_shortcut_foreign_preserved" -Status "fail" -Details "Pre-existing shortcut at '$shortcutPath' prevented clean collision test."
+        }
+
+        $resOld = Invoke-ProcessSafe -FilePath $UpgradeFromInstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=`"$upgradeCustomDir`"", "/TASKS=`"associate`"") -TimeoutSeconds 120
+        if ($resOld.ExitCode -ne 0) {
+            Record-Check -Name "stage5_v010_install" -Status "fail" -Details "v0.1.0 base install failed with exit code $($resOld.ExitCode)"
+        }
+        $oldVer = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "DisplayVersion"
+        if ($oldVer -ne "0.1.0") {
+            Record-Check -Name "stage5_v010_install" -Status "fail" -Details "Expected v0.1.0 DisplayVersion, got '$oldVer'"
+        }
+        Record-Check -Name "stage5_v010_install" -Status "pass" -Details "Installed v0.1.0 base into custom path '$upgradeCustomDir'."
+        $ucAfterOld = @{}
+        foreach ($ext in $declaredExtensions) {
+            $ucAfterOld[$ext] = Get-UserChoiceSnapshot -Extension $ext
+        }
+
+        # Seed foreign .png handler before upgrade
+        $upgPngCreated = $false
+        $pngBeforeUpg = Get-RegValueSafe -SubKeyPath $pngSubKey -ValueName ""
+        if ([string]::IsNullOrWhiteSpace($pngBeforeUpg)) {
+            $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($pngSubKey)
+            $k.SetValue("", "ForeignUpgradeSentinel.png")
+            $k.Close()
+            $pngBeforeUpg = "ForeignUpgradeSentinel.png"
+            $upgPngCreated = $true
+        }
+
+        # Run v0.1.1 upgrade over v0.1.0 with associate task EXPLICITLY UNCHECKED (/TASKS="!associate")
+        $resUpg = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"!associate`"") -TimeoutSeconds 120
+        if ($resUpg.ExitCode -ne 0) {
+            Record-Check -Name "stage5_v011_upgrade" -Status "fail" -Details "v0.1.1 upgrade failed with exit code $($resUpg.ExitCode)"
+        }
+        $newVer = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "DisplayVersion"
+        $newName = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "DisplayName"
+        $newLoc = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "InstallLocation"
+        if ($newVer -ne $ExpectedVersion -or $newName -ne "PikaView $ExpectedVersion") {
+            Record-Check -Name "stage5_v011_upgrade" -Status "fail" -Details "Upgrade metadata mismatch: DisplayName='$newName', DisplayVersion='$newVer'"
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $upgradeCustomDir "ozviewer.exe") -PathType Leaf)) {
+            Record-Check -Name "stage5_v011_upgrade_path" -Status "fail" -Details "Upgraded ozviewer.exe missing from custom path '$upgradeCustomDir' (InstallLocation='$newLoc')"
+        }
+        if (-not (Test-Path -LiteralPath $progIdKey)) {
+            Record-Check -Name "stage5_v011_progid" -Status "fail" -Details "ProgID '$progIdKey' missing after upgrade."
+        }
+        $upgRegAppNew = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName "PikaView"
+        $upgRegAppOld = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName "OZ Image Viewer"
+        if ($upgRegAppNew -ne "Software\OZImageViewer\Capabilities" -or $null -ne $upgRegAppOld) {
+            Record-Check -Name "stage5_v011_regapps_migrated" -Status "fail" -Details "RegisteredApplications migration failed: PikaView='$upgRegAppNew', Legacy='$upgRegAppOld'"
+        }
+        $pngAfterUpg = Get-RegValueSafe -SubKeyPath $pngSubKey -ValueName ""
+        if ($pngAfterUpg -ne $pngBeforeUpg) {
+            Record-Check -Name "stage5_v011_foreign_preserved" -Status "fail" -Details "Foreign .png handler modified during upgrade: expected '$pngBeforeUpg', got '$pngAfterUpg'"
+        }
+
+        # Upgraded runtime must match the same validated portable closure.
+        try {
+            Test-InstalledRuntimeClosure -InstallDir $upgradeCustomDir -Closure $portableClosure | Out-Null
+            Record-Check -Name "stage5_runtime_closure" -Status "pass" -Details "Upgraded runtime matches every validated portable closure digest and package-manifest hash."
+        } catch {
+            Record-Check -Name "stage5_runtime_closure" -Status "fail" -Details "Upgraded runtime does not match the validated portable closure: $($_.Exception.Message)"
+        }
+
+        # Upgrade must keep the original install location and rewrite the command target to it.
+        if (-not (Test-InstallLocationMatches -Actual $newLoc -Expected $upgradeCustomDir)) {
+            Record-Check -Name "stage5_install_location" -Status "fail" -Details "Upgraded InstallLocation mismatch: expected '$upgradeCustomDir', got '$newLoc'."
+        }
+        Record-Check -Name "stage5_install_location" -Status "pass" -Details "Upgraded InstallLocation points at the original custom install directory."
+
+        $upgradedExePath = Join-Path $upgradeCustomDir "ozviewer.exe"
+        $upgradedCommand = Get-RegValueSafe -SubKeyPath "Software\Classes\OZImageViewer.Image\shell\open\command" -ValueName ""
+        if (-not (Test-CommandTargetMatches -CommandValue $upgradedCommand -ExpectedExePath $upgradedExePath)) {
+            Record-Check -Name "stage5_command_target" -Status "fail" -Details "Upgraded shell-open command target mismatch: expected '\"$upgradedExePath\" \"%1\"', got '$upgradedCommand'."
+        }
+        Record-Check -Name "stage5_command_target" -Status "pass" -Details "Upgraded shell-open command targets the upgraded executable."
+
+        $ucAfterUpg = @{}
+        foreach ($ext in $declaredExtensions) {
+            $ucAfterUpg[$ext] = Get-UserChoiceSnapshot -Extension $ext
+        }
+        Record-Check -Name "stage5_v011_upgrade" -Status "pass" -Details "Upgraded v0.1.0 -> v0.1.1 in-place at '$upgradeCustomDir' with DisplayName='$newName', migrated RegisteredApplications, same AppId/ProgID, foreign handler preserved."
+
+        # Modify actual installer-created {userprograms}\PikaView.lnk and verify survival across uninstall
+        $userModArgs = "--user-modified-sentinel-v1"
+        if (Test-Path -LiteralPath $shortcutPath) {
+            $scMod = $wsh.CreateShortcut($shortcutPath)
+            $scMod.Arguments = $userModArgs
+            $scMod.Save()
+        }
+
+        # Clean uninstall of upgraded instance
+        $uninstUpg = Join-Path $upgradeCustomDir "unins000.exe"
+        $resUninstUpg = Invoke-ProcessSafe -FilePath $uninstUpg -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120
+        if ($resUninstUpg.ExitCode -ne 0) {
+            Record-Check -Name "stage5_v011_uninstall" -Status "fail" -Details "Upgraded uninstall failed with exit code $($resUninstUpg.ExitCode)"
+        }
+        if (Test-Path -LiteralPath $upgradeCustomDir) {
+            Record-Check -Name "stage5_v011_uninstall" -Status "fail" -Details "Upgrade custom directory still exists after uninstall: $upgradeCustomDir"
+        }
+        if (-not (Test-Path -LiteralPath $shortcutPath)) {
+            Record-Check -Name "stage5_shortcut_user_modified_preserved" -Status "fail" -Details "User-modified PikaView.lnk did not survive uninstall."
+        } else {
+            $scAfter = $wsh.CreateShortcut($shortcutPath)
+            if ($scAfter.Arguments -ne $userModArgs) {
+                Record-Check -Name "stage5_shortcut_user_modified_preserved" -Status "fail" -Details "User-modified PikaView.lnk arguments lost: '$($scAfter.Arguments)'"
+            } else {
+                Record-Check -Name "stage5_shortcut_user_modified_preserved" -Status "pass" -Details "User-modified PikaView.lnk survived uninstall with modified arguments."
+                Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Record-Check -Name "stage5_v011_uninstall" -Status "pass" -Details "Upgraded v0.1.1 instance cleanly uninstalled."
+
+        $ucAfterUninst = @{}
+        foreach ($ext in $declaredExtensions) {
+            $ucAfterUninst[$ext] = Get-UserChoiceSnapshot -Extension $ext
+        }
+        $ucMismatches = [System.Collections.Generic.List[string]]::new()
+        foreach ($m in @(Compare-UserChoiceSnapshotAll -Before $initialUserChoices -After $ucBefore -Extensions $declaredExtensions)) { $ucMismatches.Add("pre-upgrade:$m") }
+        foreach ($m in @(Compare-UserChoiceSnapshotAll -Before $ucBefore -After $ucAfterOld -Extensions $declaredExtensions)) { $ucMismatches.Add("v0.1.0-install:$m") }
+        foreach ($m in @(Compare-UserChoiceSnapshotAll -Before $ucBefore -After $ucAfterUpg -Extensions $declaredExtensions)) { $ucMismatches.Add("v0.1.1-upgrade:$m") }
+        foreach ($m in @(Compare-UserChoiceSnapshotAll -Before $ucBefore -After $ucAfterUninst -Extensions $declaredExtensions)) { $ucMismatches.Add("uninstall:$m") }
+        if ($ucMismatches.Count -gt 0) {
+            Record-Check -Name "stage5_userchoice_preserved" -Status "fail" -Details "UserChoice changed for: $($ucMismatches -join ', ')"
+        } else {
+            Record-Check -Name "stage5_userchoice_preserved" -Status "pass" -Details "Complete UserChoice state (absence/presence + all value names/kinds/values, all 14 extensions) preserved across v0.1.0 install, v0.1.1 upgrade, and uninstall."
+        }
+
+        # Fresh opt-out -> reinstall with opt-out
+        $resOptOut1 = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"!associate`"") -TimeoutSeconds 120
+        $resOptOut2 = Invoke-ProcessSafe -FilePath $InstallerPath -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TASKS=`"!associate`"") -TimeoutSeconds 120
+        if ($resOptOut1.ExitCode -ne 0 -or $resOptOut2.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $shortcutPath) -or (Test-Path -LiteralPath $progIdKey)) {
+            Record-Check -Name "stage5_fresh_optout_reinstall" -Status "fail" -Details "Fresh opt-out -> reinstall failed: E1=$($resOptOut1.ExitCode), E2=$($resOptOut2.ExitCode)"
+        } else {
+            Record-Check -Name "stage5_fresh_optout_reinstall" -Status "pass" -Details "Fresh opt-out -> reinstall preserved PikaView.lnk and kept associations absent."
+        }
+        $uninstOptOut = Join-Path $installDir "unins000.exe"
+        if (Test-Path -LiteralPath $uninstOptOut) {
+            Invoke-ProcessSafe -FilePath $uninstOptOut -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSeconds 120 | Out-Null
+        }
+
+        if ($upgPngCreated) {
+            $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($pngSubKey, $true)
+            if ($null -ne $k) {
+                $k.DeleteValue("", $false)
+                $k.Close()
+            }
         }
     }
 

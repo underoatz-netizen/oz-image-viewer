@@ -33,7 +33,7 @@
       testing the real new-user default path (%LOCALAPPDATA%\Programs\OZ Image Viewer).
     - Parent monitors execution with a 5-minute wallclock timeout, caches exit code, and disposes
       process handle finally.
-    - Validates child report: checks all 28 exact required check names once, strictly requiring 'pass'
+    - Validates child report: checks the exact required base/upgrade check set once, strictly requiring 'pass'
       (any fail/unknown/skipped/warning blocks the gate).
     - Performs verified cleanup of child processes (by owner SID), local user account, profile,
       and scratch directory. Cleanup verification results are recorded in the parent report.
@@ -50,6 +50,13 @@ param(
     [string]$RunAttempt = "",
     [string]$CandidateReleaseId = "",
     [string]$CandidateTag = "",
+    [string]$UpgradeFromInstallerPath = "",
+    [string]$ExpectedPortableSha256 = "",
+    [string]$PortableClosurePath = "",
+    [string]$PortableClosureSha256 = "",
+    [string]$ExpectedCandidateCommitSha = "",
+    [string]$ExpectedCandidateTreeSha = "",
+    [string]$ExpectedTagCommitSha = "",
     [Parameter(Mandatory = $true)][string]$ParentReportPath,
     [switch]$AllowDisposableExecution
 )
@@ -64,6 +71,11 @@ if (-not (Test-Path -LiteralPath $helpersPath -PathType Leaf)) {
     throw "StandardUserHelpers.ps1 not found in $ScriptDir"
 }
 . $helpersPath
+$handoffPath = Join-Path $ScriptDir "candidate-handoff.ps1"
+if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
+    throw "candidate-handoff.ps1 not found in $ScriptDir"
+}
+. $handoffPath
 
 $script:ParentReport = [ordered]@{
     suite                  = "standard-user-controller"
@@ -72,6 +84,11 @@ $script:ParentReport = [ordered]@{
     runnerOs               = [System.Environment]::OSVersion.VersionString
     workflowSha            = $WorkflowSha
     expectedInstallerSha   = $ExpectedInstallerSha256
+    expectedPortableSha256 = $ExpectedPortableSha256
+    portableClosureSha256  = $PortableClosureSha256
+    expectedSourceCommitSha = $ExpectedCandidateCommitSha
+    expectedSourceTreeSha   = $ExpectedCandidateTreeSha
+    resolvedTagCommitSha    = $ExpectedTagCommitSha
     createdUserSid         = $null
     createdUserName        = $null
     scratchRoot            = $null
@@ -149,7 +166,10 @@ try {
     $script:ParentReport.environmentAttestation = "github-hosted-windows2022"
 
     # Guard 2: Candidate Assets & Expected Hash Verification
-    $installerPath = Join-Path $CandidateDir "ozviewer-0.1.0-win-x64-installer.exe"
+    $expectedTag = if (-not [string]::IsNullOrWhiteSpace($CandidateTag)) { $CandidateTag } else { $env:CANDIDATE_TAG }
+    $spec = Resolve-ReleaseAssetSpec -CandidateTag $expectedTag
+    $installerFileName = $spec.InstallerName
+    $installerPath = Join-Path $CandidateDir $installerFileName
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
         Record-ParentCheck -Name "candidate_installer_exists" -Status "fail" -Details "Candidate installer missing: $installerPath"
         throw "Installer missing"
@@ -161,6 +181,22 @@ try {
         throw "Installer hash mismatch"
     }
     Record-ParentCheck -Name "candidate_installer_hash" -Status "pass" -Details "Candidate installer SHA-256 verified ($actualInstallerHash)."
+
+    if ([string]::IsNullOrWhiteSpace($PortableClosurePath) -or
+        [string]::IsNullOrWhiteSpace($PortableClosureSha256) -or
+        [string]::IsNullOrWhiteSpace($ExpectedPortableSha256)) {
+        Record-ParentCheck -Name "candidate_portable_closure" -Status "fail" -Details "Validated portable closure path, closure SHA-256, and portable payload SHA-256 are required."
+        throw "Portable closure binding missing"
+    }
+    $portableClosure = Test-PortableClosureManifest `
+        -Path $PortableClosurePath `
+        -ExpectedSha256 $PortableClosureSha256 `
+        -ExpectedVersion $spec.Version `
+        -ExpectedPackageName $spec.PackageFamily `
+        -ExpectedPayloadSha256 $ExpectedPortableSha256 `
+        -ExpectedCommitSha $ExpectedCandidateCommitSha `
+        -ExpectedTreeSha $ExpectedCandidateTreeSha
+    Record-ParentCheck -Name "candidate_portable_closure" -Status "pass" -Details "Validated portable closure is pinned by SHA-256 and matches the candidate source identity and portable payload hash."
 
     # Setup Scratch Directory Structure directly under SystemDrive (avoid runner profile traversal restrictions)
     $sysDrive = [System.Environment]::GetEnvironmentVariable('SystemDrive')
@@ -210,6 +246,7 @@ try {
         (Join-Path $scriptDir "ProcessHelper.ps1"),
         (Join-Path $scriptDir "candidate-handoff.ps1"),
         (Join-Path $scriptDir "StandardUserHelpers.ps1"),
+        $PortableClosurePath,
         $installerPath
     )
 
@@ -259,15 +296,36 @@ try {
     }
 
     # Bind installer in manifest to expected installer hash
-    $manifestInstallerEntry = @($manifestData.files | Where-Object { $_.name -eq "ozviewer-0.1.0-win-x64-installer.exe" })
+    $manifestInstallerEntry = @($manifestData.files | Where-Object { $_.name -eq $installerFileName })
     if ($manifestInstallerEntry.Count -ne 1) {
-        throw "Manifest does not contain exactly one entry for 'ozviewer-0.1.0-win-x64-installer.exe' (count: $($manifestInstallerEntry.Count))"
+        throw "Manifest does not contain exactly one entry for '$installerFileName' (count: $($manifestInstallerEntry.Count))"
     }
     if ("$($manifestInstallerEntry[0].sha256)".Trim().ToLowerInvariant() -ne $expectedCleanHash) {
         throw "Manifest installer hash mismatch! Manifest reports '$($manifestInstallerEntry[0].sha256)', expected '$expectedCleanHash'"
     }
 
+    # Bind the independently supplied source identity recorded in the candidate handoff.
+    foreach ($pair in @(
+        @('expectedSourceCommitSha', $ExpectedCandidateCommitSha),
+        @('expectedSourceTreeSha', $ExpectedCandidateTreeSha),
+        @('resolvedTagCommitSha', $ExpectedTagCommitSha)
+    )) {
+        $propName = [string]$pair[0]
+        $expectedValue = [string]$pair[1]
+        if ([string]::IsNullOrWhiteSpace($expectedValue)) {
+            throw "Expected identity value '$propName' is required for the standard-user lifecycle gate."
+        }
+        if (-not $manifestData.PSObject.Properties[$propName]) {
+            throw "Candidate handoff manifest is missing independently supplied identity field '$propName'."
+        }
+        if ("$($manifestData.$propName)".Trim().ToLowerInvariant() -ne $expectedValue.Trim().ToLowerInvariant()) {
+            throw "Candidate handoff manifest $propName mismatch: expected '$expectedValue', got '$($manifestData.$propName)'."
+        }
+    }
+    Record-ParentCheck -Name "candidate_source_identity" -Status "pass" -Details "Candidate handoff source commit/tree and resolved tag commit match the independently supplied expected values."
+
     $script:ParentReport["manifest"] = $manifestData
+    $script:ParentReport["portableClosure"] = $portableClosure
 
     Copy-Item -LiteralPath $manifestSrc -Destination (Join-Path $scratchInputs "candidate-handoff-manifest.json") -Force
 
@@ -277,7 +335,12 @@ try {
     if ($postCopyHash -ne $expectedCleanHash) {
         throw "Post-copy hash mismatch on installer! Expected '$expectedCleanHash', got '$postCopyHash'"
     }
-    Record-ParentCheck -Name "scratch_inputs_prepared" -Status "pass" -Details "Verified reviewed scripts and candidate assets staged and rehashed in $scratchInputs."
+    $stagedClosure = Join-Path $scratchInputs (Split-Path -Leaf $PortableClosurePath)
+    $postCopyClosureHash = (Get-FileHash -LiteralPath $stagedClosure -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($postCopyClosureHash -ne $PortableClosureSha256.Trim().ToLowerInvariant()) {
+        throw "Post-copy hash mismatch on portable closure! Expected '$PortableClosureSha256', got '$postCopyClosureHash'"
+    }
+    Record-ParentCheck -Name "scratch_inputs_prepared" -Status "pass" -Details "Verified reviewed scripts, pinned portable closure, and candidate assets staged and rehashed in $scratchInputs."
 
     # Rebuild Restrictive DirectorySecurity on Scratch Dirs
     $secRoot = New-Object System.Security.AccessControl.DirectorySecurity
@@ -325,6 +388,20 @@ try {
     $childStdoutPath = Join-Path $scratchOutput "child-stdout.log"
     $childStderrPath = Join-Path $scratchOutput "child-stderr.log"
 
+    $upgradeFileName = ""
+    if (-not [string]::IsNullOrWhiteSpace($UpgradeFromInstallerPath)) {
+        if (-not (Test-Path -LiteralPath $UpgradeFromInstallerPath -PathType Leaf)) {
+            throw "Historical v0.1.0 installer not found: '$UpgradeFromInstallerPath'"
+        }
+        $histActual = (Get-FileHash -LiteralPath $UpgradeFromInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $histPinned = "25637adf86ab1eeac9a0e5992918bc492c957c7568116f452de8c6a5e2d3b633"
+        if ($histActual -ne $histPinned) {
+            throw "Historical v0.1.0 installer hash mismatch! Expected '$histPinned', got '$histActual'."
+        }
+        $upgradeFileName = Split-Path -Leaf $UpgradeFromInstallerPath
+        Copy-Item -LiteralPath $UpgradeFromInstallerPath -Destination (Join-Path $scratchInputs $upgradeFileName) -Force
+    }
+
     $bootstrapCode = New-ChildBootstrapScriptContent `
         -ExpectedUserSid $createdUserSid `
         -InputsDir $scratchInputs `
@@ -332,7 +409,15 @@ try {
         -InstallerFileName (Split-Path -Leaf $installerPath) `
         -FixtureFileName (Split-Path -Leaf $fixtureSrc) `
         -ChildReportFileName "child-lifecycle-report.json" `
-        -ChildProofFileName "child-identity-proof.json"
+        -ChildProofFileName "child-identity-proof.json" `
+        -ExpectedVersion $spec.Version `
+        -UpgradeFromInstallerFileName $upgradeFileName `
+        -PortableClosureFileName (Split-Path -Leaf $PortableClosurePath) `
+        -ExpectedPortableClosureSha256 $PortableClosureSha256 `
+        -ExpectedCandidateCommitSha $ExpectedCandidateCommitSha `
+        -ExpectedCandidateTreeSha $ExpectedCandidateTreeSha `
+        -ExpectedPortableSha256 $ExpectedPortableSha256 `
+        -ExpectedPackageName $spec.PackageFamily
 
     [System.IO.File]::WriteAllText($childBootstrapScript, $bootstrapCode, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -420,17 +505,27 @@ try {
     }
     $script:ParentReport["expectedProfileImagePath"] = $expectedProfilePath
 
+    $requireUpgrade = -not [string]::IsNullOrWhiteSpace($UpgradeFromInstallerPath)
+    if ($spec.Version -eq "0.1.1" -and -not $requireUpgrade) {
+        throw "Security/validation policy: v0.1.1 standard-user lifecycle requires -UpgradeFromInstallerPath for true v0.1.0 -> v0.1.1 upgrade verification."
+    }
     $integrityPassed = Test-ChildReportIntegrity `
         -ReportData $childReportData `
         -ExpectedUserSid $createdUserSid `
         -ExpectedInstallerSha $expectedCleanHash `
         -ProofData $childProofData `
         -ExpectedProfileImagePath $expectedProfilePath `
-        -ControllerSid $controllerSid
+        -ControllerSid $controllerSid `
+        -RequireUpgradeChecks:$requireUpgrade `
+        -ExpectedPortableClosureSha256 $PortableClosureSha256 `
+        -ExpectedCandidateCommitSha $ExpectedCandidateCommitSha `
+        -ExpectedCandidateTreeSha $ExpectedCandidateTreeSha `
+        -ExpectedPortableSha256 $ExpectedPortableSha256
     if ($integrityPassed -ne $true) {
         throw "Child report integrity failed"
     }
-    Record-ParentCheck -Name "child_report_integrity" -Status "pass" -Details "All 28 required lifecycle checks verified strictly 'pass', identity, proof, and installer hash bound."
+    $requiredCheckCount = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks:$requireUpgrade).Count
+    Record-ParentCheck -Name "child_report_integrity" -Status "pass" -Details "All $requiredCheckCount required lifecycle checks verified strictly 'pass', identity, pinned closure, proof, and installer hash bound."
 
     $overallSuccess = $true
 } catch {

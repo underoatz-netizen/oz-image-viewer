@@ -18,10 +18,13 @@ endif()
 set(PRINT_JOB_HPP "${VIEWER_DIR}/print_job.hpp")
 set(PRINT_CTRL_HPP "${VIEWER_DIR}/print_controller.hpp")
 set(PRINT_CTRL_CPP "${VIEWER_DIR}/print_controller.cpp")
+set(PRINT_DLG_HPP "${VIEWER_DIR}/print_dialog.hpp")
+set(PRINT_DLG_CPP "${VIEWER_DIR}/print_dialog.cpp")
 set(CMD_STATE_HPP "${VIEWER_DIR}/ui_command_state.hpp")
 set(CMD_STATE_CPP "${VIEWER_DIR}/ui_command_state.cpp")
 set(VIEWER_CMAKE "${VIEWER_DIR}/CMakeLists.txt")
 foreach(f IN ITEMS "${PRINT_JOB_HPP}" "${PRINT_CTRL_HPP}" "${PRINT_CTRL_CPP}"
+                   "${PRINT_DLG_HPP}" "${PRINT_DLG_CPP}"
                    "${CMD_STATE_HPP}" "${CMD_STATE_CPP}" "${VIEWER_CMAKE}")
     if(NOT EXISTS "${f}")
         message(FATAL_ERROR "required Stage 9.8 file not found: ${f}")
@@ -30,6 +33,7 @@ endforeach()
 
 file(READ "${MAIN_CPP}" content)
 file(READ "${PRINT_CTRL_CPP}" print_content)
+file(READ "${PRINT_DLG_CPP}" print_dlg_content)
 file(READ "${CMD_STATE_HPP}" cmd_hpp_content)
 file(READ "${CMD_STATE_CPP}" cmd_cpp_content)
 file(READ "${VIEWER_CMAKE}" cmake_content)
@@ -53,30 +57,50 @@ if(start_end_rel EQUAL -1)
 endif()
 string(SUBSTRING "${content}" ${start_pos} ${start_end_rel} start_body)
 
-# 2. Explicit Print dialog: PrintDlgExW exactly once, with PD_RETURNDC, and
-#    cancellation defined as dwResultAction != PD_RESULT_PRINT.
-string(FIND "${content}" "PrintDlgExW(" dlg_pos)
-if(dlg_pos EQUAL -1)
-    message(FATAL_ERROR "PrintDlgExW not found in main.cpp")
+# 2. Explicit Print dialog helper: show_print_dialog with owner HWND, and
+#    print_dialog.cpp owning the single explicit PrintDlgExW site.
+string(FIND "${start_body}" "show_print_dialog(app.hwnd)" dlg_call_pos)
+if(dlg_call_pos EQUAL -1)
+    message(FATAL_ERROR "start_print must call show_print_dialog(app.hwnd)")
 endif()
-string(FIND "${content}" "PrintDlgExW(" dlg_second_pos REVERSE)
+string(FIND "${content}" "PrintDlgExW(" main_dlg_pos)
+if(NOT main_dlg_pos EQUAL -1)
+    message(FATAL_ERROR "PrintDlgExW must not appear in main.cpp; print_dialog.cpp owns the single dialog site")
+endif()
+string(FIND "${print_dlg_content}" "PrintDlgExW(" dlg_pos)
+if(dlg_pos EQUAL -1)
+    message(FATAL_ERROR "PrintDlgExW not found in print_dialog.cpp")
+endif()
+string(FIND "${print_dlg_content}" "PrintDlgExW(" dlg_second_pos REVERSE)
 if(NOT dlg_second_pos EQUAL dlg_pos)
-    message(FATAL_ERROR "PrintDlgExW must appear exactly once in main.cpp (single explicit-Print site)")
+    message(FATAL_ERROR "PrintDlgExW must appear exactly once in print_dialog.cpp (single explicit-Print site)")
 endif()
 foreach(marker IN ITEMS "PD_RETURNDC" "pdx.dwResultAction == PD_RESULT_PRINT")
-    string(FIND "${start_body}" "${marker}" marker_pos)
+    string(FIND "${print_dlg_content}" "${marker}" marker_pos)
     if(marker_pos EQUAL -1)
-        message(FATAL_ERROR "start_print lost its ${marker} dialog contract")
+        message(FATAL_ERROR "print_dialog.cpp lost its ${marker} dialog contract")
     endif()
 endforeach()
 
-# 3. Dialog/DC ownership is always released; dialog cancel is quiet.
-foreach(marker IN ITEMS "GlobalFree(pdx.hDevMode)" "GlobalFree(pdx.hDevNames)"
-                        "DeleteDC(pdx.hDC)"
-                        "return;  // Dialog cancel or dialog failure: quiet, everything preserved.")
-    string(FIND "${start_body}" "${marker}" marker_pos)
+# 3. Dialog/DC ownership is always released before COM teardown; dialog cancel
+#    and apply-only are quiet.
+foreach(marker IN ITEMS "fn_global_free(pdx.hDevMode)" "fn_global_free(pdx.hDevNames)"
+                        "fn_delete_dc(pdx.hDC)")
+    string(FIND "${print_dlg_content}" "${marker}" marker_pos)
     if(marker_pos EQUAL -1)
-        message(FATAL_ERROR "start_print lost its ${marker} ownership/cancel contract")
+        message(FATAL_ERROR "print_dialog.cpp lost its ${marker} ownership/cleanup contract")
+    endif()
+endforeach()
+
+# 3a. The dialog helper must scope and balance apartment-threaded COM around
+#     the one dialog call: S_OK and S_FALSE both require one CoUninitialize,
+#     while init failure (including RPC_E_CHANGED_MODE) must not uninitialize.
+foreach(marker IN ITEMS "fn_co_init(nullptr, COINIT_APARTMENTTHREADED)"
+                        "hr_init == S_OK || hr_init == S_FALSE"
+                        "fn_co_uninit();")
+    string(FIND "${print_dlg_content}" "${marker}" marker_pos)
+    if(marker_pos EQUAL -1)
+        message(FATAL_ERROR "print_dialog.cpp lost its COM STA lifecycle contract: ${marker}")
     endif()
 endforeach()
 
@@ -256,5 +280,53 @@ string(FIND "${cmake_before_gate}" "print_controller.cpp" print_unconditional)
 if(print_unconditional EQUAL -1)
     message(FATAL_ERROR "print_controller.cpp is not in the unconditional viewer sources; Editing-OFF would not link it")
 endif()
+string(FIND "${cmake_before_gate}" "print_dialog.cpp" dialog_unconditional)
+if(dialog_unconditional EQUAL -1)
+    message(FATAL_ERROR "print_dialog.cpp is not in the unconditional viewer sources; Editing-OFF would not link it")
+endif()
+
+# 15. Actual command-context integration guard: current_ui_command_context
+#     must wire ctx.print_busy directly to is_print_active(app), which
+#     subsumes both print_dialog_in_progress and pending/in-flight print.
+string(FIND "${content}" "static oz::viewer::ui_command_context current_ui_command_context(const app_state& app)" ctx_fn_pos)
+if(ctx_fn_pos EQUAL -1)
+    message(FATAL_ERROR "current_ui_command_context definition not found in main.cpp")
+endif()
+string(SUBSTRING "${content}" ${ctx_fn_pos} -1 ctx_tail)
+string(FIND "${ctx_tail}" "\n}" ctx_end_rel)
+if(ctx_end_rel EQUAL -1)
+    message(FATAL_ERROR "could not delimit current_ui_command_context body")
+endif()
+string(SUBSTRING "${content}" ${ctx_fn_pos} ${ctx_end_rel} ctx_body)
+string(FIND "${ctx_body}" "ctx.print_busy = is_print_active(app);" ctx_print_busy_pos)
+if(ctx_print_busy_pos EQUAL -1)
+    message(FATAL_ERROR "current_ui_command_context must assign ctx.print_busy = is_print_active(app);")
+endif()
+
+# Also verify is_print_active includes print_dialog_in_progress.
+string(FIND "${content}" "static bool is_print_active(const app_state& app) {" is_print_fn_pos)
+if(is_print_fn_pos EQUAL -1)
+    message(FATAL_ERROR "is_print_active definition not found in main.cpp")
+endif()
+string(SUBSTRING "${content}" ${is_print_fn_pos} -1 is_print_tail)
+string(FIND "${is_print_tail}" "\n}" is_print_end_rel)
+if(is_print_end_rel EQUAL -1)
+    message(FATAL_ERROR "could not delimit is_print_active body")
+endif()
+string(SUBSTRING "${content}" ${is_print_fn_pos} ${is_print_end_rel} is_print_body)
+string(FIND "${is_print_body}" "app.print_dialog_in_progress" flag_pos)
+if(flag_pos EQUAL -1)
+    message(FATAL_ERROR "is_print_active must include app.print_dialog_in_progress")
+endif()
+
+# 16. start_print must install the RAII reentrancy guard before presenting the
+#     dialog and only release it when the pending request is safely installed.
+foreach(marker IN ITEMS "basic_print_attempt_guard dlg_guard(app"
+                        "dlg_guard.disengage_and_preserve();")
+    string(FIND "${start_body}" "${marker}" guard_pos)
+    if(guard_pos EQUAL -1)
+        message(FATAL_ERROR "start_print lost its print reentrancy guard contract: ${marker}")
+    endif()
+endforeach()
 
 message(STATUS "check_print_isolation: OK (explicit-Print single-flight worker, dialog/DC ownership, benchmark isolation, no Save/renderer reuse)")

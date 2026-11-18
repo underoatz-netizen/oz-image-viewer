@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Provides pure, importable functions for:
-    - Exact 28-check lifecycle contract definition.
+    - Exact base/upgrade lifecycle contract definition (including pinned closure, InstallLocation, and command-target checks).
     - Native token elevation inspection (fail-closed on Win32 API error).
     - Child bootstrap script generation with genuine profile, HKCU nonce, and identity proofs.
     - Child report schema and check completeness validation.
@@ -13,17 +13,21 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Exact 28 check names matching the actual test-installer-lifecycle.ps1 execution
+# Exact base check names matching the actual test-installer-lifecycle.ps1 execution.
+# Stage 1/3 include pinned-closure, InstallLocation, and command-target binding.
 $script:StandardLifecycleRequiredCheckNames = @(
     "guard_environment_attestation",
     "installer_file_exists",
     "non_admin_integrity_check",
     "preflight_clean_target_directory",
     "preflight_clean_registry",
+    "runtime_closure_manifest",
     "stage1_installer_exit_code",
     "stage1_installed_files",
     "stage1_no_dev_artifacts",
     "stage1_hkcu_uninstall_registered",
+    "stage1_install_location",
+    "stage1_runtime_closure",
     "stage1_hklm_unmodified",
     "stage1_default_no_associations",
     "stage2_benchmark_first_present",
@@ -32,8 +36,12 @@ $script:StandardLifecycleRequiredCheckNames = @(
     "stage3_capabilities_registered",
     "stage3_registered_apps_value",
     "stage3_ownership_marker",
+    "stage3_command_target",
     "stage3_userchoice_unmodified",
     "stage3_supported_ext_foreign_handler_preserved",
+    "stage3_desktop_shortcut_foreign_preserved",
+    "stage3_desktop_shortcut_optin",
+    "stage3_desktop_shortcut_reinstall_preserved",
     "stage4_uninstaller_exit_code",
     "stage4_exe_removed",
     "stage4_dlls_removed",
@@ -42,11 +50,189 @@ $script:StandardLifecycleRequiredCheckNames = @(
     "stage4_capabilities_reaped",
     "stage4_marker_reaped",
     "stage4_registered_apps_reaped",
-    "stage4_png_handler_preserved"
+    "stage4_png_handler_preserved",
+    "stage4_desktop_shortcut_removed",
+    "stage4_desktop_shortcut_user_modified_preserved"
 )
 
 function Get-StandardLifecycleRequiredCheckNames {
+    param(
+        [switch]$IncludeUpgradeChecks
+    )
+    if ($IncludeUpgradeChecks) {
+        return $script:StandardLifecycleRequiredCheckNames + @(
+            "stage5_upgrade_base_hash"
+            "stage5_shortcut_foreign_preserved"
+            "stage5_v010_install"
+            "stage5_v011_upgrade"
+            "stage5_runtime_closure"
+            "stage5_install_location"
+            "stage5_command_target"
+            "stage5_shortcut_user_modified_preserved"
+            "stage5_v011_uninstall"
+            "stage5_userchoice_preserved"
+            "stage5_fresh_optout_reinstall"
+        )
+    }
     return $script:StandardLifecycleRequiredCheckNames
+}
+
+function Test-LifecycleReportContract {
+    <#
+    .SYNOPSIS
+      Enforces an exact, non-skipped lifecycle report contract.
+    .DESCRIPTION
+      Requires the exact expected check set, rejects duplicate or missing names, rejects
+      fail/skipped/unknown statuses, and only permits warnings for explicitly named
+      environment checks. Used by the CI report parser and the standard-user child report
+      validator so a skipped or warning-only closure check can never pass the gate.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$ReportData,
+        [Parameter(Mandatory = $true)][string[]]$RequiredCheckNames,
+        [string[]]$AllowedWarningCheckNames = @(),
+        [string]$Context = "lifecycle report",
+        [bool]$RequireSummaryPassed = $true
+    )
+
+    if ($null -eq $ReportData) {
+        throw "$Context data is null"
+    }
+    if ($RequireSummaryPassed -and "$($ReportData.summary)".Trim() -ne "passed") {
+        throw "$Context summary is '$($ReportData.summary)', expected 'passed'"
+    }
+    $hasChecks = if ($ReportData -is [System.Collections.IDictionary]) {
+        $ReportData.Contains('checks')
+    } else {
+        [bool]$ReportData.PSObject.Properties['checks']
+    }
+    if (-not $hasChecks) {
+        throw "$Context is missing checks"
+    }
+    $required = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $RequiredCheckNames) {
+        if ([string]::IsNullOrWhiteSpace($name)) { throw "$Context contains an empty required check name" }
+        [void]$required.Add($name.Trim())
+    }
+    if ($required.Count -ne @($RequiredCheckNames).Count) {
+        throw "$Context required check list contains duplicates"
+    }
+    $allowedWarnings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $AllowedWarningCheckNames) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) { [void]$allowedWarnings.Add($name.Trim()) }
+    }
+
+    $checks = @($ReportData.checks)
+    if ($checks.Count -ne $required.Count) {
+        throw "$Context check count mismatch: expected exactly $($required.Count) checks, found $($checks.Count)"
+    }
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($check in $checks) {
+        $cName = "$($check.name)".Trim()
+        $cStatus = "$($check.status)".Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($cName)) {
+            throw "$Context contains a check with an empty name"
+        }
+        if ($seen.Contains($cName)) {
+            throw "Duplicate check detected in ${Context}: '$cName'"
+        }
+        [void]$seen.Add($cName)
+        if (-not $required.Contains($cName)) {
+            throw "$Context contains unexpected check '$cName'"
+        }
+        if ($cStatus -ne "pass") {
+            if ($cStatus -eq "warning" -and $allowedWarnings.Contains($cName)) {
+                continue
+            }
+            throw "$Context check '$cName' has non-passing status: '$($check.status)'"
+        }
+    }
+    foreach ($req in $required) {
+        if (-not $seen.Contains($req)) {
+            throw "Missing required check in ${Context}: '$req'"
+        }
+    }
+    return $true
+}
+
+function Get-ShortcutSnapshot {
+    <#
+    .SYNOPSIS
+      Reads a .lnk file's observed shell-link fields without modifying it.
+    .DESCRIPTION
+      Returns $null when the path is absent. Description is recorded as observed
+      because Inno Setup does not define a stable default for an omitted Comment;
+      callers must not assert a specific Description value.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut($Path)
+        return [pscustomobject]@{
+            TargetPath       = "$($shortcut.TargetPath)"
+            Arguments        = "$($shortcut.Arguments)"
+            WorkingDirectory = "$($shortcut.WorkingDirectory)"
+            IconLocation     = "$($shortcut.IconLocation)"
+            Description      = "$($shortcut.Description)"
+        }
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    }
+}
+
+function Test-ShortcutExplicitFieldsEqual {
+    <#
+    .SYNOPSIS
+      Compares only TargetPath, Arguments, WorkingDirectory, and IconLocation.
+    .DESCRIPTION
+      Description is intentionally excluded because an omitted Inno [Icons]
+      Comment has no documented default. This verifies an untouched shortcut
+      survived a reinstall without asserting a Description value.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Before,
+        [AllowNull()]$After
+    )
+    if ($null -eq $Before -or $null -eq $After) { return $false }
+    foreach ($field in @('TargetPath', 'Arguments', 'WorkingDirectory', 'IconLocation')) {
+        if ("$($Before.$field)" -ne "$($After.$field)") { return $false }
+    }
+    return $true
+}
+
+function Test-OwnedDesktopShortcutFields {
+    <#
+    .SYNOPSIS
+      Checks the explicit installer-owned desktop-shortcut fields.
+    .DESCRIPTION
+      Verifies TargetPath, empty Arguments, WorkingDirectory, and IconLocation.
+      Description is deliberately not constrained; see Get-ShortcutSnapshot.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ExpectedExePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedWorkingDirectory
+    )
+    if ($null -eq $Snapshot) { return $false }
+    if (-not [string]::Equals("$($Snapshot.TargetPath)".Trim(), $ExpectedExePath.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if (-not [string]::IsNullOrEmpty("$($Snapshot.Arguments)")) { return $false }
+    if (-not [string]::Equals("$($Snapshot.WorkingDirectory)".Trim().TrimEnd('\'), $ExpectedWorkingDirectory.Trim().TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $icon = "$($Snapshot.IconLocation)".Trim()
+    $expectedIconWithIndex = "$($ExpectedExePath.Trim()),0"
+    if (-not [string]::Equals($icon, $expectedIconWithIndex, [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($icon, $ExpectedExePath.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return $true
 }
 
 function New-EphemeralStandardUserName {
@@ -363,7 +549,15 @@ function New-ChildBootstrapScriptContent {
         [Parameter(Mandatory = $true)][string]$InstallerFileName,
         [Parameter(Mandatory = $true)][string]$FixtureFileName,
         [Parameter(Mandatory = $true)][string]$ChildReportFileName,
-        [Parameter(Mandatory = $true)][string]$ChildProofFileName
+        [Parameter(Mandatory = $true)][string]$ChildProofFileName,
+        [string]$ExpectedVersion = "0.1.0",
+        [string]$UpgradeFromInstallerFileName = "",
+        [string]$PortableClosureFileName = "",
+        [string]$ExpectedPortableClosureSha256 = "",
+        [string]$ExpectedCandidateCommitSha = "",
+        [string]$ExpectedCandidateTreeSha = "",
+        [string]$ExpectedPortableSha256 = "",
+        [string]$ExpectedPackageName = ""
     )
 
     $template = @'
@@ -533,13 +727,31 @@ $childReportPath = Join-Path $outputDir '__CHILD_REPORT_FILE_NAME__'
 $harnessScript = Join-Path $inputsDir 'test-installer-lifecycle.ps1'
 $powershellExe = Join-Path $system32 'WindowsPowerShell\v1.0\powershell.exe'
 
-& $powershellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harnessScript `
-    -InstallerPath $installerPath `
-    -ExpectedVersion '0.1.0' `
-    -FixturePath $fixturePath `
-    -ReportPath $childReportPath `
-    -RequireStandardUser `
-    -AllowDisposableExecution
+$harnessArgs = @(
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $harnessScript,
+    '-InstallerPath', $installerPath,
+    '-ExpectedVersion', '__EXPECTED_VERSION__',
+    '-FixturePath', $fixturePath,
+    '-ReportPath', $childReportPath,
+    '-RequireStandardUser',
+    '-AllowDisposableExecution'
+)
+$upgradeFile = '__UPGRADE_INSTALLER_FILE_NAME__'
+if (-not [string]::IsNullOrWhiteSpace($upgradeFile)) {
+    $harnessArgs += @('-UpgradeFromInstallerPath', (Join-Path $inputsDir $upgradeFile))
+}
+$closureFile = '__PORTABLE_CLOSURE_FILE_NAME__'
+if (-not [string]::IsNullOrWhiteSpace($closureFile)) {
+    $harnessArgs += @(
+        '-PortableClosurePath', (Join-Path $inputsDir $closureFile),
+        '-PortableClosureSha256', '__PORTABLE_CLOSURE_SHA256__',
+        '-ExpectedCandidateCommitSha', '__EXPECTED_CANDIDATE_COMMIT_SHA__',
+        '-ExpectedCandidateTreeSha', '__EXPECTED_CANDIDATE_TREE_SHA__',
+        '-ExpectedPortableSha256', '__EXPECTED_PORTABLE_SHA256__',
+        '-ExpectedPackageName', '__EXPECTED_PACKAGE_NAME__'
+    )
+}
+& $powershellExe @harnessArgs
 
 exit $LASTEXITCODE
 '@
@@ -551,7 +763,15 @@ exit $LASTEXITCODE
         Replace('__INSTALLER_FILE_NAME__', $InstallerFileName).
         Replace('__FIXTURE_FILE_NAME__', $FixtureFileName).
         Replace('__CHILD_REPORT_FILE_NAME__', $ChildReportFileName).
-        Replace('__CHILD_PROOF_FILE_NAME__', $ChildProofFileName)
+        Replace('__CHILD_PROOF_FILE_NAME__', $ChildProofFileName).
+        Replace('__EXPECTED_VERSION__', $ExpectedVersion).
+        Replace('__UPGRADE_INSTALLER_FILE_NAME__', $UpgradeFromInstallerFileName).
+        Replace('__PORTABLE_CLOSURE_FILE_NAME__', $PortableClosureFileName).
+        Replace('__PORTABLE_CLOSURE_SHA256__', $ExpectedPortableClosureSha256).
+        Replace('__EXPECTED_CANDIDATE_COMMIT_SHA__', $ExpectedCandidateCommitSha).
+        Replace('__EXPECTED_CANDIDATE_TREE_SHA__', $ExpectedCandidateTreeSha).
+        Replace('__EXPECTED_PORTABLE_SHA256__', $ExpectedPortableSha256).
+        Replace('__EXPECTED_PACKAGE_NAME__', $ExpectedPackageName)
 }
 
 function Test-ChildReportIntegrity {
@@ -561,7 +781,12 @@ function Test-ChildReportIntegrity {
         [Parameter(Mandatory = $true)][string]$ExpectedInstallerSha,
         [AllowNull()][object]$ProofData,
         [Parameter(Mandatory = $true)][string]$ExpectedProfileImagePath,
-        [string]$ControllerSid = $null
+        [string]$ControllerSid = "",
+        [switch]$RequireUpgradeChecks,
+        [string]$ExpectedPortableClosureSha256 = "",
+        [string]$ExpectedCandidateCommitSha = "",
+        [string]$ExpectedCandidateTreeSha = "",
+        [string]$ExpectedPortableSha256 = ""
     )
 
     if ($null -eq $ReportData) {
@@ -632,31 +857,34 @@ function Test-ChildReportIntegrity {
         throw "Proof userTempFolder ('$uTemp') is not located beneath localAppDataFolder ('$lApp')!"
     }
 
-    # Verify exact 28 check names
-    $requiredNames = Get-StandardLifecycleRequiredCheckNames
-    $checks = @($ReportData.checks)
-    if ($checks.Count -ne $requiredNames.Count) {
-        throw "Child report check count mismatch: expected exactly $($requiredNames.Count) checks, found $($checks.Count)"
+    # Bind the report to the same pinned closure and independently supplied source identity.
+    foreach ($pair in @(
+        @('portableClosureSha256', $ExpectedPortableClosureSha256),
+        @('expectedCandidateCommitSha', $ExpectedCandidateCommitSha),
+        @('expectedCandidateTreeSha', $ExpectedCandidateTreeSha),
+        @('portablePayloadSha256', $ExpectedPortableSha256)
+    )) {
+        $propName = [string]$pair[0]
+        $expectedValue = [string]$pair[1]
+        if (-not [string]::IsNullOrWhiteSpace($expectedValue)) {
+            $hasProp = if ($ReportData -is [System.Collections.IDictionary]) {
+                $ReportData.Contains($propName)
+            } else {
+                [bool]$ReportData.PSObject.Properties[$propName]
+            }
+            if (-not $hasProp) {
+                throw "Child report is missing pinned identity field '$propName'"
+            }
+            $actualValue = if ($ReportData -is [System.Collections.IDictionary]) { $ReportData[$propName] } else { $ReportData.$propName }
+            if ("$actualValue".Trim().ToLowerInvariant() -ne $expectedValue.Trim().ToLowerInvariant()) {
+                throw "Child report $propName mismatch: expected '$expectedValue', got '$actualValue'"
+            }
+        }
     }
 
-    $seenNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($check in $checks) {
-        $cName = "$($check.name)".Trim()
-        $cStatus = "$($check.status)".Trim()
-        if ($seenNames.Contains($cName)) {
-            throw "Duplicate check detected in child report: '$cName'"
-        }
-        $seenNames.Add($cName) | Out-Null
-        if ($cStatus -ne "pass") {
-            throw "Child check '$cName' has non-passing status: '$cStatus'"
-        }
-    }
-
-    foreach ($req in $requiredNames) {
-        if (-not $seenNames.Contains($req)) {
-            throw "Missing required check in child report: '$req'"
-        }
-    }
+    # Verify exact check names and reject any skipped/warning substitute.
+    $requiredNames = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks:$RequireUpgradeChecks)
+    Test-LifecycleReportContract -ReportData $ReportData -RequiredCheckNames $requiredNames -Context "child report" | Out-Null
 
     return $true
 }

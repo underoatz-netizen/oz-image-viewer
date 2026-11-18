@@ -57,6 +57,7 @@
 #include "paste_install.hpp"
 #include "copy_controller.hpp"
 #include "print_controller.hpp"
+#include "print_dialog.hpp"
 #include "print_job.hpp"
 #include "drop_classify.hpp"
 #include "drop_flow.hpp"
@@ -345,6 +346,7 @@ struct app_state {
     // state, or the save checkpoint.
     std::unique_ptr<oz::viewer::print_controller> print_ctrl;
     bool print_ctrl_started = false;
+    bool print_dialog_in_progress = false;
     struct pending_print_state {
         std::uint64_t request_id = 0;
         std::uint64_t document_instance_id = 0;
@@ -1661,7 +1663,7 @@ static oz::viewer::ui_command_context current_ui_command_context(const app_state
     ctx.has_source = app.have_image && (app.current != nullptr);
 #endif
     ctx.copy_busy = app.pending_copy.has_value() || (app.copy_ctrl && app.copy_ctrl->is_active());
-    ctx.print_busy = app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active());
+    ctx.print_busy = is_print_active(app);
 
     ctx.is_fit_mode = (app.view.mode == oz::viewer_core::view_mode::fit);
     ctx.is_fullscreen = app.is_fullscreen;
@@ -2978,13 +2980,14 @@ static void start_open_file_dialog(app_state& app) {
     }
 }
 
-// True while a Print is pending/in flight (or its completion has not been
-// consumed): interactive commands stay disabled until it settles. Print is
+// True while a Print dialog is in progress, pending, or in flight (or its completion
+// has not been consumed): interactive commands stay disabled until it settles. Print is
 // read-only, so in-flight document switches remain safe; the completion is
 // still accepted only for the matching request/document. Unconditional so
 // both Editing-ON and Editing-OFF paths can gate on it.
 static bool is_print_active(const app_state& app) {
-    return app.pending_print.has_value() || (app.print_ctrl && app.print_ctrl->is_active());
+    return app.print_dialog_in_progress || app.pending_print.has_value() ||
+           (app.print_ctrl && app.print_ctrl->is_active());
 }
 
 // Launch start_copy_image
@@ -3150,13 +3153,14 @@ static std::wstring print_error_ui_message(oz::viewer::print_error error,
 // Stage 9.8: Print the current file-backed document (interactive File ->
 // Print / Ctrl+P). Validates state and captures the document identity, the
 // copied active commands, and the immutable source/baseline exactly like the
-// copy path, then presents PrintDlgExW with PD_RETURNDC on the UI thread.
-// Dialog cancellation (dwResultAction != PD_RESULT_PRINT) is quiet: no spool
-// call, no state change. On explicit Print the HDC transfers exclusively to
-// the single-flight worker, which materializes once and spools a single
-// fit-to-page page. Never mutates source, history, dirty state, or the save
-// checkpoint. Benchmark and navigation-benchmark modes never reach here
-// (guarded at every caller and at entry).
+// copy path, then presents the system Print dialog with PD_RETURNDC on the UI thread.
+// Dialog cancellation or apply-only is quiet: no spool call, no state change.
+// A recoverable dialog/COM initialization failure prompts without printing.
+// On explicit Print the HDC transfers exclusively to the single-flight worker,
+// which materializes once and spools a single fit-to-page page. Never mutates
+// source, history, dirty state, or the save checkpoint. Benchmark and
+// navigation-benchmark modes never reach here (guarded at every caller and at
+// entry).
 static void start_print(app_state& app) {
     if (app.benchmark || app.nav_benchmark) return;
     if (!app.have_image || !app.current || !app.doc.has_document) return;
@@ -3256,35 +3260,32 @@ static void start_print(app_state& app) {
     req.memory_budget = 0;
 #endif
 
-    // Explicit Print dialog with PD_RETURNDC. Cancellation is
-    // dwResultAction != PD_RESULT_PRINT. Dialog, devmode, devnames, and DC
-    // ownership are always released here; only an explicitly printed HDC
-    // leaves this scope, and then solely into the worker submit below.
-    PRINTDLGEXW pdx{};
-    pdx.lStructSize = sizeof(pdx);
-    pdx.hwndOwner = app.hwnd;
-    pdx.Flags = PD_RETURNDC | PD_NOPAGENUMS | PD_NOSELECTION;
-    pdx.nStartPage = START_PAGE_GENERAL;
-    const HRESULT dlg_hr = PrintDlgExW(&pdx);
-    HDC print_hdc = nullptr;
-    if (SUCCEEDED(dlg_hr) && pdx.dwResultAction == PD_RESULT_PRINT) {
-        print_hdc = pdx.hDC;
-        pdx.hDC = nullptr;
+    // RAII attempt guard: sets app.print_dialog_in_progress before COM/dialog preparation
+    // and keeps is_print_active (and thus current_ui_command_context().print_busy) true
+    // through dialog presentation, handle cleanup, COM teardown, error prompt, and
+    // until pending_print is safely installed.
+    oz::viewer::basic_print_attempt_guard dlg_guard(app, [](app_state& s) {
+        update_edit_menu_state(s);
+    });
+
+    // Bounded local STA Print Dialog helper with strict S_OK/S_FALSE CoUninitialize balancing.
+    auto dlg_res = oz::viewer::show_print_dialog(app.hwnd);
+
+    if (dlg_res.outcome == oz::viewer::print_dialog_outcome::com_init_failed ||
+        dlg_res.outcome == oz::viewer::print_dialog_outcome::dialog_failed) {
+        // Recoverable error: prompt the user without hanging or quiet-cancelling.
+        if (!noninteractive_mode(app)) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_PRINT_TITLE);
+            const std::wstring content = oz::viewer::viewer_string(IDS_PRINT_ERR_DIALOG_FAILED);
+            static_cast<void>(oz::viewer::show_prompt(
+                app.hwnd, title.c_str(), content.c_str(),
+                nullptr, MB_OK, MB_ICONWARNING));
+        }
+        return;
     }
-    if (pdx.hDevMode) {
-        GlobalFree(pdx.hDevMode);
-        pdx.hDevMode = nullptr;
-    }
-    if (pdx.hDevNames) {
-        GlobalFree(pdx.hDevNames);
-        pdx.hDevNames = nullptr;
-    }
-    if (pdx.hDC) {
-        DeleteDC(pdx.hDC);
-        pdx.hDC = nullptr;
-    }
-    if (print_hdc == nullptr) {
-        return;  // Dialog cancel or dialog failure: quiet, everything preserved.
+
+    if (dlg_res.outcome != oz::viewer::print_dialog_outcome::success_print || dlg_res.hdc == nullptr) {
+        return;  // Dialog cancelled or apply_only: quiet cancellation with all handles freed.
     }
 
     // Lazy creation on the first explicit Print: startup and benchmark modes
@@ -3295,18 +3296,20 @@ static void start_print(app_state& app) {
         app.print_ctrl_started = true;
     }
 
+    // Keep dlg_res owning the printer DC until submit_request consumes it.
     app_state::pending_print_state pending;
     pending.document_instance_id = req.document_instance_id;
     pending.diagnostic_revision = req.diagnostic_revision;
     pending.document_generation = app.doc.generation;
-    req.printer_dc = print_hdc;
-    print_hdc = nullptr;
+    req.printer_dc = dlg_res.release_hdc();
     pending.request_id = app.print_ctrl->submit_request(std::move(req));
     if (pending.request_id == 0) {
         return;  // Rejected (no DC supplied or raced busy): HDC already released.
     }
     app.pending_print = pending;
 
+    // Transition directly to pending_print without leaving any command-enablement gap.
+    dlg_guard.disengage_and_preserve();
     update_edit_menu_state(app);
 }
 

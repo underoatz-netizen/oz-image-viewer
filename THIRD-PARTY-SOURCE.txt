@@ -1,15 +1,20 @@
 ================================================================================
-OZ Image Viewer — Third-Party Source & Provenance
+PikaView (formerly OZ Image Viewer) — Third-Party Source & Provenance
 ================================================================================
 
 This document provides the exact source repositories, pinned revision tags,
 upstream archive digests, port configurations, and rebuild instructions for
-all third-party components incorporated into OZ Image Viewer.
+all third-party components incorporated into PikaView.
+
+First-party PikaView code is licensed under the MIT License
+(Copyright (c) 2026 OZ Lab); see LICENSE. Third-party components remain under
+their upstream licenses described below and in THIRD-PARTY-NOTICES.md and
+THIRD-PARTY-LICENSES.txt.
 
 In particular, for components licensed under the GNU Lesser General Public
 License (libheif 1.23.2 and libde265 1.1.1), complete corresponding source code,
 patches, build scripts, and build instructions are packaged into the
-separate release asset 'ozviewer-0.1.0-lgpl-corresponding-source.zip'
+separate release asset 'pikaview-0.1.1-lgpl-corresponding-source.zip'
 accompanying binary distributions following the source-distribution provisions
 of GPLv3 §6(d) and combined-work shared-library provisions of LGPLv3 §4.
 
@@ -127,9 +132,9 @@ LGPL Source & Rebuild Instructions
 ================================================================================
 
 To rebuild heif.dll and libde265.dll from the corresponding source asset:
-1. Extract ozviewer-0.1.0-lgpl-corresponding-source.zip.
+1. Extract pikaview-0.1.1-lgpl-corresponding-source.zip.
 2. Refer to README-BUILD-LGPL.txt inside the archive.
 3. Run the provided build-lgpl-dlls.ps1 script using MSVC 2022 and CMake.
-4. Replace heif.dll and libde265.dll in your OZ Image Viewer directory.
+4. Replace heif.dll and libde265.dll in your PikaView directory.
    The application verifies ABI compatibility dynamically at runtime.
 

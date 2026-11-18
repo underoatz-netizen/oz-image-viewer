@@ -1,6 +1,9 @@
-// ozviewer.rc - application resources for the WIN32 ozviewer executable.
+// ozviewer.rc - application resources for the WIN32 PikaView executable.
 //
-// The single icon resource below gives ozviewer.exe its window, taskbar, and
+// The internal executable name remains ozviewer.exe for compatibility; the
+// user-visible product name is PikaView.
+//
+// The single icon resource below gives PikaView its window, taskbar, and
 // Explorer/Shell icon. The identifier lives in ozviewer_resources.h so the
 // resource compiler and the C++ code share one definition; the numeric value
 // (101) sits outside the system-reserved IDI_* range.
@@ -24,12 +27,12 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 STRINGTABLE
 BEGIN
-    IDS_APP_TITLE               "OZ Image Viewer"
-    IDS_APP_TITLE_CROP          "OZ Image Viewer — Crop (Enter: Apply, Esc: Cancel)"
+    IDS_APP_TITLE               "PikaView"
+    IDS_APP_TITLE_CROP          "PikaView — Crop (Enter: Apply, Esc: Cancel)"
     IDS_FALLBACK_IMAGE_NAME     "Image"
     IDS_STATUS_NO_IMAGE         "No image open"
     IDS_OPEN_BUTTON             "Open Image..."
-    IDS_TOOLBAR_NAME            "OZ Viewer Toolbar"
+    IDS_TOOLBAR_NAME            "PikaView Toolbar"
     IDS_STATE_CROP_MODE         "Crop mode"
     IDS_STATE_SAVING            "Saving..."
     IDS_STATE_PRINTING          "Printing..."
@@ -280,6 +283,7 @@ BEGIN
     IDS_PRINT_ERR_SPOOL         "The printer did not accept the page. Check the printer queue; the document is unchanged."
     IDS_PRINT_TITLE             "Print"
     IDS_PRINT_UNCHANGED         "The document is unchanged."
+    IDS_PRINT_ERR_DIALOG_FAILED "The system print dialog could not be initialized. Nothing was printed."
 
     IDS_DELETE_TITLE                "Delete"
     IDS_DELETE_HEAD_GENERIC         "Unable to move the file to the Recycle Bin."

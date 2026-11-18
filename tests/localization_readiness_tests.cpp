@@ -371,7 +371,8 @@ void test_drop_policy_text_parity() {
     // The dependency-free drop_flow policy seam owns the English drop-rejection
     // wording; the viewer now resolves it through the shared string ids at the
     // presentation boundary. Tie the seam's literals to the resource/fallback
-    // table so the two cannot drift.
+    // table so the two cannot drift, and pin the accepted PikaView display name.
+    CHECK(viewer_string_fallback(IDS_APP_TITLE) == std::wstring(L"PikaView"));
     const drop_reject_text overload = describe_drop_overload();
     CHECK(viewer_string_fallback(IDS_APP_TITLE) == std::wstring(overload.title));
     CHECK(viewer_string_fallback(IDS_DROP_HEAD_BUSY) == std::wstring(overload.headline));

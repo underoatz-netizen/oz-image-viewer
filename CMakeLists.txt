@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(ozbench
-    VERSION 0.1.0
-    DESCRIPTION "Stage 0 benchmark harness for the OZ image viewer"
+    VERSION 0.1.1
+    DESCRIPTION "PikaView (formerly OZ Image Viewer) benchmark harness and native Windows image viewer"
     LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------
@@ -29,6 +29,14 @@ endif()
 option(OZBENCH_USE_NLOHMANN "Use pinned nlohmann-json from vcpkg for the runner" OFF)
 if(OZBENCH_USE_NLOHMANN)
     find_package(nlohmann_json CONFIG REQUIRED)
+endif()
+
+# Private bounded print-dialog diagnostics. Release builds must keep this OFF;
+# the recovered print dialog/controller sources and release-provenance scripts
+# expect this cache entry to exist explicitly.
+option(OZVIEWER_PRINT_DIAGNOSTICS "Enable bounded stderr diagnostics for print dialog lifecycle" OFF)
+if(OZVIEWER_PRINT_DIAGNOSTICS)
+    add_compile_definitions(OZVIEWER_PRINT_DIAGNOSTICS)
 endif()
 
 add_subdirectory(src/markers)

@@ -43,10 +43,14 @@ std::size_t print_default_memory_budget() noexcept {
 
 }  // namespace
 
-void release_print_dc(void* printer_dc) noexcept {
+void release_print_dc(void* printer_dc, print_dc_deleter_fn deleter) noexcept {
     try {
         if (printer_dc) {
-            DeleteDC(static_cast<HDC>(printer_dc));
+            if (deleter) {
+                deleter(printer_dc);
+            } else {
+                DeleteDC(static_cast<HDC>(printer_dc));
+            }
         }
     } catch (...) {
     }
@@ -83,19 +87,37 @@ void print_controller::worker_loop() {
         comp.document_generation = req.document_generation;
 
         // Exclusive HDC ownership: released exactly once on every path below.
-        HDC hdc = static_cast<HDC>(req.printer_dc);
+        void* owned_dc = req.printer_dc;
+        req.printer_dc = nullptr;
+        HDC hdc = static_cast<HDC>(owned_dc);
+        const print_dc_deleter_fn custom_deleter = dc_deleter_;
+
+        auto release_owned_dc = [&]() noexcept {
+            if (owned_dc) {
+                void* to_release = owned_dc;
+                owned_dc = nullptr;
+                hdc = nullptr;
+                release_print_dc(to_release, custom_deleter);
+            }
+        };
+
         struct dc_guard {
-            HDC h = nullptr;
+            void*& dc_ref;
+            print_dc_deleter_fn del;
             ~dc_guard() {
-                if (h) {
-                    DeleteDC(h);
+                if (dc_ref) {
+                    void* to_release = dc_ref;
+                    dc_ref = nullptr;
+                    release_print_dc(to_release, del);
                 }
             }
         };
-        dc_guard guard{hdc};
-        req.printer_dc = nullptr;
+        dc_guard guard{owned_dc, custom_deleter};
 
         auto finish = [&](print_completion_msg c) {
+            // Idempotently release the printer DC before acquiring comp_mutex_,
+            // queueing completion, or notifying the UI thread.
+            release_owned_dc();
             std::lock_guard<std::mutex> lock(comp_mutex_);
             completions_.push_back(std::move(c));
             if (hwnd_) {

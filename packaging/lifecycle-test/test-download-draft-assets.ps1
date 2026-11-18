@@ -315,6 +315,115 @@ try {
     }
     Write-Host "  Test 6g (Mocked Invoke-WebRequest -UseBasicParsing & -OutFile assertion) PASSED"
 
+    # Test 6h: Authenticated tag -> expected commit/tree resolution (annotated tag peel)
+    $tagCommit = ("a" * 40)
+    $tagTree = ("b" * 40)
+    $annotatedTagSha = ("e" * 40)
+    $resolutionPath = Join-Path $tempDir "tag-resolution.json"
+    $global:resolutionCalls = @()
+    $mockReleaseForResolution = [PSCustomObject]@{
+        id = 436240766
+        draft = $true
+        tag_name = "v0.1.1"
+        assets = @(
+            [PSCustomObject]@{
+                id = 111
+                name = "file.zip"
+                url = "https://api.github.com/repos/owner/repo/releases/assets/111"
+            }
+        )
+    }
+    try {
+        function Invoke-RestMethod {
+            param([string]$Method, [string]$Uri, [hashtable]$Headers)
+            $global:resolutionCalls += $Uri
+            if ($Uri -match '/releases/436240766$') { return $mockReleaseForResolution }
+            if ($Uri -match '/git/ref/tags/v0\.1\.1$') {
+                return [PSCustomObject]@{ ref = "refs/tags/v0.1.1"; object = [PSCustomObject]@{ sha = $annotatedTagSha; type = "tag" } }
+            }
+            if ($Uri -match "/git/tags/$annotatedTagSha$") {
+                return [PSCustomObject]@{ object = [PSCustomObject]@{ sha = $tagCommit; type = "commit" } }
+            }
+            if ($Uri -match "/git/commits/$tagCommit$") {
+                return [PSCustomObject]@{ sha = $tagCommit; tree = [PSCustomObject]@{ sha = $tagTree } }
+            }
+            throw "Unexpected mocked API URL: $Uri"
+        }
+        function Invoke-WebRequest {
+            param([switch]$UseBasicParsing, [string]$Method, [string]$Uri, [hashtable]$Headers, [string]$OutFile)
+            [System.IO.File]::WriteAllBytes($OutFile, [byte[]]@(0x50, 0x4B, 0x05, 0x06))
+        }
+        & $scriptPath -Repository "owner/repo" -CandidateReleaseId "436240766" -CandidateTag "v0.1.1" `
+            -ExpectedAssetNames @("file.zip") -DestinationDir $tempDir -AuthToken "dummy" `
+            -ExpectedCommitSha $tagCommit -ExpectedTreeSha $tagTree -ResolutionOutputPath $resolutionPath
+        if (-not (Test-Path -LiteralPath $resolutionPath)) { throw "Test 6h failed: resolution output missing." }
+        $resolution = Get-Content -LiteralPath $resolutionPath -Raw | ConvertFrom-Json
+        if ($resolution.commitSha -ne $tagCommit -or $resolution.treeSha -ne $tagTree) {
+            throw "Test 6h failed: resolution output mismatch."
+        }
+    } finally {
+        Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+    }
+    Write-Host "  Test 6h (Authenticated tag resolution and annotated peel) PASSED"
+
+    # Test 6i: Reject a tag that resolves to a different commit than expected
+    try {
+        function Invoke-RestMethod {
+            param([string]$Method, [string]$Uri, [hashtable]$Headers)
+            if ($Uri -match '/releases/436240766$') { return $mockReleaseForResolution }
+            if ($Uri -match '/git/ref/tags/v0\.1\.1$') {
+                return [PSCustomObject]@{ ref = "refs/tags/v0.1.1"; object = [PSCustomObject]@{ sha = ("f" * 40); type = "commit" } }
+            }
+            throw "Unexpected mocked API URL: $Uri"
+        }
+        $threw = $false
+        try {
+            & $scriptPath -Repository "owner/repo" -CandidateReleaseId "436240766" -CandidateTag "v0.1.1" `
+                -ExpectedAssetNames @("file.zip") -DestinationDir $tempDir -AuthToken "dummy" `
+                -ExpectedCommitSha $tagCommit -ExpectedTreeSha $tagTree
+        } catch {
+            $threw = $true
+            if ($_.Exception.Message -notmatch "resolves to commit") {
+                throw "Test 6i failed: Unexpected message: $($_.Exception.Message)"
+            }
+        }
+        if (-not $threw) { throw "Test 6i failed: Expected tag commit mismatch rejection." }
+    } finally {
+        Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+    }
+    Write-Host "  Test 6i (Tag commit mismatch rejection) PASSED"
+
+    # Test 6j: Reject a commit whose tree does not match expected
+    try {
+        function Invoke-RestMethod {
+            param([string]$Method, [string]$Uri, [hashtable]$Headers)
+            if ($Uri -match '/releases/436240766$') { return $mockReleaseForResolution }
+            if ($Uri -match '/git/ref/tags/v0\.1\.1$') {
+                return [PSCustomObject]@{ ref = "refs/tags/v0.1.1"; object = [PSCustomObject]@{ sha = $tagCommit; type = "commit" } }
+            }
+            if ($Uri -match "/git/commits/$tagCommit$") {
+                return [PSCustomObject]@{ sha = $tagCommit; tree = [PSCustomObject]@{ sha = ("0" * 40) } }
+            }
+            throw "Unexpected mocked API URL: $Uri"
+        }
+        $threw = $false
+        try {
+            & $scriptPath -Repository "owner/repo" -CandidateReleaseId "436240766" -CandidateTag "v0.1.1" `
+                -ExpectedAssetNames @("file.zip") -DestinationDir $tempDir -AuthToken "dummy" `
+                -ExpectedCommitSha $tagCommit -ExpectedTreeSha $tagTree
+        } catch {
+            $threw = $true
+            if ($_.Exception.Message -notmatch "has tree") {
+                throw "Test 6j failed: Unexpected message: $($_.Exception.Message)"
+            }
+        }
+        if (-not $threw) { throw "Test 6j failed: Expected tree mismatch rejection." }
+    } finally {
+        Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+    }
+    Write-Host "  Test 6j (Commit tree mismatch rejection) PASSED"
+
     # Test 7: Live non-binary check against draft release 436240766 if requested (SHA256SUMS text file only)
     if ($RunLiveDownloadTest) {
         $token = (& gh auth token).Trim()

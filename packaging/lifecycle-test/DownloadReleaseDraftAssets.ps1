@@ -15,7 +15,16 @@ param (
     [string]$DestinationDir,
 
     [Parameter(Mandatory = $false)]
-    [string]$AuthToken = $null
+    [string]$AuthToken = $null,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedCommitSha = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedTreeSha = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ResolutionOutputPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -44,6 +53,25 @@ if ($trimmedId -notmatch '^[1-9][0-9]*$') {
 $trimmedTag = $CandidateTag.Trim()
 if ([string]::IsNullOrWhiteSpace($trimmedTag)) {
     throw "CandidateTag cannot be empty."
+}
+if ($trimmedTag -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+    throw "Invalid CandidateTag: '$CandidateTag'. Refusing unsafe ref characters."
+}
+
+$hasExpectedCommit = -not [string]::IsNullOrWhiteSpace($ExpectedCommitSha)
+$hasExpectedTree = -not [string]::IsNullOrWhiteSpace($ExpectedTreeSha)
+if ($hasExpectedCommit -ne $hasExpectedTree) {
+    throw "ExpectedCommitSha and ExpectedTreeSha must be supplied together."
+}
+if ($hasExpectedCommit) {
+    $ExpectedCommitSha = $ExpectedCommitSha.Trim().ToLowerInvariant()
+    $ExpectedTreeSha = $ExpectedTreeSha.Trim().ToLowerInvariant()
+    if ($ExpectedCommitSha -notmatch '^[0-9a-f]{40}$') {
+        throw "ExpectedCommitSha must be exactly 40 lowercase hex characters."
+    }
+    if ($ExpectedTreeSha -notmatch '^[0-9a-f]{40}$') {
+        throw "ExpectedTreeSha must be exactly 40 lowercase hex characters."
+    }
 }
 
 # Validate ExpectedAssetNames are safe, non-empty, flat names without path separators or directory traversal, and unique
@@ -121,6 +149,79 @@ if ("$($releaseResponse.tag_name)" -ne $trimmedTag) {
 }
 
 Write-Host "Release validation successful: ID $($releaseResponse.id), tag '$($releaseResponse.tag_name)', draft=$($releaseResponse.draft)."
+
+# 4b. Resolve the candidate tag through the authenticated trusted fetch boundary.
+$resolvedCommitSha = $null
+$resolvedTreeSha = $null
+if ($hasExpectedCommit) {
+    $refApiUrl = "https://api.github.com/repos/$trimmedRepo/git/ref/tags/$trimmedTag"
+    Write-Host "Resolving candidate tag through authenticated GitHub API: $refApiUrl"
+    $refResponse = Invoke-RestMethod -Method Get -Uri $refApiUrl -Headers $requestHeaders
+    if ("$($refResponse.ref)" -ne "refs/tags/$trimmedTag") {
+        throw "Tag ref mismatch: expected 'refs/tags/$trimmedTag', got '$($refResponse.ref)'."
+    }
+    if ($null -eq $refResponse.object -or [string]::IsNullOrWhiteSpace("$($refResponse.object.sha)")) {
+        throw "Tag ref response is missing an object SHA."
+    }
+
+    $tagObject = $refResponse.object
+    $peelDepth = 0
+    while ("$($tagObject.type)" -eq "tag") {
+        $peelDepth++
+        if ($peelDepth -gt 8) {
+            throw "Candidate tag annotation nesting exceeds the safe peel depth."
+        }
+        $tagSha = "$($tagObject.sha)".Trim().ToLowerInvariant()
+        if ($tagSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Annotated tag object SHA is invalid: '$tagSha'."
+        }
+        $tagApiUrl = "https://api.github.com/repos/$trimmedRepo/git/tags/$tagSha"
+        $tagResponse = Invoke-RestMethod -Method Get -Uri $tagApiUrl -Headers $requestHeaders
+        if ($null -eq $tagResponse.object) {
+            throw "Annotated tag object '$tagSha' is missing its target object."
+        }
+        $tagObject = $tagResponse.object
+    }
+    if ("$($tagObject.type)" -ne "commit") {
+        throw "Candidate tag '$trimmedTag' does not resolve to a commit (type='$($tagObject.type)')."
+    }
+    $resolvedCommitSha = "$($tagObject.sha)".Trim().ToLowerInvariant()
+    if ($resolvedCommitSha -notmatch '^[0-9a-f]{40}$') {
+        throw "Resolved tag commit SHA is invalid: '$resolvedCommitSha'."
+    }
+    if ($resolvedCommitSha -ne $ExpectedCommitSha) {
+        throw "Candidate tag '$trimmedTag' resolves to commit '$resolvedCommitSha', not expected '$ExpectedCommitSha'."
+    }
+
+    $commitApiUrl = "https://api.github.com/repos/$trimmedRepo/git/commits/$resolvedCommitSha"
+    $commitResponse = Invoke-RestMethod -Method Get -Uri $commitApiUrl -Headers $requestHeaders
+    if ($null -eq $commitResponse.tree -or [string]::IsNullOrWhiteSpace("$($commitResponse.tree.sha)")) {
+        throw "Commit '$resolvedCommitSha' response is missing its tree SHA."
+    }
+    $resolvedTreeSha = "$($commitResponse.tree.sha)".Trim().ToLowerInvariant()
+    if ($resolvedTreeSha -notmatch '^[0-9a-f]{40}$') {
+        throw "Resolved commit tree SHA is invalid: '$resolvedTreeSha'."
+    }
+    if ($resolvedTreeSha -ne $ExpectedTreeSha) {
+        throw "Candidate commit '$resolvedCommitSha' has tree '$resolvedTreeSha', not expected '$ExpectedTreeSha'."
+    }
+    Write-Host "Verified authenticated tag '$trimmedTag' -> commit $resolvedCommitSha, tree $resolvedTreeSha."
+
+    if (-not [string]::IsNullOrWhiteSpace($ResolutionOutputPath)) {
+        $resolutionDir = Split-Path -Parent $ResolutionOutputPath
+        if (-not [string]::IsNullOrWhiteSpace($resolutionDir) -and -not (Test-Path -LiteralPath $resolutionDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $resolutionDir -Force | Out-Null
+        }
+        $resolution = [ordered]@{
+            repository = $trimmedRepo
+            tag        = $trimmedTag
+            commitSha  = $resolvedCommitSha
+            treeSha    = $resolvedTreeSha
+        }
+        [System.IO.File]::WriteAllText($ResolutionOutputPath, ($resolution | ConvertTo-Json -Depth 3), (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "Wrote tag resolution evidence: $ResolutionOutputPath"
+    }
+}
 
 # 5. Validate assets collection
 $assets = @($releaseResponse.assets)

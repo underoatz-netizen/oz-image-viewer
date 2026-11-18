@@ -4,7 +4,9 @@
 // Deliberately separate from save_controller, copy_controller, and the
 // renderer:
 // - exactly one pending/in-flight print; a second submit is rejected rather
-//   than replacing the first (the caller keeps HDC ownership on rejection);
+//   than replacing the first (the controller consumes and releases rejected HDC);
+// - the worker releases the transferred printer DC before queueing or
+//   notifying any completion;
 // - the worker source-acquires/materializes the full-resolution edited result
 //   exactly once from the immutable canonical source, composites it over
 //   opaque white to a 24-bpp BGR DIB, and spools a single fit-to-page page;
@@ -27,9 +29,12 @@
 
 namespace oz::viewer {
 
-// Release helper for a transferred printer DC (DeleteDC). Defined in
-// print_controller.cpp; used by submit_request on the reject path.
-void release_print_dc(void* printer_dc) noexcept;
+// Deleter signature for printer device context handles. Default production
+// implementation invokes DeleteDC. Tests may inject a custom deleter.
+using print_dc_deleter_fn = void (*)(void*) noexcept;
+
+// Release helper for a transferred printer DC (invokes the given deleter or DeleteDC).
+void release_print_dc(void* printer_dc, print_dc_deleter_fn deleter = nullptr) noexcept;
 
 // Work request sent to the print worker.
 struct print_work_request {
@@ -88,9 +93,10 @@ public:
     print_controller(print_controller&&) = delete;
     print_controller& operator=(print_controller&&) = delete;
 
-    void start(void* hwnd_handle, unsigned int notify_msg) {
+    void start(void* hwnd_handle, unsigned int notify_msg, print_dc_deleter_fn deleter = nullptr) {
         hwnd_ = hwnd_handle;
         notify_msg_ = notify_msg;
+        dc_deleter_ = deleter;
         stop_requested_.store(false, std::memory_order_relaxed);
         cancel_requested_.store(false, std::memory_order_relaxed);
         worker_thread_ = std::jthread([this] { worker_loop(); });
@@ -115,7 +121,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (request_active_.load(std::memory_order_acquire) || has_pending_) {
-            release_print_dc(req.printer_dc);
+            release_print_dc(req.printer_dc, dc_deleter_);
             req.printer_dc = nullptr;
             return 0;
         }
@@ -166,6 +172,7 @@ private:
 
     void* hwnd_ = nullptr;
     unsigned int notify_msg_ = 0;
+    print_dc_deleter_fn dc_deleter_ = nullptr;
 
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> cancel_requested_{false};

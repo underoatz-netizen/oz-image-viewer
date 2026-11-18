@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build the LGPL Corresponding Source release asset (ozviewer-0.1.0-lgpl-corresponding-source.zip).
+  Build the LGPL Corresponding Source release asset (pikaview-<Version>-lgpl-corresponding-source.zip).
 
 .DESCRIPTION
   Packages exact upstream source archives, vcpkg portfiles and patches, custom triplets,
@@ -11,6 +11,9 @@
 .PARAMETER OutDir
   Output directory for the corresponding source zip and sha256 sidecar.
 
+.PARAMETER Version
+  Release version (e.g. "0.1.1"). When omitted, read from portable-package.json.
+
 .PARAMETER VcpkgRoot
   Root of the vcpkg repository containing ports and downloads.
 
@@ -20,6 +23,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$OutDir,
+    [string]$Version = "",
     [string]$VcpkgRoot = "",
     [string]$DownloadsDir = ""
 )
@@ -29,6 +33,17 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $metaPath = Join-Path $ScriptDir "portable-package.json"
+    if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+        $meta = Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json
+        $Version = [string]$meta.version
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "Version parameter was not provided and could not be determined from portable-package.json."
+}
 
 if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
     $candidates = @(
@@ -68,8 +83,8 @@ if (-not (Test-Path -LiteralPath $OutDir -PathType Container)) {
 }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 
-$tempStage = Join-Path $OutDir "ozviewer-0.1.0-lgpl-corresponding-source"
-if (Test-Path -LiteralPath $tempStage) { Remove-Item -LiteralPath $tempStage -Recurse -Force }
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pikaview-lgpl-stage-" + [System.Guid]::NewGuid().ToString("N"))
+$tempStage = Join-Path $tempRoot "pikaview-$Version-lgpl-corresponding-source"
 New-Item -ItemType Directory -Path $tempStage -Force | Out-Null
 
 # 1. Copy upstream source tarballs
@@ -80,10 +95,19 @@ $tarballs = @(
     "strukturag-libheif-v1.23.2.tar.gz",
     "strukturag-libde265-v1.1.1.tar.gz"
 )
+$expectedTarballHashes = @{
+    "strukturag-libheif-v1.23.2.tar.gz"  = "1405ed070421459b569ff49deab109b7f1a30a447e72a9b20a4154f774634a44"
+    "strukturag-libde265-v1.1.1.tar.gz" = "5b4fac677018e6074196e8f9889f3e4a5310e46afbf22a893f620d4e24d3510e"
+}
 foreach ($t in $tarballs) {
     $src = Join-Path $DownloadsDir $t
     if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
         throw "upstream source tarball not found: $src. Pass -DownloadsDir explicitly if located outside vcpkg root."
+    }
+    $actualHash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expHash = $expectedTarballHashes[$t]
+    if ($actualHash -ne $expHash) {
+        throw "upstream source tarball '$t' SHA-256 mismatch (observed $actualHash, expected $expHash)"
     }
     Copy-Item -LiteralPath $src -Destination (Join-Path $sourcesDir $t) -Force
 }
@@ -178,11 +202,11 @@ if (-not $foundDe265Lic) {
 # 5. Write README-BUILD-LGPL.txt
 $readme = @"
 ================================================================================
-OZ Image Viewer v0.1.0 — LGPL Corresponding Source Package
+PikaView (formerly OZ Image Viewer) v$Version — LGPL Corresponding Source Package
 ================================================================================
 
 This package contains the exact corresponding source code, patches, build scripts,
-and instructions for the LGPL v3 components distributed with OZ Image Viewer:
+and instructions for the LGPL v3 components distributed with PikaView:
 - libheif 1.23.2 (produces heif.dll)
 - libde265 1.1.1 (produces libde265.dll)
 
@@ -219,7 +243,7 @@ The build script will:
 4. Output rebuilt heif.dll and libde265.dll to .\bin (or specified -OutDir).
 
 Runtime DLL Replacement:
-OZ Image Viewer loads heif.dll and libde265.dll dynamically using LoadLibraryExW
+PikaView loads heif.dll and libde265.dll dynamically using LoadLibraryExW
 with LOAD_LIBRARY_SEARCH_APPLICATION_DIRECTORY. The executable ozviewer.exe does
 not hardcode internal checksums or import tables for these libraries. Users may
 replace heif.dll and libde265.dll in the application directory with any ABI-compatible
@@ -265,7 +289,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "================================================================================"
-Write-Host "OZ Image Viewer v0.1.0 — LGPL Rebuild Script"
+Write-Host "PikaView v__VERSION__ — LGPL Rebuild Script"
 Write-Host "Rebuilding heif.dll and libde265.dll..."
 Write-Host "================================================================================"
 
@@ -325,7 +349,7 @@ New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 $manifestContent = @"
 {
   "name": "ozviewer-lgpl-rebuild",
-  "version-string": "0.1.0",
+  "version-string": "__VERSION__",
   "dependencies": [
     {
       "name": "libheif",
@@ -383,12 +407,15 @@ Write-Host "LGPL Rebuild Successful!" -ForegroundColor Green
 Write-Host "Output files in ${OutDir}:"
 Get-ChildItem -Path $OutDir -Filter "*.dll" | Format-Table Name, Length, LastWriteTime
 '@
-[System.IO.File]::WriteAllText((Join-Path $tempStage "build-lgpl-dlls.ps1"), $buildScript.Trim(), (New-Object System.Text.UTF8Encoding($false)))
+$buildScriptFinal = $buildScript.Replace('__VERSION__', $Version)
+[System.IO.File]::WriteAllText((Join-Path $tempStage "build-lgpl-dlls.ps1"), $buildScriptFinal.Trim(), (New-Object System.Text.UTF8Encoding($false)))
 
 # 7. Create ZIP archive
-$zipName = "ozviewer-0.1.0-lgpl-corresponding-source.zip"
+$zipName = "pikaview-$Version-lgpl-corresponding-source.zip"
 $zipPath = Join-Path $OutDir $zipName
-if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+if (Test-Path -LiteralPath $zipPath) {
+    throw "output LGPL source ZIP already exists (refusing destructive overwrite): $zipPath"
+}
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::CreateFromDirectory($tempStage, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)

@@ -23,3 +23,6 @@ endif()
 
 add_executable(ozbench main.cpp)
 target_link_libraries(ozbench PRIVATE ozbench_lib oz_collector)
+# Keep --version and the usage banner aligned with the project version without
+# duplicating a literal in the runner source.
+target_compile_definitions(ozbench PRIVATE OZBENCH_PROJECT_VERSION="${PROJECT_VERSION}")

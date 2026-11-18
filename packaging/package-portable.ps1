@@ -59,6 +59,7 @@ param(
     [string]$Version = "",
     [string]$RuntimeDir = "",
     [string]$MetadataPath = "",
+    [string]$ProvenancePath = "",
     [string[]]$ExtraSearchDirs = @(),
     [switch]$NoZip
 )
@@ -367,7 +368,7 @@ foreach ($dll in @($metadata.requiredRuntimeDlls)) {
     }
 }
 
-$extensions = Get-SupportedExtensions -ExePath $entrypointPath -KnownExtensions @($metadata.knownImageExtensions)
+$extensions = @(Get-SupportedExtensions -ExePath $entrypointPath -KnownExtensions @($metadata.knownImageExtensions))
 if ($extensions.Count -eq 0) {
     Fail "could not derive any supported image extension from '$entrypointName' (build too old or strings changed)"
 }
@@ -378,7 +379,9 @@ if (-not (Test-Path -LiteralPath $OutDir -PathType Container)) {
 }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 $stageDir = Join-Path $OutDir $stageName
-if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
+if (Test-Path -LiteralPath $stageDir) {
+    Fail "output stage directory already exists (refusing destructive overwrite): $stageDir"
+}
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 $staged = @()
@@ -400,7 +403,147 @@ foreach ($key in ($closure.Keys | Sort-Object)) {
 }
 
 foreach ($license in @($metadata.licenseFiles)) {
-    $src = Join-Path $RepoRoot ([string]$license)
+    $licenseName = [string]$license
+    $src = ""
+    if ($licenseName -eq 'BUILD-PROVENANCE.json') {
+        if (-not [string]::IsNullOrWhiteSpace($ProvenancePath)) {
+            $src = $ProvenancePath
+        }
+        else {
+            $payloadProv = Join-Path $PayloadDir 'BUILD-PROVENANCE.json'
+            if (Test-Path -LiteralPath $payloadProv -PathType Leaf) {
+                $src = $payloadProv
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($src) -or -not (Test-Path -LiteralPath $src -PathType Leaf)) {
+            Fail "BUILD-PROVENANCE.json is required for package staging. Provide it via -ProvenancePath or place it in the payload directory. Do not rely on root fallback."
+        }
+        $src = (Resolve-Path -LiteralPath $src).Path
+        try {
+            $provData = Get-Content -LiteralPath $src -Raw | ConvertFrom-Json
+            if ([string]$provData.product.version -ne $Version) {
+                Fail "BUILD-PROVENANCE.json version '$($provData.product.version)' does not match package version '$Version'"
+            }
+            if ([string]$provData.product.tag -ne "v$Version") {
+                Fail "BUILD-PROVENANCE.json tag '$($provData.product.tag)' does not match expected 'v$Version'"
+            }
+            if ([string]$provData.product.packageName -ne [string]$metadata.packageName) {
+                Fail "BUILD-PROVENANCE.json packageName '$($provData.product.packageName)' does not match metadata packageName '$($metadata.packageName)'"
+            }
+            if ($provData.PSObject.Properties['buildConfiguration']) {
+                if ($provData.buildConfiguration.diagnostics -eq $true -or [string]$provData.buildConfiguration.diagnostics -eq "ON" -or [string]$provData.buildConfiguration.diagnostics -ne "OFF") {
+                    Fail "BUILD-PROVENANCE.json specifies diagnostics '$([string]$provData.buildConfiguration.diagnostics)'; release packages require diagnostics OFF"
+                }
+            } else {
+                Fail "BUILD-PROVENANCE.json is missing buildConfiguration"
+            }
+            if ($provData.PSObject.Properties['source']) {
+                if ([string]$provData.source.cleanStatus -ne "clean" -or $provData.source.isClean -ne $true) {
+                    Fail "BUILD-PROVENANCE.json declares unclean source tree; release packages strictly require a clean commit"
+                }
+                if ([string]::IsNullOrWhiteSpace($provData.source.commitSha) -or $provData.source.commitSha -notmatch '^[0-9a-f]{40}$') {
+                    Fail "BUILD-PROVENANCE.json lacks valid 40-character source commitSha"
+                }
+                if ([string]::IsNullOrWhiteSpace($provData.source.treeSha) -or $provData.source.treeSha -notmatch '^[0-9a-f]{40}$') {
+                    Fail "BUILD-PROVENANCE.json lacks valid 40-character source treeSha"
+                }
+                # Independently require a readable Git worktree and clean HEAD/tree matching provenance
+                if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+                    Fail "git command is required on PATH to verify source provenance."
+                }
+                $insideWt = (& git -C $RepoRoot rev-parse --is-inside-work-tree 2>&1).Trim()
+                if ($LASTEXITCODE -ne 0 -or $insideWt -ne 'true') {
+                    Fail "Repository root '$RepoRoot' is not a valid git worktree; cannot verify source provenance."
+                }
+                $gitSt = & git -C $RepoRoot status --porcelain 2>&1
+                if ($LASTEXITCODE -ne 0) { Fail "git status failed in RepoRoot" }
+                $dirtyLines = @($gitSt | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($dirtyLines.Count -gt 0) {
+                    Fail "Repository working tree '$RepoRoot' is not clean ($($dirtyLines.Count) uncommitted/untracked entries); refusing release packaging."
+                }
+                $actualHead = (& git -C $RepoRoot rev-parse HEAD 2>&1).Trim()
+                if ($LASTEXITCODE -ne 0 -or $actualHead -notmatch '^[0-9a-f]{40}$') { Fail "git rev-parse HEAD failed in RepoRoot" }
+                $actualTree = (& git -C $RepoRoot rev-parse "HEAD^{tree}" 2>&1).Trim()
+                if ($LASTEXITCODE -ne 0 -or $actualTree -notmatch '^[0-9a-f]{40}$') { Fail "git rev-parse HEAD^{tree} failed in RepoRoot" }
+                if ([string]$provData.source.commitSha -ne $actualHead) {
+                    Fail "BUILD-PROVENANCE.json commitSha '$([string]$provData.source.commitSha)' does not match RepoRoot HEAD '$actualHead'"
+                }
+                if ([string]$provData.source.treeSha -ne $actualTree) {
+                    Fail "BUILD-PROVENANCE.json treeSha '$([string]$provData.source.treeSha)' does not match RepoRoot HEAD^{tree} '$actualTree'"
+                }
+            } else {
+                Fail "BUILD-PROVENANCE.json is missing source evidence section"
+            }
+
+            # Authenticate candidate binary observations in provenance against actual staged runtime closure
+            if ($provData.PSObject.Properties['stagedCandidateBinaries']) {
+                $stagedPeFiles = @{}
+                foreach ($sf in $staged) {
+                    $sfExt = [System.IO.Path]::GetExtension($sf.Name).ToLowerInvariant()
+                    if ($sfExt -eq '.exe' -or $sfExt -eq '.dll') {
+                        $stagedPeFiles[$sf.Name.ToLowerInvariant()] = $sf
+                    }
+                }
+                $seenCandNames = @{}
+                foreach ($cb in @($provData.stagedCandidateBinaries)) {
+                    $cbName = [string]$cb.name
+                    if ([string]::IsNullOrWhiteSpace($cbName) -or [System.IO.Path]::GetFileName($cbName) -ne $cbName) {
+                        Fail "BUILD-PROVENANCE.json contains unsafe candidate binary name '$cbName'"
+                    }
+                    $cbKey = $cbName.ToLowerInvariant()
+                    if ($seenCandNames.ContainsKey($cbKey)) {
+                        Fail "BUILD-PROVENANCE.json contains duplicate candidate binary '$cbName'"
+                    }
+                    $seenCandNames[$cbKey] = $true
+                    if (-not $stagedPeFiles.ContainsKey($cbKey)) {
+                        Fail "BUILD-PROVENANCE.json references candidate binary '$cbName' not in staged runtime closure"
+                    }
+                    $sfItem = $stagedPeFiles[$cbKey]
+                    $cbHash = (Get-FileHash -LiteralPath $sfItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($cbHash -ne [string]$cb.sha256) {
+                        Fail "BUILD-PROVENANCE.json hash for '$cbName' ($([string]$cb.sha256)) does not match actual staged hash ($cbHash)"
+                    }
+                    if ([long]$sfItem.Length -ne [long]$cb.bytes) {
+                        Fail "BUILD-PROVENANCE.json byte size for '$cbName' ($([long]$cb.bytes)) does not match actual staged size ($($sfItem.Length))"
+                    }
+                    if ([string]$cb.machine -ne '0x8664') {
+                        Fail "BUILD-PROVENANCE.json machine for '$cbName' is not 0x8664 ($([string]$cb.machine))"
+                    }
+                    if ([string]$cb.signatureStatus -ne 'unsigned' -and [string]$cb.signatureStatus -ne 'valid-signed') {
+                        Fail "BUILD-PROVENANCE.json signatureStatus for '$cbName' is untrusted/invalid: $([string]$cb.signatureStatus)"
+                    }
+                }
+                foreach ($sfKey in $stagedPeFiles.Keys) {
+                    if (-not $seenCandNames.ContainsKey($sfKey)) {
+                        Fail "Staged runtime binary '$($stagedPeFiles[$sfKey].Name)' is missing from BUILD-PROVENANCE.json stagedCandidateBinaries"
+                    }
+                }
+            } else {
+                Fail "BUILD-PROVENANCE.json is missing stagedCandidateBinaries"
+            }
+
+            # Authenticate LGPL corresponding source asset evidence
+            if ($provData.PSObject.Properties['lgplCorrespondingSourceAsset'] -and $provData.lgplCorrespondingSourceAsset) {
+                $lgplAsset = $provData.lgplCorrespondingSourceAsset
+                $expectedLgplName = "pikaview-$Version-lgpl-corresponding-source.zip"
+                if ([string]$lgplAsset.assetName -ne $expectedLgplName) {
+                    Fail "BUILD-PROVENANCE.json lgplCorrespondingSourceAsset name '$([string]$lgplAsset.assetName)' does not match expected '$expectedLgplName'"
+                }
+                if ([string]::IsNullOrWhiteSpace($lgplAsset.sha256) -or $lgplAsset.sha256 -notmatch '^[0-9a-f]{64}$') {
+                    Fail "BUILD-PROVENANCE.json lgplCorrespondingSourceAsset lacks valid SHA-256 hash"
+                }
+            } else {
+                Fail "BUILD-PROVENANCE.json is missing lgplCorrespondingSourceAsset"
+            }
+        }
+        catch {
+            Fail "Failed to validate BUILD-PROVENANCE.json at '$src': $($_.Exception.Message)"
+        }
+    }
+    else {
+        $src = Join-Path $RepoRoot $licenseName
+    }
+
     if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
         Fail "declared license/attribution file not found: $src"
     }
@@ -413,7 +556,7 @@ foreach ($license in @($metadata.licenseFiles)) {
 $dllNames = @($closure.Values | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Where-Object { $_ -ne $entrypointName } | Sort-Object)
 $extLine = ($extensions | ForEach-Object { '.' + $_ }) -join ' '
 $running = New-Object System.Text.StringBuilder
-[void]$running.AppendLine("OZ Image Viewer $Version - portable $($metadata.platform) build")
+[void]$running.AppendLine("PikaView $Version - portable $($metadata.platform) build")
 [void]$running.AppendLine("")
 [void]$running.AppendLine("Quick start")
 foreach ($line in @($metadata.runInstructions)) { [void]$running.AppendLine("  $line") }
@@ -478,7 +621,9 @@ Info "supported extensions: $extLine"
 if (-not $NoZip) {
     $zipName = "$stageName.zip"
     $zipPath = Join-Path $OutDir $zipName
-    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    if (Test-Path -LiteralPath $zipPath) {
+        Fail "output ZIP already exists (refusing destructive overwrite): $zipPath"
+    }
 
     Add-Type -AssemblyName System.IO.Compression | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null

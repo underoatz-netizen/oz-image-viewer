@@ -24,7 +24,7 @@ namespace oz::viewer {
 // User-facing text for a rejected drop batch. All pointers refer to string
 // literals; `title` is always the application title.
 struct drop_reject_text {
-    const wchar_t* title = L"OZ Image Viewer";
+    const wchar_t* title = L"PikaView";
     const wchar_t* headline = L"Unable to open the dropped items.";
     const wchar_t* detail = nullptr;
 };

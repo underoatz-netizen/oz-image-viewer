@@ -41,9 +41,13 @@
 using namespace oz::runner;
 namespace json = oz::json;
 
+#ifndef OZBENCH_PROJECT_VERSION
+#define OZBENCH_PROJECT_VERSION "0.1.1"
+#endif
+
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = OZBENCH_PROJECT_VERSION;
 
 void print_usage() {
     std::cout

@@ -8,19 +8,31 @@ on:
         required: true
         type: string
       candidate_tag:
-        description: 'Candidate draft release tag to validate (e.g. v0.1.0)'
+        description: 'Candidate draft release tag to validate (e.g. v0.1.1)'
         required: true
         type: string
       expected_installer_sha256:
-        description: 'Expected SHA-256 hash of ozviewer-0.1.0-win-x64-installer.exe'
+        description: 'Expected SHA-256 hash of pikaview-0.1.1-win-x64-installer.exe (or ozviewer-0.1.0-win-x64-installer.exe)'
         required: true
         type: string
       expected_portable_sha256:
-        description: 'Expected SHA-256 hash of ozviewer-0.1.0-win-x64-portable.zip'
+        description: 'Expected SHA-256 hash of pikaview-0.1.1-win-x64-portable.zip (or ozviewer-0.1.0-win-x64-portable.zip)'
         required: true
         type: string
       expected_source_sha256:
-        description: 'Expected SHA-256 hash of ozviewer-0.1.0-lgpl-corresponding-source.zip'
+        description: 'Expected SHA-256 hash of pikaview-0.1.1-lgpl-corresponding-source.zip (or ozviewer-0.1.0-lgpl-corresponding-source.zip)'
+        required: true
+        type: string
+      expected_checksums_sha256:
+        description: 'Expected SHA-256 hash of SHA256SUMS'
+        required: true
+        type: string
+      expected_candidate_commit_sha:
+        description: 'Expected 40-hex candidate source commit SHA (independent build/dispatch input; never read from BUILD-PROVENANCE.json)'
+        required: true
+        type: string
+      expected_candidate_tree_sha:
+        description: 'Expected 40-hex candidate source tree SHA (independent build/dispatch input; never read from BUILD-PROVENANCE.json)'
         required: true
         type: string
 
@@ -31,15 +43,27 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 10
     permissions:
+      # PROVISIONAL: every fetch action/script here is job-token-privileged, and
+      # downloaded candidate code is never executed in this job; execution is in
+      # the separate contents:read job. Draft read-vs-write access has not been
+      # measured, so contents:write is retained as an isolated exception, not a
+      # proven requirement. The step-scoped GH_TOKEN does not restrict the job
+      # token itself. Later, on an authorized draft, test contents:read and
+      # reduce this permission if read access succeeds.
       contents: write
     outputs:
       artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      historical_artifact_id: ${{ steps.upload_historical.outputs.artifact-id }}
+      tag_commit_sha: ${{ steps.download_candidate.outputs.resolved_commit }}
     env:
       CANDIDATE_RELEASE_ID: ${{ github.event.inputs.candidate_release_id }}
       CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag }}
       EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
       EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
       EXPECTED_SOURCE_SHA256: ${{ github.event.inputs.expected_source_sha256 }}
+      EXPECTED_CHECKSUMS_SHA256: ${{ github.event.inputs.expected_checksums_sha256 }}
+      EXPECTED_CANDIDATE_COMMIT_SHA: ${{ github.event.inputs.expected_candidate_commit_sha }}
+      EXPECTED_CANDIDATE_TREE_SHA: ${{ github.event.inputs.expected_candidate_tree_sha }}
     steps:
       - name: Assert execution ref is trusted main
         shell: powershell
@@ -64,28 +88,57 @@ jobs:
           Write-Host "Download directory created at: $downloadDir"
 
       - name: Download candidate release assets from repository draft release
+        id: download_candidate
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $spec = Resolve-ReleaseAssetSpec -CandidateTag $env:CANDIDATE_TAG
+          $identity = Assert-SourceIdentityFormat -CommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA -TreeSha $env:EXPECTED_CANDIDATE_TREE_SHA
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
+          $resolutionPath = Join-Path $env:RUNNER_TEMP "candidate-tag-resolution.json"
           $downloadScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\DownloadReleaseDraftAssets.ps1"
           & $downloadScript `
               -Repository $env:GITHUB_REPOSITORY `
               -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
-              -CandidateTag $env:CANDIDATE_TAG `
-              -ExpectedAssetNames @(
-                  "ozviewer-0.1.0-win-x64-installer.exe",
-                  "ozviewer-0.1.0-win-x64-portable.zip",
-                  "ozviewer-0.1.0-lgpl-corresponding-source.zip"
-              ) `
-              -DestinationDir $downloadDir
+              -CandidateTag $spec.Tag `
+              -ExpectedAssetNames $spec.ExpectedAssetNames `
+              -DestinationDir $downloadDir `
+              -ExpectedCommitSha $identity.commitSha `
+              -ExpectedTreeSha $identity.treeSha `
+              -ResolutionOutputPath $resolutionPath
+
+          $resolution = Get-Content -LiteralPath $resolutionPath -Raw | ConvertFrom-Json
+          if ("$($resolution.commitSha)".Trim().ToLowerInvariant() -ne $identity.commitSha -or
+              "$($resolution.treeSha)".Trim().ToLowerInvariant() -ne $identity.treeSha) {
+              throw "Candidate tag resolution evidence does not match the independently supplied expected commit/tree."
+          }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CANDIDATE_TAG_COMMIT_SHA=$($identity.commitSha)`n", (New-Object System.Text.UTF8Encoding($false)))
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "resolved_commit=$($identity.commitSha)`n", (New-Object System.Text.UTF8Encoding($false)))
+
+          if ($spec.Version -eq "0.1.1") {
+              $histDir = Join-Path $env:RUNNER_TEMP "historical-v0.1.0"
+              New-Item -ItemType Directory -Path $histDir -Force | Out-Null
+              $histName = "ozviewer-0.1.0-win-x64-installer.exe"
+              $histUrl = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/v0.1.0/$histName"
+              $histPath = Join-Path $histDir $histName
+              Invoke-WebRequest -Uri $histUrl -OutFile $histPath -UseBasicParsing
+              $histActual = (Get-FileHash -LiteralPath $histPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              $histPinned = "25637adf86ab1eeac9a0e5992918bc492c957c7568116f452de8c6a5e2d3b633"
+              if ($histActual -ne $histPinned) {
+                  throw "Historical v0.1.0 installer hash mismatch! Expected '$histPinned', got '$histActual'."
+              }
+              Write-Host "Verified historical v0.1.0 installer: $histActual"
+          }
 
       - name: Verify asset cryptographic checksums and create handoff manifest
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $spec = Resolve-ReleaseAssetSpec -CandidateTag $env:CANDIDATE_TAG
           $downloadDir = Join-Path $env:RUNNER_TEMP "release-candidates"
 
           function Verify-Hex64([string]$filename, [string]$hash) {
@@ -104,28 +157,34 @@ jobs:
               Write-Host "Verified ${filename}: $actual"
           }
 
-          Verify-Hex64 "ozviewer-0.1.0-win-x64-installer.exe" $env:EXPECTED_INSTALLER_SHA256
-          Verify-Hex64 "ozviewer-0.1.0-win-x64-portable.zip" $env:EXPECTED_PORTABLE_SHA256
-          Verify-Hex64 "ozviewer-0.1.0-lgpl-corresponding-source.zip" $env:EXPECTED_SOURCE_SHA256
+          Verify-Hex64 $spec.InstallerName $env:EXPECTED_INSTALLER_SHA256
+          Verify-Hex64 $spec.PortableName $env:EXPECTED_PORTABLE_SHA256
+          Verify-Hex64 $spec.SourceName $env:EXPECTED_SOURCE_SHA256
 
-          # Create handoff manifest using candidate-handoff helper
-          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          if ($null -ne $spec.ChecksumFileName) {
+              Verify-Hex64 $spec.ChecksumFileName $env:EXPECTED_CHECKSUMS_SHA256
+              $sumsPath = Join-Path $downloadDir $spec.ChecksumFileName
+              Test-Sha256SumsFile -Sha256SumsPath $sumsPath -ExpectedHashesByName @{
+                  $spec.InstallerName = $env:EXPECTED_INSTALLER_SHA256
+                  $spec.PortableName  = $env:EXPECTED_PORTABLE_SHA256
+                  $spec.SourceName    = $env:EXPECTED_SOURCE_SHA256
+              }
+          }
+
           $manifestPath = Join-Path $downloadDir "candidate-handoff-manifest.json"
-
           New-CandidateHandoffManifest `
               -Repository $env:GITHUB_REPOSITORY `
               -WorkflowSha "${{ github.sha }}" `
               -RunId "${{ github.run_id }}" `
               -RunAttempt "${{ github.run_attempt }}" `
               -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
-              -CandidateTag $env:CANDIDATE_TAG `
+              -CandidateTag $spec.Tag `
               -CandidateDir $downloadDir `
-              -FixedAssetNames @(
-                  "ozviewer-0.1.0-win-x64-installer.exe",
-                  "ozviewer-0.1.0-win-x64-portable.zip",
-                  "ozviewer-0.1.0-lgpl-corresponding-source.zip"
-              ) `
-              -ManifestPath $manifestPath
+              -FixedAssetNames $spec.ExpectedAssetNames `
+              -ManifestPath $manifestPath `
+              -ExpectedCommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA `
+              -ExpectedTreeSha $env:EXPECTED_CANDIDATE_TREE_SHA `
+              -TagCommitSha $env:CANDIDATE_TAG_COMMIT_SHA
 
       - name: Upload immutable candidate handoff artifact
         id: upload_candidate
@@ -133,10 +192,22 @@ jobs:
         with:
           name: candidate-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-win-x64-installer.exe
-            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-win-x64-portable.zip
-            ${{ runner.temp }}/release-candidates/ozviewer-0.1.0-lgpl-corresponding-source.zip
+            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-win-x64-installer.exe
+            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-win-x64-portable.zip
+            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-lgpl-corresponding-source.zip
+            ${{ runner.temp }}/release-candidates/SHA256SUMS
             ${{ runner.temp }}/release-candidates/candidate-handoff-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+      - name: Upload historical v0.1.0 installer artifact (for v0.1.1 upgrade test)
+        id: upload_historical
+        if: env.CANDIDATE_TAG == 'v0.1.1'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: historical-v010-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/historical-v0.1.0/ozviewer-0.1.0-win-x64-installer.exe
           if-no-files-found: error
           retention-days: 1
           overwrite: false
@@ -153,6 +224,10 @@ jobs:
       EXPECTED_INSTALLER_SHA256: ${{ github.event.inputs.expected_installer_sha256 }}
       EXPECTED_PORTABLE_SHA256: ${{ github.event.inputs.expected_portable_sha256 }}
       EXPECTED_SOURCE_SHA256: ${{ github.event.inputs.expected_source_sha256 }}
+      EXPECTED_CHECKSUMS_SHA256: ${{ github.event.inputs.expected_checksums_sha256 }}
+      EXPECTED_CANDIDATE_COMMIT_SHA: ${{ github.event.inputs.expected_candidate_commit_sha }}
+      EXPECTED_CANDIDATE_TREE_SHA: ${{ github.event.inputs.expected_candidate_tree_sha }}
+      CANDIDATE_TAG_COMMIT_SHA: ${{ needs.fetch-candidate.outputs.tag_commit_sha }}
     steps:
       - name: Assert execution ref is trusted main
         shell: powershell
@@ -190,13 +265,30 @@ jobs:
           $expectedArtifactName = "candidate-release-assets-${{ github.run_id }}-${{ github.run_attempt }}"
 
           . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $spec = Resolve-ReleaseAssetSpec -CandidateTag $env:CANDIDATE_TAG
+          $identity = Assert-SourceIdentityFormat -CommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA -TreeSha $env:EXPECTED_CANDIDATE_TREE_SHA
+          if ([string]::IsNullOrWhiteSpace($env:CANDIDATE_TAG_COMMIT_SHA) -or
+              $env:CANDIDATE_TAG_COMMIT_SHA.Trim().ToLowerInvariant() -ne $identity.commitSha) {
+              throw "Trusted tag resolution commit '$($env:CANDIDATE_TAG_COMMIT_SHA)' does not match expected commit '$($identity.commitSha)'."
+          }
           $candidateDir = Resolve-CandidateHandoffDirectory `
               -ParentDir $handoffParent `
               -ExpectedArtifactDirectoryName $expectedArtifactName
           Write-Host "Resolved verified candidate directory at: $candidateDir"
 
           # Export verified candidate directory for subsequent steps in this job
-          "CANDIDATE_DIR=$candidateDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CANDIDATE_DIR=$candidateDir`n", (New-Object System.Text.UTF8Encoding($false)))
+
+          $expectedHashes = @{
+              $spec.InstallerName = $env:EXPECTED_INSTALLER_SHA256
+              $spec.PortableName  = $env:EXPECTED_PORTABLE_SHA256
+              $spec.SourceName    = $env:EXPECTED_SOURCE_SHA256
+          }
+          if ($null -ne $spec.ChecksumFileName) {
+              $sumsPath = Join-Path $candidateDir $spec.ChecksumFileName
+              Test-Sha256SumsFile -Sha256SumsPath $sumsPath -ExpectedHashesByName $expectedHashes
+              $expectedHashes[$spec.ChecksumFileName] = $env:EXPECTED_CHECKSUMS_SHA256
+          }
 
           Test-CandidateHandoffDirectory `
               -CandidateDir $candidateDir `
@@ -205,18 +297,49 @@ jobs:
               -ExpectedRunId "${{ github.run_id }}" `
               -ExpectedRunAttempt "${{ github.run_attempt }}" `
               -ExpectedCandidateReleaseId $env:CANDIDATE_RELEASE_ID `
-              -ExpectedCandidateTag $env:CANDIDATE_TAG `
-              -ExpectedHashesByName @{
-                  "ozviewer-0.1.0-win-x64-installer.exe"        = $env:EXPECTED_INSTALLER_SHA256
-                  "ozviewer-0.1.0-win-x64-portable.zip"         = $env:EXPECTED_PORTABLE_SHA256
-                  "ozviewer-0.1.0-lgpl-corresponding-source.zip" = $env:EXPECTED_SOURCE_SHA256
-              }
+              -ExpectedCandidateTag $spec.Tag `
+              -ExpectedHashesByName $expectedHashes `
+              -ExpectedCommitSha $identity.commitSha `
+              -ExpectedTreeSha $identity.treeSha `
+              -ExpectedTagCommitSha $env:CANDIDATE_TAG_COMMIT_SHA
+
+      - name: Download historical v0.1.0 installer for upgrade test
+        if: env.CANDIDATE_TAG == 'v0.1.1'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.fetch-candidate.outputs.historical_artifact_id }}
+          path: ${{ runner.temp }}/historical-v0.1.0
+
+      - name: Audit historical v0.1.0 installer directory and rehash
+        if: env.CANDIDATE_TAG == 'v0.1.1'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $histParent = Join-Path $env:RUNNER_TEMP "historical-v0.1.0"
+          $expectedHistDir = "historical-v010-installer-${{ github.run_id }}-${{ github.run_attempt }}"
+          $histInner = Resolve-CandidateHandoffDirectory -ParentDir $histParent -ExpectedArtifactDirectoryName $expectedHistDir
+          $histFiles = @(Get-ChildItem -LiteralPath $histInner -Force)
+          if ($histFiles.Count -ne 1 -or $histFiles[0].Name -ne "ozviewer-0.1.0-win-x64-installer.exe" -or $histFiles[0].PSIsContainer) {
+              throw "Historical v0.1.0 artifact directory must contain only 'ozviewer-0.1.0-win-x64-installer.exe'."
+          }
+          $histPath = $histFiles[0].FullName
+          $histActual = (Get-FileHash -LiteralPath $histPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $histPinned = "25637adf86ab1eeac9a0e5992918bc492c957c7568116f452de8c6a5e2d3b633"
+          if ($histActual -ne $histPinned) {
+              throw "Historical v0.1.0 installer hash mismatch! Expected '$histPinned', got '$histActual'."
+          }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "HISTORICAL_V010_INSTALLER=$histPath`n", (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "Verified historical v0.1.0 installer at: $histPath"
 
       - name: Validate portable payload and smoke test
         shell: powershell
         run: |
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $spec = Resolve-ReleaseAssetSpec -CandidateTag $env:CANDIDATE_TAG
+          $identity = Assert-SourceIdentityFormat -CommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA -TreeSha $env:EXPECTED_CANDIDATE_TREE_SHA
           $candidateDir = $env:CANDIDATE_DIR
-          $portableZip = Join-Path $candidateDir "ozviewer-0.1.0-win-x64-portable.zip"
+          $portableZip = Join-Path $candidateDir $spec.PortableName
           $extractDir = Join-Path $candidateDir "portable-unpacked"
           New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
 
@@ -225,10 +348,17 @@ jobs:
 
           # package-portable.ps1 produces a flat ZIP; the extracted root contains ozviewer.exe directly
           $validateScript = Join-Path $env:GITHUB_WORKSPACE "packaging\validate-portable-payload.ps1"
+          $validationResultPath = Join-Path $candidateDir "portable-validation-result.json"
           & powershell -NoProfile -ExecutionPolicy Bypass -File $validateScript `
               -PackageDir $extractDir `
               -ZipPath $portableZip `
-              -ExpectedSha256 $env:EXPECTED_PORTABLE_SHA256
+              -ExpectedSha256 $env:EXPECTED_PORTABLE_SHA256 `
+              -ExpectedVersion $spec.Version `
+              -ExpectedPlatform "win-x64" `
+              -ExpectedCommitSha $identity.commitSha `
+              -ExpectedTreeSha $identity.treeSha `
+              -ExpectedLgplSourceSha256 $env:EXPECTED_SOURCE_SHA256 `
+              -ResultPath $validationResultPath
           if ($LASTEXITCODE -ne 0) {
               throw "Portable payload validation failed with exit code $LASTEXITCODE."
           }
@@ -242,11 +372,38 @@ jobs:
               throw "Portable smoke test exited with code $LASTEXITCODE."
           }
 
+          # Build a deterministic closure from the already-validated payload and pin it by SHA-256.
+          $closurePath = Join-Path $candidateDir "portable-closure.json"
+          New-PortableClosureManifest `
+              -PackageDir $extractDir `
+              -PortableZipPath $portableZip `
+              -ExpectedPayloadSha256 $env:EXPECTED_PORTABLE_SHA256 `
+              -ExpectedVersion $spec.Version `
+              -ExpectedPackageName $spec.PackageFamily `
+              -ExpectedCommitSha $identity.commitSha `
+              -ExpectedTreeSha $identity.treeSha `
+              -OutputPath $closurePath
+          $closureSha = (Get-FileHash -LiteralPath $closurePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          Test-PortableClosureManifest `
+              -Path $closurePath `
+              -ExpectedSha256 $closureSha `
+              -ExpectedVersion $spec.Version `
+              -ExpectedPackageName $spec.PackageFamily `
+              -ExpectedPayloadSha256 $env:EXPECTED_PORTABLE_SHA256 `
+              -ExpectedCommitSha $identity.commitSha `
+              -ExpectedTreeSha $identity.treeSha | Out-Null
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "PORTABLE_CLOSURE_PATH=$closurePath`n", (New-Object System.Text.UTF8Encoding($false)))
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "PORTABLE_CLOSURE_SHA256=$closureSha`n", (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "Pinned portable closure: $closurePath ($closureSha)"
+
       - name: Run disposable installer lifecycle harness
         shell: powershell
         run: |
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $spec = Resolve-ReleaseAssetSpec -CandidateTag $env:CANDIDATE_TAG
+          $identity = Assert-SourceIdentityFormat -CommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA -TreeSha $env:EXPECTED_CANDIDATE_TREE_SHA
           $candidateDir = $env:CANDIDATE_DIR
-          $installerPath = Join-Path $candidateDir "ozviewer-0.1.0-win-x64-installer.exe"
+          $installerPath = Join-Path $candidateDir $spec.InstallerName
           $reportPath = Join-Path $candidateDir "installer-lifecycle-report.json"
           $fixturePath = Join-Path $env:GITHUB_WORKSPACE "tests\data\webp\bench_64x48.webp"
           if (-not (Test-Path -LiteralPath $fixturePath)) {
@@ -254,12 +411,30 @@ jobs:
           }
 
           $harnessScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\test-installer-lifecycle.ps1"
-          & powershell -NoProfile -ExecutionPolicy Bypass -File $harnessScript `
-              -InstallerPath $installerPath `
-              -ExpectedVersion "0.1.0" `
-              -FixturePath $fixturePath `
-              -ReportPath $reportPath `
-              -AllowDisposableExecution
+          $harnessArgs = @(
+              "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $harnessScript,
+              "-InstallerPath", $installerPath,
+              "-ExpectedVersion", $spec.Version,
+              "-ExpectedPackageName", $spec.PackageFamily,
+              "-FixturePath", $fixturePath,
+              "-ReportPath", $reportPath,
+              "-PortableClosurePath", $env:PORTABLE_CLOSURE_PATH,
+              "-PortableClosureSha256", $env:PORTABLE_CLOSURE_SHA256,
+              "-ExpectedPortableSha256", $env:EXPECTED_PORTABLE_SHA256,
+              "-ExpectedCandidateCommitSha", $identity.commitSha,
+              "-ExpectedCandidateTreeSha", $identity.treeSha,
+              "-AllowDisposableExecution"
+          )
+
+          if ($spec.Version -eq "0.1.1") {
+              $histPath = $env:HISTORICAL_V010_INSTALLER
+              if ([string]::IsNullOrWhiteSpace($histPath) -or -not (Test-Path -LiteralPath $histPath -PathType Leaf)) {
+                  throw "Historical v0.1.0 installer missing at '$histPath'."
+              }
+              $harnessArgs += @("-UpgradeFromInstallerPath", $histPath)
+          }
+
+          & powershell @harnessArgs
 
           $harnessExit = $LASTEXITCODE
           Write-Host "Harness process finished with exit code $harnessExit."
@@ -269,15 +444,28 @@ jobs:
               throw "CRITICAL: Installer lifecycle report was not generated at '$reportPath'!"
           }
 
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\StandardUserHelpers.ps1")
           $reportContent = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           Write-Host "Report Summary: $($reportContent.summary)"
-          $failures = @($reportContent.checks | Where-Object { $_.status -eq "fail" })
-          if ($failures.Count -gt 0) {
-              throw "Lifecycle harness reported $($failures.Count) check failure(s): $(($failures | ForEach-Object { $_.name }) -join ', ')"
+          foreach ($pair in @(
+              @('portableClosureSha256', $env:PORTABLE_CLOSURE_SHA256),
+              @('expectedCandidateCommitSha', $identity.commitSha),
+              @('expectedCandidateTreeSha', $identity.treeSha),
+              @('portablePayloadSha256', $env:EXPECTED_PORTABLE_SHA256)
+          )) {
+              $propName = [string]$pair[0]
+              $expectedValue = [string]$pair[1]
+              if (-not $reportContent.PSObject.Properties[$propName] -or
+                  "$($reportContent.$propName)".Trim().ToLowerInvariant() -ne $expectedValue.Trim().ToLowerInvariant()) {
+                  throw "Lifecycle harness report $propName does not match the pinned expected value."
+              }
           }
-          if ($reportContent.summary -ne "passed") {
-              throw "Lifecycle harness summary is not 'passed' (got '$($reportContent.summary)')."
-          }
+          $requiredChecks = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks:($spec.Version -eq "0.1.1"))
+          Test-LifecycleReportContract `
+              -ReportData $reportContent `
+              -RequiredCheckNames $requiredChecks `
+              -AllowedWarningCheckNames @("non_admin_integrity_check", "guard_environment_attestation") `
+              -Context "installer lifecycle report"
           if ($harnessExit -ne 0) {
               throw "Installer lifecycle harness exited with non-zero code $harnessExit."
           }
@@ -285,21 +473,38 @@ jobs:
       - name: Run genuine standard-user lifecycle verification gate
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\candidate-handoff.ps1")
+          $identity = Assert-SourceIdentityFormat -CommitSha $env:EXPECTED_CANDIDATE_COMMIT_SHA -TreeSha $env:EXPECTED_CANDIDATE_TREE_SHA
           $candidateDir = $env:CANDIDATE_DIR
           $parentReportPath = Join-Path $candidateDir "standard-user-lifecycle-report.json"
           $controllerScript = Join-Path $env:GITHUB_WORKSPACE "packaging\lifecycle-test\Invoke-StandardUserLifecycle.ps1"
 
-          & powershell -NoProfile -ExecutionPolicy Bypass -File $controllerScript `
-              -CandidateDir $candidateDir `
-              -ExpectedInstallerSha256 $env:EXPECTED_INSTALLER_SHA256 `
-              -WorkflowSha "${{ github.sha }}" `
-              -Repository $env:GITHUB_REPOSITORY `
-              -RunId "${{ github.run_id }}" `
-              -RunAttempt "${{ github.run_attempt }}" `
-              -CandidateReleaseId $env:CANDIDATE_RELEASE_ID `
-              -CandidateTag $env:CANDIDATE_TAG `
-              -ParentReportPath $parentReportPath `
-              -AllowDisposableExecution
+          $controllerArgs = @(
+              "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $controllerScript,
+              "-CandidateDir", $candidateDir,
+              "-ExpectedInstallerSha256", $env:EXPECTED_INSTALLER_SHA256,
+              "-WorkflowSha", "${{ github.sha }}",
+              "-Repository", $env:GITHUB_REPOSITORY,
+              "-RunId", "${{ github.run_id }}",
+              "-RunAttempt", "${{ github.run_attempt }}",
+              "-CandidateReleaseId", $env:CANDIDATE_RELEASE_ID,
+              "-CandidateTag", $env:CANDIDATE_TAG,
+              "-ExpectedPortableSha256", $env:EXPECTED_PORTABLE_SHA256,
+              "-PortableClosurePath", $env:PORTABLE_CLOSURE_PATH,
+              "-PortableClosureSha256", $env:PORTABLE_CLOSURE_SHA256,
+              "-ExpectedCandidateCommitSha", $identity.commitSha,
+              "-ExpectedCandidateTreeSha", $identity.treeSha,
+              "-ExpectedTagCommitSha", $env:CANDIDATE_TAG_COMMIT_SHA,
+              "-ParentReportPath", $parentReportPath,
+              "-AllowDisposableExecution"
+          )
+          if ($env:CANDIDATE_TAG -eq "v0.1.1") {
+              $histPath = $env:HISTORICAL_V010_INSTALLER
+              $controllerArgs += @("-UpgradeFromInstallerPath", $histPath)
+          }
+
+          & powershell @controllerArgs
 
           $controllerExit = $LASTEXITCODE
           Write-Host "Standard-user controller finished with exit code $controllerExit."
@@ -310,9 +515,19 @@ jobs:
 
           $pReport = Get-Content -LiteralPath $parentReportPath -Raw | ConvertFrom-Json
           Write-Host "Standard-user Controller Summary: $($pReport.summary)"
-          $pFailures = @($pReport.checks | Where-Object { $_.status -eq "fail" })
-          if ($pFailures.Count -gt 0) {
-              throw "Standard-user controller reported $($pFailures.Count) check failure(s): $(($pFailures | ForEach-Object { $_.name }) -join ', ')"
+          $pChecks = @($pReport.checks)
+          if ($pChecks.Count -eq 0) {
+              throw "Standard-user controller report contains no checks."
+          }
+          $pNonPassing = @($pChecks | Where-Object { "$($_.status)".Trim() -ne "pass" })
+          if ($pNonPassing.Count -gt 0) {
+              throw "Standard-user controller reported non-passing check(s): $(($pNonPassing | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', ')"
+          }
+          foreach ($requiredParentCheck in @("child_report_integrity", "controller_cleanup_verified")) {
+              $matching = @($pChecks | Where-Object { "$($_.name)" -eq $requiredParentCheck -and "$($_.status)" -eq "pass" })
+              if ($matching.Count -ne 1) {
+                  throw "Standard-user controller report is missing exactly one passing '$requiredParentCheck' check."
+              }
           }
           if ($pReport.summary -ne "passed") {
               throw "Standard-user controller summary is not 'passed' (got '$($pReport.summary)')."

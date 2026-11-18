@@ -52,6 +52,23 @@ function Assert-Condition([bool]$cond, [string]$msg) {
         exit 1
     }
 }
+function Assert-Throws([scriptblock]$sb, [string]$expectedPattern, [string]$testName) {
+    $threw = $false
+    try {
+        & $sb
+    } catch {
+        $threw = $true
+        if (-not ($_.Exception.Message -match $expectedPattern)) {
+            Write-Error "[$testName] Threw unexpected message: $($_.Exception.Message) (expected pattern '$expectedPattern')"
+            exit 1
+        }
+    }
+    if (-not $threw) {
+        Write-Error "[$testName] Expected exception matching '$expectedPattern' but nothing was thrown."
+        exit 1
+    }
+    Pass "$testName correctly threw: $expectedPattern"
+}
 
 try {
     # =========================================================================
@@ -59,6 +76,8 @@ try {
     # =========================================================================
     Assert-Condition (Test-Path -LiteralPath $ProcessHelperScript) "ProcessHelper.ps1 not found at $ProcessHelperScript"
     . $ProcessHelperScript
+    . (Join-Path $ScriptDir "candidate-handoff.ps1")
+    . (Join-Path $ScriptDir "StandardUserHelpers.ps1")
 
     # 1.1: Success with stdout (exit 0)
     $res0 = Invoke-ProcessSafe -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", "Write-Output 'HELLO_SAFE_HELPER'; exit 0") -TimeoutSeconds 10
@@ -137,36 +156,292 @@ try {
     Assert-Condition ($yamlContent -match "expected_installer_sha256") "Workflow must define expected_installer_sha256"
     Assert-Condition ($yamlContent -match "expected_portable_sha256") "Workflow must define expected_portable_sha256"
     Assert-Condition ($yamlContent -match "expected_source_sha256") "Workflow must define expected_source_sha256"
+    Assert-Condition ($yamlContent -match "expected_checksums_sha256") "Workflow must define expected_checksums_sha256"
+    Assert-Condition ($yamlContent -match "expected_candidate_commit_sha") "Workflow must define independently controlled expected_candidate_commit_sha"
+    Assert-Condition ($yamlContent -match "expected_candidate_tree_sha") "Workflow must define independently controlled expected_candidate_tree_sha"
     Assert-Condition ($yamlContent -match "contents:\s*read") "Workflow must enforce read-only contents permissions"
     Assert-Condition ($yamlContent -match "timeout-minutes:\s*15") "Workflow must enforce bounded job timeout"
     Assert-Condition ($yamlContent -match "if-no-files-found:\s*error") "Workflow must fail if report artifact is missing"
     Assert-Condition ($yamlContent -match "validate-portable-payload\.ps1") "Workflow must validate portable payload"
-    Pass "Workflow audit: Parameterized dispatch, read permissions, bounded timeout, and artifact enforcement verified."
+    $validateSection = $yamlContent.Substring($yamlContent.IndexOf("validate-candidate:"))
+    Assert-Condition ($validateSection -match "-ExpectedCommitSha\s+\`$identity\.commitSha") "Portable validator must receive the normalized independently supplied commit SHA"
+    Assert-Condition ($validateSection -match "-ExpectedTreeSha\s+\`$identity\.treeSha") "Portable validator must receive the normalized independently supplied tree SHA"
+    Assert-Condition ($validateSection -match "-ExpectedLgplSourceSha256\s+\`$env:EXPECTED_SOURCE_SHA256") "Workflow must pass trusted source ZIP hash as ExpectedLgplSourceSha256"
+    Assert-Condition ($yamlContent -match "New-PortableClosureManifest") "Workflow must create a pinned portable closure from the validated payload"
+    Assert-Condition ($yamlContent -match "PortableClosurePath" -and $yamlContent -match "PortableClosureSha256") "Workflow must pass the pinned closure path and hash to lifecycle"
+    Assert-Condition ($yamlContent -match "Test-LifecycleReportContract") "Workflow must enforce the exact lifecycle report contract"
+    Assert-Condition ($validateSection -notmatch "GH_TOKEN|github\.token|secrets\.") "Candidate execution job must not receive tokens or secrets"
+    Pass "Workflow audit: Independent source identity, trusted tag/source binding, pinned closure, report contract, and token separation verified."
 
     # =========================================================================
-    # Part 4: Flat ZIP extraction & payload validation test
+    # Part 4: Synthetic portable payload, closure, and installed-runtime contract
     # =========================================================================
-    $stageDir = "C:\Users\USER\AppData\Local\Temp\opencode\ozviewer-v0.1.0-release-stage"
-    $portableZip = Join-Path $stageDir "ozviewer-0.1.0-win-x64-portable.zip"
-    Assert-Condition (Test-Path -LiteralPath $portableZip) "Staged portable zip not found at $portableZip"
+    $normalizedIdentity = Assert-SourceIdentityFormat -CommitSha ("A" * 40) -TreeSha ("B" * 40)
+    Assert-Condition ($normalizedIdentity.commitSha -eq ("a" * 40) -and $normalizedIdentity.treeSha -eq ("b" * 40)) "Expected source identity must normalize to lowercase hex"
+    Assert-Throws {
+        Assert-SourceIdentityFormat -CommitSha ("a" * 40) -TreeSha ("b" * 39)
+    } "40 lowercase hex" "Expected source identity rejects a truncated tree SHA"
+    Assert-Throws {
+        Assert-SourceIdentityFormat -CommitSha ("g" * 40) -TreeSha ("b" * 40)
+    } "40 lowercase hex" "Expected source identity rejects a non-hex commit SHA"
+    Pass "Source identity: canonical normalization and malformed-value rejection verified."
 
-    $zipUnpack = Join-Path $WorkDir "zip-extract"
-    New-Item -ItemType Directory -Path $zipUnpack -Force | Out-Null
+    $syntheticRoot = Join-Path $WorkDir "synthetic-portable"
+    $payloadDir = Join-Path $syntheticRoot "payload"
+    New-Item -ItemType Directory -Path $payloadDir -Force | Out-Null
+    $syntheticCommit = ("a" * 40)
+    $syntheticTree = ("b" * 40)
+    $syntheticLgpl = ("c" * 64)
+
+    $payloadText = @{
+        "ozviewer.exe"              = "MZ-SYNTHETIC-ENTRYPOINT"
+        "heif.dll"                  = "SYNTHETIC-HEIF-DLL"
+        "libde265.dll"              = "SYNTHETIC-LIBDE265-DLL"
+        "LICENSE"                   = "Synthetic license"
+        "THIRD-PARTY-NOTICES.md"    = "Synthetic notices"
+        "THIRD-PARTY-LICENSES.txt"  = "Synthetic third-party licenses"
+        "THIRD-PARTY-SOURCE.txt"    = "Synthetic source offer"
+        "RUNNING.txt"               = "Synthetic running notes"
+    }
+    foreach ($name in $payloadText.Keys) {
+        [System.IO.File]::WriteAllText((Join-Path $payloadDir $name), $payloadText[$name], (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    $stagedBinaries = @()
+    foreach ($pe in @("ozviewer.exe", "heif.dll", "libde265.dll")) {
+        $pePath = Join-Path $payloadDir $pe
+        $peItem = Get-Item -LiteralPath $pePath
+        $stagedBinaries += [ordered]@{
+            name            = $pe
+            bytes           = $peItem.Length
+            sha256          = (Get-FileHash -LiteralPath $pePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            machine         = "0x8664"
+            signatureStatus = "unsigned"
+        }
+    }
+    $provenance = [ordered]@{
+        product = [ordered]@{ version = "0.1.1"; tag = "v0.1.1"; packageName = "pikaview" }
+        buildConfiguration = [ordered]@{ diagnostics = "OFF" }
+        source = [ordered]@{ cleanStatus = "clean"; isClean = $true; commitSha = $syntheticCommit; treeSha = $syntheticTree }
+        stagedCandidateBinaries = $stagedBinaries
+        lgplCorrespondingSourceAsset = [ordered]@{
+            assetName = "pikaview-0.1.1-lgpl-corresponding-source.zip"
+            sha256    = $syntheticLgpl
+        }
+    }
+    [System.IO.File]::WriteAllText((Join-Path $payloadDir "BUILD-PROVENANCE.json"), ($provenance | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+
+    $manifestFiles = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $payloadDir -File | Sort-Object Name)) {
+        if ($file.Name -eq "package-manifest.json") { continue }
+        $manifestFiles += [ordered]@{
+            name   = $file.Name
+            bytes  = $file.Length
+            sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $packageManifest = [ordered]@{
+        schema              = 1
+        packageName         = "pikaview"
+        version             = "0.1.1"
+        platform            = "win-x64"
+        entrypoint          = "ozviewer.exe"
+        supportedExtensions = @(".jpg", ".png")
+        dynamicDependencies = @("heif.dll", "libde265.dll")
+        files               = @($manifestFiles | Sort-Object { $_.name })
+    }
+    [System.IO.File]::WriteAllText((Join-Path $payloadDir "package-manifest.json"), ($packageManifest | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($portableZip, $zipUnpack)
+    $syntheticZip = Join-Path $syntheticRoot "pikaview-0.1.1-win-x64-portable.zip"
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($payloadDir, $syntheticZip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+    $syntheticZipHash = (Get-FileHash -LiteralPath $syntheticZip -Algorithm SHA256).Hash.ToLowerInvariant()
 
-    # Verify that the extraction root is flat (ozviewer.exe is in root, not nested)
-    Assert-Condition (Test-Path -LiteralPath (Join-Path $zipUnpack "ozviewer.exe") -PathType Leaf) "ZIP root does not contain ozviewer.exe directly! ZIP is not flat."
-    Assert-Condition (-not (Test-Path -LiteralPath (Join-Path $zipUnpack "ozviewer-0.1.0-win-x64-portable") -PathType Container)) "ZIP unexpectedly contains a nested package folder."
-    Pass "ZIP extraction: Confirmed portable ZIP is flat; ozviewer.exe resides directly at extraction root."
-
-    # Validate the unpacked directory using validate-portable-payload.ps1
     $validateScript = Join-Path $RepoRoot "packaging\validate-portable-payload.ps1"
+    $validationResult = Join-Path $syntheticRoot "validation-result.json"
     $valRes = & powershell -NoProfile -ExecutionPolicy Bypass -File $validateScript `
-        -PackageDir $zipUnpack `
-        -ZipPath $portableZip 2>&1
-    Assert-Condition ($LASTEXITCODE -eq 0) "validate-portable-payload failed on extracted ZIP root (exit $LASTEXITCODE):`n$($valRes -join "`n")"
-    Pass "Payload validation: validate-portable-payload.ps1 passed against extracted flat ZIP root."
+        -PackageDir $payloadDir `
+        -ZipPath $syntheticZip `
+        -ExpectedSha256 $syntheticZipHash `
+        -ExpectedVersion "0.1.1" `
+        -ExpectedPlatform "win-x64" `
+        -ExpectedCommitSha $syntheticCommit `
+        -ExpectedTreeSha $syntheticTree `
+        -ExpectedLgplSourceSha256 $syntheticLgpl `
+        -ResultPath $validationResult 2>&1
+    Assert-Condition ($LASTEXITCODE -eq 0) "Synthetic portable validation failed (exit $LASTEXITCODE):`n$($valRes -join "`n")"
+    Assert-Condition (Test-Path -LiteralPath $validationResult -PathType Leaf) "Synthetic portable validation result was not written"
+    Pass "Synthetic payload: validator accepts an independently supplied source identity and LGPL source hash."
+
+    $badValRes = & powershell -NoProfile -ExecutionPolicy Bypass -File $validateScript `
+        -PackageDir $payloadDir `
+        -ZipPath $syntheticZip `
+        -ExpectedSha256 $syntheticZipHash `
+        -ExpectedVersion "0.1.1" `
+        -ExpectedPlatform "win-x64" `
+        -ExpectedCommitSha ("d" * 40) `
+        -ExpectedTreeSha $syntheticTree `
+        -ExpectedLgplSourceSha256 $syntheticLgpl 2>&1
+    Assert-Condition ($LASTEXITCODE -ne 0) "Synthetic validator unexpectedly accepted a provenance/expected commit mismatch"
+    Pass "Synthetic payload: validator fails closed when provenance commit does not match the independent expected commit."
+
+    $closurePath = Join-Path $syntheticRoot "portable-closure.json"
+    New-PortableClosureManifest `
+        -PackageDir $payloadDir `
+        -PortableZipPath $syntheticZip `
+        -ExpectedPayloadSha256 $syntheticZipHash `
+        -ExpectedVersion "0.1.1" `
+        -ExpectedPackageName "pikaview" `
+        -ExpectedCommitSha $syntheticCommit `
+        -ExpectedTreeSha $syntheticTree `
+        -OutputPath $closurePath
+    $closureSha = (Get-FileHash -LiteralPath $closurePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $parsedClosure = Test-PortableClosureManifest `
+        -Path $closurePath `
+        -ExpectedSha256 $closureSha `
+        -ExpectedVersion "0.1.1" `
+        -ExpectedPackageName "pikaview" `
+        -ExpectedPayloadSha256 $syntheticZipHash `
+        -ExpectedCommitSha $syntheticCommit `
+        -ExpectedTreeSha $syntheticTree
+    Assert-Condition ($parsedClosure.expectedSourceCommitSha -eq $syntheticCommit) "Closure source commit mismatch"
+    Assert-Condition (@($parsedClosure.files).Count -eq $manifestFiles.Count) "Closure file count mismatch"
+    Pass "Closure: deterministic closure matches validated payload files and independent source identity."
+
+    Assert-Throws {
+        Test-PortableClosureManifest -Path $closurePath -ExpectedSha256 ("0" * 64) -ExpectedVersion "0.1.1" -ExpectedPackageName "pikaview" -ExpectedPayloadSha256 $syntheticZipHash -ExpectedCommitSha $syntheticCommit -ExpectedTreeSha $syntheticTree
+    } "SHA-256 mismatch" "Closure hash pin rejects a substituted closure"
+
+    Assert-Throws {
+        Test-PortableClosureManifest -Path $closurePath -ExpectedSha256 $closureSha -ExpectedVersion "0.1.1" -ExpectedPackageName "pikaview" -ExpectedPayloadSha256 ("e" * 64) -ExpectedCommitSha $syntheticCommit -ExpectedTreeSha $syntheticTree
+    } "does not match expected portable ZIP hash" "Closure rejects a payload hash mismatch"
+
+    $installedDir = Join-Path $syntheticRoot "installed"
+    Copy-Item -LiteralPath $payloadDir -Destination $installedDir -Recurse
+    $installedOk = Test-InstalledRuntimeClosure -InstallDir $installedDir -Closure $parsedClosure
+    Assert-Condition ($installedOk -eq $true) "Installed runtime closure check rejected an exact copy"
+    $runningPath = Join-Path $installedDir "RUNNING.txt"
+    $runningText = [System.IO.File]::ReadAllText($runningPath)
+    [System.IO.File]::WriteAllText($runningPath, ("X" + $runningText.Substring(1)), (New-Object System.Text.UTF8Encoding($false)))
+    Assert-Throws {
+        Test-InstalledRuntimeClosure -InstallDir $installedDir -Closure $parsedClosure
+    } "SHA-256 mismatch" "Installed runtime closure rejects a modified file"
+    Pass "Installed runtime: exact closure copy passes; modified runtime file fails closed."
+
+    $expectedExe = Join-Path $installedDir "ozviewer.exe"
+    Assert-Condition (Test-InstallLocationMatches -Actual ($installedDir + "\") -Expected $installedDir) "InstallLocation exact path should match"
+    Assert-Condition (-not (Test-InstallLocationMatches -Actual (Join-Path $installedDir "Elsewhere") -Expected $installedDir)) "InstallLocation mismatch should fail"
+    $goodCommand = ('"' + $expectedExe + '" "%1"')
+    Assert-Condition (Test-CommandTargetMatches -CommandValue $goodCommand -ExpectedExePath $expectedExe) "Command target exact path should match"
+    Assert-Condition (-not (Test-CommandTargetMatches -CommandValue ('"' + (Join-Path $installedDir "stale.exe") + '" "%1"') -ExpectedExePath $expectedExe)) "Stale command target should fail"
+    Assert-Condition (-not (Test-CommandTargetMatches -CommandValue ('"' + $expectedExe + '"') -ExpectedExePath $expectedExe)) "Command target missing %1 should fail"
+    Pass "Contract: InstallLocation and shell command target checks reject stale or malformed values."
+
+    $shortcutExe = Join-Path $WorkDir "Programs\OZ Image Viewer\ozviewer.exe"
+    $shortcutDir = Split-Path -Parent $shortcutExe
+    $ownedShortcut = [pscustomobject]@{
+        TargetPath       = $shortcutExe
+        Arguments        = ""
+        WorkingDirectory = $shortcutDir
+        IconLocation     = "$shortcutExe,0"
+        Description      = ""
+    }
+    Assert-Condition (Test-OwnedDesktopShortcutFields -Snapshot $ownedShortcut -ExpectedExePath $shortcutExe -ExpectedWorkingDirectory $shortcutDir) "Owned desktop shortcut explicit fields should pass"
+    $descriptionShortcut = [pscustomobject]@{
+        TargetPath       = $shortcutExe
+        Arguments        = ""
+        WorkingDirectory = $shortcutDir
+        IconLocation     = "$shortcutExe,0"
+        Description      = "PikaView"
+    }
+    Assert-Condition (Test-OwnedDesktopShortcutFields -Snapshot $descriptionShortcut -ExpectedExePath $shortcutExe -ExpectedWorkingDirectory $shortcutDir) "Non-empty Description must not be asserted against an Inno default"
+    $modifiedShortcut = [pscustomobject]@{
+        TargetPath       = $shortcutExe
+        Arguments        = "--desktop-user-modified-sentinel-v1"
+        WorkingDirectory = $shortcutDir
+        IconLocation     = "$shortcutExe,0"
+        Description      = "PikaView"
+    }
+    Assert-Condition (-not (Test-OwnedDesktopShortcutFields -Snapshot $modifiedShortcut -ExpectedExePath $shortcutExe -ExpectedWorkingDirectory $shortcutDir)) "User-modified Arguments must fail owned-field check"
+    $wrongTargetShortcut = [pscustomobject]@{
+        TargetPath       = Join-Path $env:SystemRoot "System32\notepad.exe"
+        Arguments        = ""
+        WorkingDirectory = $shortcutDir
+        IconLocation     = "$shortcutExe,0"
+        Description      = ""
+    }
+    Assert-Condition (-not (Test-OwnedDesktopShortcutFields -Snapshot $wrongTargetShortcut -ExpectedExePath $shortcutExe -ExpectedWorkingDirectory $shortcutDir)) "Wrong TargetPath must fail owned-field check"
+    $iconWithoutIndex = [pscustomobject]@{
+        TargetPath       = $shortcutExe
+        Arguments        = ""
+        WorkingDirectory = $shortcutDir
+        IconLocation     = $shortcutExe
+        Description      = ""
+    }
+    Assert-Condition (Test-OwnedDesktopShortcutFields -Snapshot $iconWithoutIndex -ExpectedExePath $shortcutExe -ExpectedWorkingDirectory $shortcutDir) "IconLocation without ,0 should be accepted"
+    Assert-Condition (Test-ShortcutExplicitFieldsEqual -Before $ownedShortcut -After $descriptionShortcut) "Explicit-field comparison must ignore Description"
+    Assert-Condition (-not (Test-ShortcutExplicitFieldsEqual -Before $ownedShortcut -After $modifiedShortcut)) "Explicit-field comparison must detect changed Arguments"
+    Assert-Condition ($null -eq (Get-ShortcutSnapshot -Path (Join-Path $WorkDir "missing-shortcut.lnk"))) "Absent shortcut must return null"
+    Assert-Condition (-not (Test-ShortcutExplicitFieldsEqual -Before $null -After $ownedShortcut)) "Null shortcut comparison must fail closed"
+    Pass "Desktop shortcut contract: explicit fields are enforced, Description is observed but never asserted."
+
+    $baseChecks = @(Get-StandardLifecycleRequiredCheckNames)
+    $validChecks = @($baseChecks | ForEach-Object { [ordered]@{ name = $_; status = "pass"; details = "ok" } })
+    $validReport = [ordered]@{ summary = "passed"; checks = $validChecks }
+    Assert-Condition ((Test-LifecycleReportContract -ReportData $validReport -RequiredCheckNames $baseChecks -Context "synthetic report") -eq $true) "Report contract rejected a valid exact report"
+    $warningChecks = @($validChecks | ForEach-Object {
+        if ($_.name -eq "non_admin_integrity_check") { [ordered]@{ name = $_.name; status = "warning"; details = "admin" } } else { $_ }
+    })
+    $warningReport = [ordered]@{ summary = "passed"; checks = $warningChecks }
+    Assert-Condition ((Test-LifecycleReportContract -ReportData $warningReport -RequiredCheckNames $baseChecks -AllowedWarningCheckNames @("non_admin_integrity_check") -Context "synthetic report") -eq $true) "Report contract rejected an allowed environment warning"
+    $skippedChecks = @($validChecks | ForEach-Object {
+        if ($_.name -eq "stage1_runtime_closure") { [ordered]@{ name = $_.name; status = "skipped"; details = "skip" } } else { $_ }
+    })
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = $skippedChecks }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "non-passing status" "Report contract rejects a skipped closure check"
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = @($validChecks | Select-Object -First ($validChecks.Count - 1)) }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "check count mismatch" "Report contract rejects a missing check"
+    $extraChecks = @($validChecks) + @([ordered]@{ name = "unrelated_extra"; status = "pass"; details = "extra" })
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = $extraChecks }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "check count mismatch" "Report contract rejects an unrelated extra check"
+    $skippedDesktopChecks = @($validChecks | ForEach-Object {
+        if ($_.name -eq "stage3_desktop_shortcut_optin") { [ordered]@{ name = $_.name; status = "skipped"; details = "skip" } } else { $_ }
+    })
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = $skippedDesktopChecks }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "non-passing status" "Report contract rejects a skipped desktop shortcut check"
+    $missingDesktopChecks = @($validChecks | Where-Object { $_.name -ne "stage3_desktop_shortcut_optin" })
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = $missingDesktopChecks }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "check count mismatch" "Report contract rejects a missing desktop shortcut check"
+    $duplicateDesktopChecks = @($validChecks)
+    $duplicateDesktopChecks[$duplicateDesktopChecks.Count - 1] = [ordered]@{ name = "stage3_desktop_shortcut_optin"; status = "pass"; details = "duplicate" }
+    Assert-Throws {
+        Test-LifecycleReportContract -ReportData ([ordered]@{ summary = "passed"; checks = $duplicateDesktopChecks }) -RequiredCheckNames $baseChecks -Context "synthetic report"
+    } "Duplicate check detected" "Report contract rejects a duplicate desktop shortcut check"
+    Pass "Report contract: exact check set, non-skipped closure checks, required desktop checks, and allowed environment warnings verified."
+
+    $lifecycleRaw = Get-Content -LiteralPath (Join-Path $ScriptDir "test-installer-lifecycle.ps1") -Raw
+    $snapshotFunctionCount = ([regex]::Matches($lifecycleRaw, '(?m)^function Get-UserChoiceSnapshot\s*\{')).Count
+    Assert-Condition ($snapshotFunctionCount -eq 1) "test-installer-lifecycle.ps1 must define exactly one Get-UserChoiceSnapshot function (found $snapshotFunctionCount)"
+    Assert-Condition ($lifecycleRaw -notmatch 'function Get-UserChoiceSnapshot\(\[string\[\]\]\$Exts\)') "Nested/stage-local UserChoice snapshot must be removed"
+    Assert-Condition ($lifecycleRaw -match 'Compare-UserChoiceSnapshotAll') "Stage 3/5 must use the shared full-value/type snapshot comparator"
+    $allRequiredNames = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks)
+    foreach ($newCheck in @("runtime_closure_manifest", "stage1_runtime_closure", "stage1_install_location", "stage3_command_target", "stage5_runtime_closure", "stage5_install_location", "stage5_command_target", "stage3_desktop_shortcut_foreign_preserved", "stage3_desktop_shortcut_optin", "stage3_desktop_shortcut_reinstall_preserved", "stage4_desktop_shortcut_removed", "stage4_desktop_shortcut_user_modified_preserved")) {
+        Assert-Condition ($lifecycleRaw -match [regex]::Escape($newCheck)) "test-installer-lifecycle.ps1 must record required check '$newCheck'"
+        Assert-Condition ($allRequiredNames -contains $newCheck) "Required check list must include '$newCheck'"
+    }
+    foreach ($shortcutHelper in @('Get-ShortcutSnapshot', 'Test-ShortcutExplicitFieldsEqual', 'Test-OwnedDesktopShortcutFields')) {
+        Assert-Condition ($lifecycleRaw -match [regex]::Escape($shortcutHelper)) "test-installer-lifecycle.ps1 must use '$shortcutHelper'"
+        $helpersRaw = Get-Content -LiteralPath (Join-Path $ScriptDir "StandardUserHelpers.ps1") -Raw
+        Assert-Condition ($helpersRaw -match "function $([regex]::Escape($shortcutHelper))") "StandardUserHelpers.ps1 must define '$shortcutHelper'"
+    }
+    Assert-Condition ($lifecycleRaw -match 'associate desktopicon') "Harness must exercise the opted-in desktop shortcut task"
+    Assert-Condition ($lifecycleRaw -match 'stage4_desktop_shortcut_user_modified_preserved') "Harness must exercise user-modified desktop shortcut survival"
+    Pass "Static contract: UserChoice snapshot, required closure/desktop checks, and desktop shortcut helpers present."
 
     # =========================================================================
     # Part 5: Registry Safe-Reading & StrictMode Helper Tests

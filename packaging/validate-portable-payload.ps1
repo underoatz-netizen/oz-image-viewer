@@ -69,6 +69,9 @@ param(
     [string]$MetadataPath = "",
     [string]$ExpectedVersion = "",
     [string]$ExpectedPlatform = "win-x64",
+    [string]$ExpectedCommitSha = "",
+    [string]$ExpectedTreeSha = "",
+    [string]$ExpectedLgplSourceSha256 = "",
     [string[]]$AllowedExtensions = @(),
     [string]$ResultPath = ""
 )
@@ -242,6 +245,111 @@ foreach ($name in $onDisk.Keys) {
     if (-not $expectedNames.Contains($name)) {
         Fail "staged payload contains undeclared file '$name' (payload-only packaging is required)"
     }
+}
+
+# --- BUILD-PROVENANCE.json semantic validation -----------------------------
+$provPath = Join-Path $PackageDir 'BUILD-PROVENANCE.json'
+if (-not (Test-Path -LiteralPath $provPath -PathType Leaf)) {
+    Fail "staged payload is missing required BUILD-PROVENANCE.json"
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedCommitSha) -or $ExpectedCommitSha -notmatch '^[0-9a-f]{40}$') {
+    Fail "ExpectedCommitSha is required and must be a 40-character hex SHA-1."
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedTreeSha) -or $ExpectedTreeSha -notmatch '^[0-9a-f]{40}$') {
+    Fail "ExpectedTreeSha is required and must be a 40-character hex SHA-1."
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedLgplSourceSha256) -or $ExpectedLgplSourceSha256 -notmatch $sha256Pattern) {
+    Fail "ExpectedLgplSourceSha256 is required and must be a 64-character hex SHA-256."
+}
+
+try {
+    $provJson = Get-Content -LiteralPath $provPath -Raw | ConvertFrom-Json
+    if ([string]$provJson.product.version -ne $manifest.version) {
+        Fail "BUILD-PROVENANCE.json version '$($provJson.product.version)' does not match manifest version '$($manifest.version)'"
+    }
+    if ([string]$provJson.product.packageName -ne [string]$manifest.packageName) {
+        Fail "BUILD-PROVENANCE.json packageName '$($provJson.product.packageName)' does not match manifest packageName '$($manifest.packageName)'"
+    }
+    if (-not $provJson.PSObject.Properties['buildConfiguration'] -or $null -eq $provJson.buildConfiguration) {
+        Fail "BUILD-PROVENANCE.json is missing required buildConfiguration"
+    }
+    if ([string]$provJson.buildConfiguration.diagnostics -ne "OFF") {
+        Fail "BUILD-PROVENANCE.json diagnostics is '$([string]$provJson.buildConfiguration.diagnostics)'; release payloads require diagnostics strictly 'OFF'"
+    }
+    if (-not $provJson.PSObject.Properties['source'] -or $null -eq $provJson.source) {
+        Fail "BUILD-PROVENANCE.json is missing source evidence section"
+    }
+    if ([string]$provJson.source.cleanStatus -ne "clean" -or $provJson.source.isClean -ne $true) {
+        Fail "BUILD-PROVENANCE.json declares unclean source tree; release payloads strictly require a clean commit"
+    }
+    if ([string]$provJson.source.commitSha -ne $ExpectedCommitSha) {
+        Fail "BUILD-PROVENANCE.json commitSha '$([string]$provJson.source.commitSha)' does not match expected '$ExpectedCommitSha'"
+    }
+    if ([string]$provJson.source.treeSha -ne $ExpectedTreeSha) {
+        Fail "BUILD-PROVENANCE.json treeSha '$([string]$provJson.source.treeSha)' does not match expected '$ExpectedTreeSha'"
+    }
+
+    # Authenticate candidate binary observations in provenance against exact staged PE files
+    if (-not $provJson.PSObject.Properties['stagedCandidateBinaries'] -or $null -eq $provJson.stagedCandidateBinaries) {
+        Fail "BUILD-PROVENANCE.json is missing stagedCandidateBinaries"
+    }
+    $stagedPeMap = @{}
+    foreach ($diskName in $onDisk.Keys) {
+        $ext = [System.IO.Path]::GetExtension($diskName).ToLowerInvariant()
+        if ($ext -eq '.exe' -or $ext -eq '.dll') {
+            $stagedPeMap[$diskName.ToLowerInvariant()] = $onDisk[$diskName]
+        }
+    }
+    $seenCand = @{}
+    foreach ($cb in @($provJson.stagedCandidateBinaries)) {
+        $cbName = [string]$cb.name
+        if ([string]::IsNullOrWhiteSpace($cbName) -or [System.IO.Path]::GetFileName($cbName) -ne $cbName) {
+            Fail "BUILD-PROVENANCE.json contains unsafe candidate binary name '$cbName'"
+        }
+        $cbKey = $cbName.ToLowerInvariant()
+        if ($seenCand.ContainsKey($cbKey)) {
+            Fail "BUILD-PROVENANCE.json contains duplicate candidate binary '$cbName'"
+        }
+        $seenCand[$cbKey] = $true
+        if (-not $stagedPeMap.ContainsKey($cbKey)) {
+            Fail "BUILD-PROVENANCE.json references candidate binary '$cbName' missing from staged payload"
+        }
+        $diskItem = $stagedPeMap[$cbKey]
+        $cbHash = (Get-FileHash -LiteralPath $diskItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($cbHash -ne [string]$cb.sha256) {
+            Fail "BUILD-PROVENANCE.json hash for '$cbName' ($([string]$cb.sha256)) does not match actual payload hash ($cbHash)"
+        }
+        if ([long]$diskItem.Length -ne [long]$cb.bytes) {
+            Fail "BUILD-PROVENANCE.json byte size for '$cbName' ($([long]$cb.bytes)) does not match actual payload size ($($diskItem.Length))"
+        }
+        if ([string]$cb.machine -ne '0x8664') {
+            Fail "BUILD-PROVENANCE.json machine for '$cbName' is not 0x8664 ($([string]$cb.machine))"
+        }
+        if ([string]$cb.signatureStatus -ne 'unsigned' -and [string]$cb.signatureStatus -ne 'valid-signed') {
+            Fail "BUILD-PROVENANCE.json signatureStatus for '$cbName' is untrusted/invalid: $([string]$cb.signatureStatus)"
+        }
+    }
+    foreach ($peKey in $stagedPeMap.Keys) {
+        if (-not $seenCand.ContainsKey($peKey)) {
+            Fail "Staged payload PE binary '$($stagedPeMap[$peKey].Name)' is missing from BUILD-PROVENANCE.json stagedCandidateBinaries"
+        }
+    }
+
+    # Authenticate LGPL corresponding source asset evidence
+    if (-not $provJson.PSObject.Properties['lgplCorrespondingSourceAsset'] -or $null -eq $provJson.lgplCorrespondingSourceAsset) {
+        Fail "BUILD-PROVENANCE.json is missing lgplCorrespondingSourceAsset"
+    }
+    $lgplAsset = $provJson.lgplCorrespondingSourceAsset
+    $expectedLgplName = "pikaview-$($manifest.version)-lgpl-corresponding-source.zip"
+    if ([string]$lgplAsset.assetName -ne $expectedLgplName) {
+        Fail "BUILD-PROVENANCE.json lgplCorrespondingSourceAsset name '$([string]$lgplAsset.assetName)' does not match expected '$expectedLgplName'"
+    }
+    if ([string]$lgplAsset.sha256 -ne $ExpectedLgplSourceSha256) {
+        Fail "BUILD-PROVENANCE.json lgplCorrespondingSourceAsset sha256 '$([string]$lgplAsset.sha256)' does not match expected '$ExpectedLgplSourceSha256'"
+    }
+}
+catch {
+    Fail "BUILD-PROVENANCE.json validation failed: $($_.Exception.Message)"
 }
 
 # --- excluded artifacts ----------------------------------------------------

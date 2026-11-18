@@ -22,12 +22,12 @@ struct fallback_entry {
 
 // clang-format off
 constexpr fallback_entry kFallbackTable[] = {
-    {IDS_APP_TITLE, L"OZ Image Viewer"},
-    {IDS_APP_TITLE_CROP, L"OZ Image Viewer \u2014 Crop (Enter: Apply, Esc: Cancel)"},
+    {IDS_APP_TITLE, L"PikaView"},
+    {IDS_APP_TITLE_CROP, L"PikaView \u2014 Crop (Enter: Apply, Esc: Cancel)"},
     {IDS_FALLBACK_IMAGE_NAME, L"Image"},
     {IDS_STATUS_NO_IMAGE, L"No image open"},
     {IDS_OPEN_BUTTON, L"Open Image..."},
-    {IDS_TOOLBAR_NAME, L"OZ Viewer Toolbar"},
+    {IDS_TOOLBAR_NAME, L"PikaView Toolbar"},
     {IDS_STATE_CROP_MODE, L"Crop mode"},
     {IDS_STATE_SAVING, L"Saving..."},
     {IDS_STATE_PRINTING, L"Printing..."},
@@ -278,6 +278,7 @@ constexpr fallback_entry kFallbackTable[] = {
     {IDS_PRINT_ERR_SPOOL, L"The printer did not accept the page. Check the printer queue; the document is unchanged."},
     {IDS_PRINT_TITLE, L"Print"},
     {IDS_PRINT_UNCHANGED, L"The document is unchanged."},
+    {IDS_PRINT_ERR_DIALOG_FAILED, L"The system print dialog could not be initialized. Nothing was printed."},
 
     {IDS_DELETE_TITLE, L"Delete"},
     {IDS_DELETE_HEAD_GENERIC, L"Unable to move the file to the Recycle Bin."},
