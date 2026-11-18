@@ -12,13 +12,15 @@ It is built with C++23, Win32, Direct3D 11, DXGI and Direct2D.
 
 ## Project status
 
-OZ Image Viewer version 0.1.0 is available for 64-bit Windows systems.
+**PikaView** version 0.1.1 (formerly **OZ Image Viewer**) is available for 64-bit Windows systems.
 
+- GitHub Releases: <https://github.com/underoatz-netizen/oz-image-viewer/releases> (v0.1.1: <https://github.com/underoatz-netizen/oz-image-viewer/releases/tag/v0.1.1>)
 - Product overview: <https://underoatz-netizen.github.io/software/oz-image-viewer/>
 - Downloads & checksums: <https://underoatz-netizen.github.io/software/oz-image-viewer/downloads/>
 - Release changelog: <https://underoatz-netizen.github.io/software/oz-image-viewer/changelog/>
 - User guide & FAQ: <https://underoatz-netizen.github.io/software/oz-image-viewer/guide/>
 - Source repository: <https://github.com/underoatz-netizen/oz-image-viewer>
+- Release notes & historical continuity: see [RELEASE_NOTES.md](RELEASE_NOTES.md) ([ไทย](RELEASE_NOTES.th.md)) and [docs/releases/v0.1.1/RELEASE_NOTES.md](docs/releases/v0.1.1/RELEASE_NOTES.md). Historical OZ Image Viewer 0.1.0 release assets, git tag (`v0.1.0`), and provenance archive ([`docs/releases/v0.1.0/BUILD-PROVENANCE.json`](docs/releases/v0.1.0/BUILD-PROVENANCE.json)) remain unchanged and are not re-versioned.
 
 ## Platform
 
@@ -51,6 +53,10 @@ WebP, AVIF and HEIC/HEIF support depend on the optional codecs being compiled in
   100% views, and borderless-windowed fullscreen.
 - Opens from the command line, from an Open button, or by dragging a single file
   onto the window.
+- Interactive single-image printing (`File -> Print...` or `Ctrl+P`) produces
+  fit-to-page output of the committed document without modifying the file (see
+  [RELEASE_NOTES.md](RELEASE_NOTES.md) for observed verification scope and
+  evidence limits).
 
 **Editing (non-destructive)**
 
@@ -81,6 +87,7 @@ WebP, AVIF and HEIC/HEIF support depend on the optional codecs being compiled in
 | `Ctrl`+`Shift`+`H` / `Ctrl`+`Shift`+`V` | Flip horizontally / vertically |
 | `Ctrl`+`Z` / `Ctrl`+`Y` | Undo / redo |
 | `Ctrl`+`Alt`+`R` | Open the Resize dialog |
+| `Ctrl`+`P` | Print the current image (fit-to-page output of the committed document; see [RELEASE_NOTES.md](RELEASE_NOTES.md)) |
 | `Ctrl`+`S` / `Ctrl`+`Shift`+`S` | Save / Save As |
 
 ## Prerequisites

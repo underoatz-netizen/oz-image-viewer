@@ -1,0 +1,294 @@
+{
+    "$schema":  "https://json-schema.org/draft/2020-12/schema",
+    "provenanceSchemaVersion":  "1.0.0",
+    "product":  {
+                    "name":  "PikaView",
+                    "packageName":  "pikaview",
+                    "version":  "0.1.1",
+                    "tag":  "v0.1.1",
+                    "publisher":  "OZ Lab",
+                    "homepage":  "https://underoatz-netizen.github.io/software/oz-image-viewer/",
+                    "repository":  "https://github.com/underoatz-netizen/oz-image-viewer"
+                },
+    "source":  {
+                   "commitSha":  "b2904e5aa8f9d46d40f7cd37af6f7f7f9d2e00a8",
+                   "treeSha":  "76376d3de2dce4b351243fd6f483994e22bef2df",
+                   "cleanStatus":  "clean",
+                   "isClean":  true
+               },
+    "buildConfiguration":  {
+                               "targetArchitecture":  "x64",
+                               "diagnostics":  "OFF",
+                               "configuration":  "Release"
+                           },
+    "toolchain":  {
+                      "hostOs":  "Microsoft Windows NT 10.0.22631.0 (x64)",
+                      "compiler":  "MSVC 14.44.35228.0 (C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe)",
+                      "cmake":  "CMake 3.31.6-msvc6 (C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe)",
+                      "targetTriplet":  "oz-x64-windows-static-md",
+                      "vcpkgCheckoutHead":  "52d80838fb40c755b1615fbc9c7b994a33742a22",
+                      "vcpkgRegistryBaseline":  "52d80838fb40c755b1615fbc9c7b994a33742a22"
+                  },
+    "dependencyProvenance":  {
+                                 "trustBasis":  "Controlled clean configure/build plus byte equality with the effective CMakeCache vcpkg toolchain, pinned registry/overlay recipes, installed package metadata and outputs, and the corresponding-source asset.",
+                                 "claimLimits":  [
+                                                     "Byte equality between staged DLLs, effective installed outputs, recipes, and source archives demonstrates consistency with the recorded controlled build; it is not cryptographic proof of compilation, custody, or bit-for-bit reproducibility.",
+                                                     "Vcpkg registry and installed-package metadata are observations from the effective build environment. A party able to modify that environment after the controlled build could forge them; release review and environment custody remain external controls.",
+                                                     "CMakeCache values are treated as the record of the effective configure/build inputs. Overlay or toolchain settings introduced only through a build-time environment variable and absent from the cache are outside this evidence.",
+                                                     "The committed dependency policy is a controlled source input. Changing expected versions, archives, or triplet requires a source change and release review; this record does not make that policy self-authenticating.",
+                                                     "A reproducible-build proof and a real clean isolated dependency rebuild in a fresh workspace remain required release evidence and are not established by this record."
+                                                 ],
+                                 "policyPath":  "AppData\\Local\\Temp\\opencode\\ozviewer-e299-recovery-20261117-103657-13d5b0e6\\repo\\packaging\\lgpl-dependency-policy.json",
+                                 "policySha256":  "9908f139a7645ed403eb548cde1819a6cfaf8614ae3ce7ec9e55838be95c7826",
+                                 "effectiveVcpkg":  {
+                                                        "toolchainFile":  "E:\\Projects\\OZ image viewer\\build\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake",
+                                                        "vcpkgRoot":  "E:\\Projects\\OZ image viewer\\build\\vcpkg",
+                                                        "checkoutHead":  "52d80838fb40c755b1615fbc9c7b994a33742a22",
+                                                        "registryRepository":  "https://github.com/microsoft/vcpkg",
+                                                        "registryBaseline":  "52d80838fb40c755b1615fbc9c7b994a33742a22",
+                                                        "targetTriplet":  "oz-x64-windows-static-md",
+                                                        "effectiveTriplet":  "AppData\\Local\\Temp\\opencode\\ozviewer-e299-recovery-20261117-103657-13d5b0e6\\repo\\triplets\\oz-x64-windows-static-md.cmake",
+                                                        "tripletSha256":  "147f0369c412a15eb0e56dc5b25045886e1dc72ef3acff4d45fd2a15dd843fb1",
+                                                        "installedDir":  "AppData\\Local\\Temp\\opencode\\ozviewer-e299-recovery-20261117-103657-13d5b0e6\\build-release\\vcpkg_installed",
+                                                        "manifestDir":  "AppData\\Local\\Temp\\opencode\\ozviewer-e299-recovery-20261117-103657-13d5b0e6\\repo",
+                                                        "overlayPorts":  [
+
+                                                                         ],
+                                                        "overlayTripletDirs":  [
+                                                                                   "AppData\\Local\\Temp\\opencode\\ozviewer-e299-recovery-20261117-103657-13d5b0e6\\repo\\triplets"
+                                                                               ]
+                                                    },
+                                 "dependencies":  [
+                                                      {
+                                                          "port":  "libheif",
+                                                          "version":  "1.23.2",
+                                                          "portVersion":  0,
+                                                          "recipeSource":  "registry",
+                                                          "recipeGitTree":  "da740142258a17ed12fa5f9a4576f729134539dd",
+                                                          "recipeFiles":  [
+                                                                              {
+                                                                                  "path":  "cmake-project-include.cmake",
+                                                                                  "bytes":  287,
+                                                                                  "sha256":  "d544cf4c0f1097449d7e61ac85ddf0846c490dc4eab526246ad53945b2e4129a"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "cxx-linkage-pkgconfig.diff",
+                                                                                  "bytes":  838,
+                                                                                  "sha256":  "0af9d4f79c2eeba70e16dffcf18b4fccc1ce62a66ddd3e8f11379414ce4655d6"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "find-modules.diff",
+                                                                                  "bytes":  1124,
+                                                                                  "sha256":  "0ad0adf7be06d184397f1a277700a4ee6fddaa3339ed5e3261c9690cdbeb9da4"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "gdk-pixbuf.patch",
+                                                                                  "bytes":  1145,
+                                                                                  "sha256":  "5ab3feafd85b66c24b18ac1e75ef6f63aed7203dee7a122d58c32bdf6e74441c"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "portfile.cmake",
+                                                                                  "bytes":  3185,
+                                                                                  "sha256":  "a12bf46a438ff3b2040b076cfb97611c15ac2eb7d9afcf8c83a378f15d0412a0"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "symbol-exports.diff",
+                                                                                  "bytes":  2295,
+                                                                                  "sha256":  "2d655ac8345569d59fbeef005fb0d23c6ad5b85ab3506001057ec709a277cbf3"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "vcpkg.json",
+                                                                                  "bytes":  1775,
+                                                                                  "sha256":  "58f8415fcbc9eefc0a1a3ef82cb7f0e47af8b392d0b25135ca4817183888baf3"
+                                                                              }
+                                                                          ],
+                                                          "upstreamArchive":  {
+                                                                                  "name":  "strukturag-libheif-v1.23.2.tar.gz",
+                                                                                  "bytes":  2065440,
+                                                                                  "sha256":  "1405ed070421459b569ff49deab109b7f1a30a447e72a9b20a4154f774634a44",
+                                                                                  "sha512":  "d34ccd40d7f7cc48ff8ceddafd8f7c7004ab0df2a657237fcc715c4bcc453a41946d7db542d32b781875868ee116c451b4b63daaf073530245ec7b117ae60e27"
+                                                                              },
+                                                          "installed":  {
+                                                                            "version":  "1.23.2",
+                                                                            "portVersion":  0,
+                                                                            "architecture":  "oz-x64-windows-static-md",
+                                                                            "status":  "install ok installed",
+                                                                            "abi":  "390abe903a3efda878b4f98dc719968518a99ffd5fab0d6eb1090ce296e2bd27",
+                                                                            "listFile":  "libheif_1.23.2_oz-x64-windows-static-md.list",
+                                                                            "dllRelative":  "bin/heif.dll",
+                                                                            "dllBytes":  1394688,
+                                                                            "dllSha256":  "33e19aa93b8433ba059eacb7479d6132cea12759d4c2554ca03c21b0fd6f2b7e"
+                                                                        },
+                                                          "staged":  {
+                                                                         "name":  "heif.dll",
+                                                                         "bytes":  1394688,
+                                                                         "sha256":  "33e19aa93b8433ba059eacb7479d6132cea12759d4c2554ca03c21b0fd6f2b7e"
+                                                                     },
+                                                          "patches":  [
+                                                                          "cmake-project-include.cmake",
+                                                                          "cxx-linkage-pkgconfig.diff",
+                                                                          "find-modules.diff",
+                                                                          "gdk-pixbuf.patch",
+                                                                          "symbol-exports.diff"
+                                                                      ]
+                                                      },
+                                                      {
+                                                          "port":  "libde265",
+                                                          "version":  "1.1.1",
+                                                          "portVersion":  0,
+                                                          "recipeSource":  "registry",
+                                                          "recipeGitTree":  "ce005210dddce8f16b6de9c0d25f1dbb573347b5",
+                                                          "recipeFiles":  [
+                                                                              {
+                                                                                  "path":  "fix-api-visibility.patch",
+                                                                                  "bytes":  460,
+                                                                                  "sha256":  "4693b666c18aa1be1d20d2b38fee57b5d704ab6cbc23eba4de0cf8acb84da693"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "fix-linkage.patch",
+                                                                                  "bytes":  1264,
+                                                                                  "sha256":  "539c6d2a23a84a996f0698c17fd595be5ad95f0127e37456a4304536817421d7"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "portfile.cmake",
+                                                                                  "bytes":  1083,
+                                                                                  "sha256":  "7fa532d183935c366e753517eb9a3221218cb089164155f474e4863d2e1467d7"
+                                                                              },
+                                                                              {
+                                                                                  "path":  "vcpkg.json",
+                                                                                  "bytes":  362,
+                                                                                  "sha256":  "d796bc335748aa130c83528b7c796182ba72a1752ef4a3c451ba02f83461006a"
+                                                                              }
+                                                                          ],
+                                                          "upstreamArchive":  {
+                                                                                  "name":  "strukturag-libde265-v1.1.1.tar.gz",
+                                                                                  "bytes":  316780,
+                                                                                  "sha256":  "5b4fac677018e6074196e8f9889f3e4a5310e46afbf22a893f620d4e24d3510e",
+                                                                                  "sha512":  "fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8"
+                                                                              },
+                                                          "installed":  {
+                                                                            "version":  "1.1.1",
+                                                                            "portVersion":  0,
+                                                                            "architecture":  "oz-x64-windows-static-md",
+                                                                            "status":  "install ok installed",
+                                                                            "abi":  "e30861aea9b75917a2661ea7adc0d571284670e2d8f564c80a71fd672dc7b588",
+                                                                            "listFile":  "libde265_1.1.1_oz-x64-windows-static-md.list",
+                                                                            "dllRelative":  "bin/libde265.dll",
+                                                                            "dllBytes":  360960,
+                                                                            "dllSha256":  "0780062929bb6b130306ef74cf1c522c598626c2e1090696155fa9e7d43e4515"
+                                                                        },
+                                                          "staged":  {
+                                                                         "name":  "libde265.dll",
+                                                                         "bytes":  360960,
+                                                                         "sha256":  "0780062929bb6b130306ef74cf1c522c598626c2e1090696155fa9e7d43e4515"
+                                                                     },
+                                                          "patches":  [
+                                                                          "fix-api-visibility.patch",
+                                                                          "fix-linkage.patch"
+                                                                      ]
+                                                      }
+                                                  ]
+                             },
+    "thirdPartySourceInputs":  [
+                                   {
+                                       "name":  "libheif",
+                                       "version":  "1.23.2",
+                                       "license":  "LGPL-3.0-only",
+                                       "archive":  "strukturag-libheif-v1.23.2.tar.gz",
+                                       "bytes":  2065440,
+                                       "sha256":  "1405ed070421459b569ff49deab109b7f1a30a447e72a9b20a4154f774634a44",
+                                       "sha512":  "d34ccd40d7f7cc48ff8ceddafd8f7c7004ab0df2a657237fcc715c4bcc453a41946d7db542d32b781875868ee116c451b4b63daaf073530245ec7b117ae60e27",
+                                       "patches":  [
+                                                       "cmake-project-include.cmake",
+                                                       "cxx-linkage-pkgconfig.diff",
+                                                       "find-modules.diff",
+                                                       "gdk-pixbuf.patch",
+                                                       "symbol-exports.diff"
+                                                   ]
+                                   },
+                                   {
+                                       "name":  "libde265",
+                                       "version":  "1.1.1",
+                                       "license":  "LGPL-3.0-only",
+                                       "archive":  "strukturag-libde265-v1.1.1.tar.gz",
+                                       "bytes":  316780,
+                                       "sha256":  "5b4fac677018e6074196e8f9889f3e4a5310e46afbf22a893f620d4e24d3510e",
+                                       "sha512":  "fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8",
+                                       "patches":  [
+                                                       "fix-api-visibility.patch",
+                                                       "fix-linkage.patch"
+                                                   ]
+                                   }
+                               ],
+    "stagedCandidateBinaries":  [
+                                    {
+                                        "name":  "heif.dll",
+                                        "bytes":  1394688,
+                                        "sha256":  "33e19aa93b8433ba059eacb7479d6132cea12759d4c2554ca03c21b0fd6f2b7e",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "unsigned"
+                                    },
+                                    {
+                                        "name":  "libde265.dll",
+                                        "bytes":  360960,
+                                        "sha256":  "0780062929bb6b130306ef74cf1c522c598626c2e1090696155fa9e7d43e4515",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "unsigned"
+                                    },
+                                    {
+                                        "name":  "msvcp140.dll",
+                                        "bytes":  557728,
+                                        "sha256":  "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "valid-signed"
+                                    },
+                                    {
+                                        "name":  "msvcp140_atomic_wait.dll",
+                                        "bytes":  50304,
+                                        "sha256":  "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "valid-signed"
+                                    },
+                                    {
+                                        "name":  "ozviewer.exe",
+                                        "bytes":  3866624,
+                                        "sha256":  "a31978e505a13fcfe61c0019a2a122407dd37c4e66099ae2ec5bc4f4ad373cae",
+                                        "kind":  "pe-executable",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "unsigned"
+                                    },
+                                    {
+                                        "name":  "vcruntime140.dll",
+                                        "bytes":  124544,
+                                        "sha256":  "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "valid-signed"
+                                    },
+                                    {
+                                        "name":  "vcruntime140_1.dll",
+                                        "bytes":  49792,
+                                        "sha256":  "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+                                        "kind":  "dynamic-library",
+                                        "machine":  "0x8664",
+                                        "signatureStatus":  "valid-signed"
+                                    }
+                                ],
+    "lgplCorrespondingSourceAsset":  {
+                                         "assetName":  "pikaview-0.1.1-lgpl-corresponding-source.zip",
+                                         "bytes":  2420966,
+                                         "sha256":  "5b35334749d600173bf97a2e6897f993611770d89d7f3fee99c885f131de144f",
+                                         "deliveryBasis":  "GPL-3.0 ยง6(d) source distribution / LGPL-3.0 ยง4 combined-work shared-library provisions",
+                                         "contains":  [
+                                                          "Exact upstream tarballs for libheif 1.23.2 and libde265 1.1.1",
+                                                          "Exact effective vcpkg recipes and patches",
+                                                          "triplets/oz-x64-windows-static-md.cmake",
+                                                          "Full LGPL-3.0 and GPL-3.0 license texts",
+                                                          "README-BUILD-LGPL.txt and build-lgpl-dlls.ps1"
+                                                      ]
+                                     }
+}

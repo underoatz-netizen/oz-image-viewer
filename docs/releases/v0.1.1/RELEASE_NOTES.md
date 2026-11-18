@@ -1,113 +1,70 @@
-# PikaView 0.1.1 (formerly OZ Image Viewer)
+# PikaView 0.1.1 (formerly OZ Image Viewer) Release Notes
 
-> **Reconstructed candidate — not a verified release.** These notes were
-> reconstructed from recovered survivor files because the prior v0.1.1 notes
-> were lost. This candidate has not been built, signed, tested, installed, or
-> published. Nothing below is a claim that a real v0.1.1 build, signature, test
-> run, installer lifecycle, or physical print has been observed.
+PikaView 0.1.1 is the PikaView-named successor release to OZ Image Viewer 0.1.0 for 64-bit Windows (x64), built with modern C++23, Win32, Direct3D 11, DXGI, and Direct2D. Existing viewing, folder navigation, non-destructive editing (rotate, flip, crop, resize, undo/redo), save/export, and dynamic HEIC/HEIF codec support remain available, alongside interactive single-image printing.
 
-PikaView 0.1.1 is the PikaView-named successor candidate to OZ Image Viewer
-0.1.0 for 64-bit Windows (x64). Viewing, navigation, non-destructive editing,
-save/export, and optional HEIC/HEIF codec behavior are intended to remain
-available, but this reconstruction did not re-verify them.
+The executable file name remains `ozviewer.exe`. Internal identity used for upgrades and association registration is retained: the stable AppId, the `OZImageViewer.Image` ProgID, the `HKCU\Software\OZImageViewer` registry layout, and the per-user install path `%LOCALAPPDATA%\Programs\OZ Image Viewer` are unchanged. Historical v0.1.0 assets, git tag, and provenance records remain unchanged.
 
-The executable file name remains `ozviewer.exe`. Internal identity used for
-upgrades and association registration is also retained: the stable AppId, the
-`OZImageViewer.Image` ProgID, the `HKCU\Software\OZImageViewer` registry layout,
-and the per-user install path `%LOCALAPPDATA%\Programs\OZ Image Viewer` are
-unchanged. Historical v0.1.0 assets and notes remain unchanged.
+## Source & Build Identity
 
-## Changes in this candidate
+- **Source commit:** `b2904e5aa8f9d46d40f7cd37af6f7f7f9d2e00a8` (clean working tree)
+- **Git tree:** `76376d3de2dce4b351243fd6f483994e22bef2df`
+- **Build configuration:** `Release` x64 with `OZVIEWER_PRINT_DIAGNOSTICS=OFF`
+- **Toolchain & triplet:** MSVC 14.44.35228.0, CMake 3.31.6, vcpkg triplet `oz-x64-windows-static-md`
 
-- **PikaView product naming.** User-facing packaging and release identity move
-  to PikaView (formerly OZ Image Viewer). The executable name and internal
-  upgrade identity stay as described above.
-- **Print path.** The interactive Print command uses a dedicated
-  `PrintDlgExW` helper with a strictly scoped apartment-threaded COM lifecycle,
-  explicit cancel/apply/failure outcomes, complete DevMode/DevNames/HDC
-  cleanup, and a reentrancy guard around the print attempt. The existing
-  single-flight print controller prepares one fit-to-page page from the
-  committed image without changing the document.
-- **Private print diagnostics.** The CMake option
-  `OZVIEWER_PRINT_DIAGNOSTICS` exists and defaults to `OFF`. Release builds are
-  expected to keep it `OFF`; it is not a user-facing feature.
-- **Release packaging and provenance.** Packaging targets the new asset names
-  below and requires a final `SHA256SUMS`. The release-provenance scripts bind
-  staged `heif.dll` and `libde265.dll` bytes to effective dependency build
-  evidence and fail closed on missing or mismatched evidence. These scripts were
-  recovered but were not executed for this reconstruction.
-- **Upgrade intent.** The installer is intended to upgrade an owned v0.1.0
-  installation in place, migrating owned display/registration labels to
-  PikaView while preserving the install directory and never changing a Windows
-  default file association automatically. This behavior is covered by recovered
-  synthetic/mock contract tests only; no real install or upgrade was performed
-  here.
+## What's Changed in 0.1.1
 
-## Packaging assets
+- **PikaView product naming:** User-facing packaging, installer titles, shortcuts, and release identity move to **PikaView** (formerly OZ Image Viewer). The executable file name (`ozviewer.exe`) and internal upgrade identity stay unchanged so existing shortcuts and per-user installations continue cleanly.
+- **Interactive Print path (`PrintDlgExW`):** The interactive Print command (`File -> Print...` or `Ctrl+P`) uses a dedicated `PrintDlgExW` helper with a strictly scoped apartment-threaded COM lifecycle, explicit cancel/apply/failure outcomes, complete `DevMode`/`DevNames`/`HDC` cleanup, and a reentrancy guard around the print attempt. The single-flight print controller prepares one fit-to-page copy from the committed image without modifying the file.
+- **Private print diagnostics (`OFF` in Release):** The CMake option `OZVIEWER_PRINT_DIAGNOSTICS` defaults to `OFF` and is built `OFF` in this Release build; it is not a user-facing feature.
+- **Dependency provenance & packaging:** `BUILD-PROVENANCE.json` binds the staged `heif.dll` and `libde265.dll` bytes to the effective vcpkg `oz-x64-windows-static-md` build inputs, pinned recipes/patches, and `pikaview-0.1.1-lgpl-corresponding-source.zip` (failing closed on missing or mismatched evidence).
+- **In-place upgrade over v0.1.0:** Installing PikaView 0.1.1 over an owned OZ Image Viewer 0.1.0 installation upgrades in place at the original install directory, updates owned display/registration labels to PikaView, and preserves all existing Windows default file associations (`UserChoice`).
 
-- `pikaview-0.1.1-win-x64-installer.exe`
-- `pikaview-0.1.1-win-x64-portable.zip`
-- `pikaview-0.1.1-lgpl-corresponding-source.zip`
-- `SHA256SUMS`
+## Distribution Packages
 
-The portable ZIP still contains `ozviewer.exe` plus its app-local runtime DLLs.
-The installer remains a per-user installation and offers file associations only
-as an initially unchecked option.
+- `pikaview-0.1.1-win-x64-installer.exe` (4,260,442 bytes): Guided per-user Windows Setup installer targeting `%LOCALAPPDATA%\Programs\OZ Image Viewer` without requiring Administrator privileges. File associations and desktop shortcut creation are strictly opt-in (initially unchecked) and never hijack system defaults. Cleanly uninstalls via Windows Settings > Installed Apps.
+- `pikaview-0.1.1-win-x64-portable.zip` (2,714,302 bytes): Portable ZIP archive for extraction to any folder. Contains `ozviewer.exe` alongside its app-local runtime DLLs (`heif.dll`, `libde265.dll`, and VC143 CRT DLLs) plus `BUILD-PROVENANCE.json` and license notices.
+- `pikaview-0.1.1-lgpl-corresponding-source.zip` (2,420,966 bytes): Complete corresponding source archives, effective vcpkg recipes and patches, `triplets/oz-x64-windows-static-md.cmake`, full LGPL-3.0 and GPL-3.0 license texts, `README-BUILD-LGPL.txt`, and `build-lgpl-dlls.ps1` for dynamically loaded LGPL components (libheif 1.23.2 and libde265 1.1.1) under LGPLv3 §4 and GPLv3 §6(d).
+- `SHA256SUMS` (316 bytes): Official cryptographic checksum file for the distribution assets.
 
-No v0.1.1 SHA-256 values are published in these reconstructed notes because no
-final assets exist. `SHA256SUMS` must be generated from the final built assets;
-the v0.1.0 hashes in the historical notes apply only to the published v0.1.0
-assets and must not be reused.
+## Cryptographic Checksums (SHA-256)
 
-## Verification status and evidence limits
+```
+2abc046cc5e20187bca5343fa9f73f4adb527b9f5bfd98ac35f380b42391c076 *pikaview-0.1.1-win-x64-installer.exe
+ade4a2602a50c0949e9f6ddab2c004dbbdee3ea5ffed21d9b9348c20a97bf36b *pikaview-0.1.1-win-x64-portable.zip
+5b35334749d600173bf97a2e6897f993611770d89d7f3fee99c885f131de144f *pikaview-0.1.1-lgpl-corresponding-source.zip
+```
 
-- This is a **reconstructed candidate** assembled from recovered survivor files
-  on base commit `e299e34`. Verification during reconstruction was limited to
-  JSON parsing, exact metadata checks, file-hash checks, and static text/source
-  checks that do not require the concurrent viewer-print recovery work.
-- No integrated CMake configure/build, CTest run, installer compile, signature
-  verification, install/uninstall lifecycle run, physical print, failed-network
-  printer test, staging, commit, tag, push, or publication was performed for
-  this candidate.
-- **Print evidence is historical only.** The prior old-candidate's reported
-  page success and its reported second Cancel (second-Cancel) behavior are
-  observations of that earlier candidate and environment, not evidence for
-  this candidate. The failed-network-first case (the first print attempt
-  targets a failed or unavailable network printer) was not tested. No claim is
-  made that all print-dialog hangs are fixed.
-- Packaging scripts and their synthetic contract tests are recovered artifacts,
-  not observed release evidence. A final release still requires a clean build,
-  real dependency provenance, an unsigned/signed decision based on the actual
-  final artifact, and an independent review.
+`SHA256SUMS` itself has SHA-256 `c40ea7e91909695b848f8236c88e1334293702e9c893964333ba37720babcb99` (316 bytes).
 
-## Unsigned-build warning (conditional)
+Verify downloaded files using PowerShell (`Get-FileHash -Algorithm SHA256 filename`) or Command Prompt (`certutil -hashfile filename SHA256`) before running them.
 
-No final Authenticode signature has been observed for this candidate. **If** the
-final installer or executables are distributed unsigned, Windows SmartScreen or
-browser warnings such as "Unknown Publisher" may appear. In that case, verify
-the published SHA-256 in `SHA256SUMS` and the official repository before
-running anything. If signing is performed and observed for the final artifacts,
-this conditional warning must be replaced with the observed signature and
-publisher facts before release.
+## Observed Authenticode Signatures & SmartScreen Guidance
 
-## Licensing and corresponding source
+- **Unsigned project binaries (`NotSigned`):** `pikaview-0.1.1-win-x64-installer.exe` (`2abc046cc5e20187bca5343fa9f73f4adb527b9f5bfd98ac35f380b42391c076`, 4,260,442 bytes), `ozviewer.exe` (`a31978e505a13fcfe61c0019a2a122407dd37c4e66099ae2ec5bc4f4ad373cae`, 3,866,624 bytes), `heif.dll` (`33e19aa93b8433ba059eacb7479d6132cea12759d4c2554ca03c21b0fd6f2b7e`, 1,394,688 bytes), and `libde265.dll` (`0780062929bb6b130306ef74cf1c522c598626c2e1090696155fa9e7d43e4515`, 360,960 bytes) are **unsigned (`NotSigned`)**.
+- **Signed Microsoft CRT DLLs (`Valid`):** Bundled Microsoft VC143 CRT DLLs (`MSVCP140.dll`, `MSVCP140_ATOMIC_WAIT.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`) carry valid Microsoft Authenticode signatures (`Valid`).
+- **SmartScreen & browser guidance:** Because the installer and application binaries are unsigned, Windows SmartScreen or web browsers may display an "Unknown Publisher" warning before opening them. Always confirm the file was downloaded from the official GitHub repository (`https://github.com/underoatz-netizen/oz-image-viewer`) and verify that its SHA-256 hash matches `SHA256SUMS` and the values above before running anything.
 
-First-party code is licensed under the MIT License
-(Copyright (c) 2026 OZ Lab); see `LICENSE`. Third-party components retain their
-upstream licenses as documented in `THIRD-PARTY-NOTICES.md`,
-`THIRD-PARTY-LICENSES.txt`, and `THIRD-PARTY-SOURCE.txt`.
+## Observed Verification & Evidence Limits
 
-The dynamically loaded LGPL components remain libheif 1.23.2 and libde265 1.1.1
-(LGPL-3.0-only). Their complete corresponding source, patches, build scripts, and
-rebuild instructions are packaged in
-`pikaview-0.1.1-lgpl-corresponding-source.zip`, subject to LGPLv3 §4 and GPLv3
-§6(d). Users may rebuild and replace `heif.dll` and `libde265.dll` alongside
-`ozviewer.exe`; the application loads them dynamically.
+- **Local Release build & tests (`OZVIEWER_PRINT_DIAGNOSTICS=OFF`):**
+  - Clean Release x64 build completed with 0 errors.
+  - CTest passed 48/51 checks (all 10/10 targeted print/UI tests passed; the 3 non-targeted pre-package failures were `ozbench_cli_capture_control_window`, `ozviewer_save_ui_smoke`, and `package_portable_smoke` before provenance staging).
+  - Packaged portable smoke (`smoke-portable.ps1`): `PASS` (`FirstPresent` benchmark).
+  - Local `test-lifecycle-harness.ps1` and `test-installer-migration.ps1`: passed.
+- **Clean-room GitHub Actions CI (run `44229309225`, Windows Server 2022 x64):**
+  - Passed `fetch-candidate` and `validate-candidate` (disposable lifecycle harness: 48 checks with 47 `pass`, 1 expected `non_admin_integrity_check` warning on the elevated runner, and 0 `fail`; plus `standard-user-lifecycle` gate: 12/12 parent checks + 48/48 non-elevated standard-user child checks `pass`).
+  - Covered fresh per-user install, `FirstPresent` benchmark smoke, opt-in file associations, desktop shortcut opt-in/reinstall/user-modified preservation, `v0.1.0 -> v0.1.1` in-place upgrade at the original install directory, runtime closure hashes, `InstallLocation`/shell-open command target, complete `UserChoice` preservation across all 14 declared extensions, and clean uninstall.
+- **Truthful print evidence limits:**
+  - Reported physical page print and second-Cancel (`second-Cancel`) behavior are historical observations from an earlier candidate and environment, not re-run physical printer evidence for this v0.1.1 build.
+  - The `failed-network-first` scenario (where the first print attempt targets a failed or unavailable network printer) was not tested.
+  - No claim is made that all print-dialog hangs are fixed.
 
-## Historical v0.1.0 material
+## Licensing & Corresponding Source
 
-OZ Image Viewer 0.1.0 and its release assets are historical and are not
-re-versioned or replaced by this candidate. The original v0.1.0
-`BUILD-PROVENANCE.json` is preserved byte-for-byte at
-`docs/releases/v0.1.0/BUILD-PROVENANCE.json`. That historical archive is not
-candidate provenance and must not be used as evidence for v0.1.1.
+First-party code is licensed under the MIT License (Copyright (c) 2026 OZ Lab); see `LICENSE`. Third-party components retain their upstream licenses as documented in `THIRD-PARTY-NOTICES.md`, `THIRD-PARTY-LICENSES.txt`, and `THIRD-PARTY-SOURCE.txt`.
+
+The dynamically loaded LGPL components remain libheif 1.23.2 and libde265 1.1.1 (LGPL-3.0-only). Their complete corresponding source, patches, build scripts, and rebuild instructions are packaged in `pikaview-0.1.1-lgpl-corresponding-source.zip`, subject to LGPLv3 §4 and GPLv3 §6(d). Users may rebuild and replace `heif.dll` and `libde265.dll` alongside `ozviewer.exe`; the application loads them dynamically.
+
+## Historical v0.1.0 Continuity
+
+OZ Image Viewer 0.1.0 and its published release assets and git tag remain historical and are not re-versioned or replaced by v0.1.1. The original v0.1.0 provenance archive is preserved byte-for-byte at `docs/releases/v0.1.0/BUILD-PROVENANCE.json`.
