@@ -170,6 +170,9 @@ public:
 
     void push(decode_result_msg msg) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (msg.epoch < min_epoch_) {
+            return;
+        }
         if (queue_.size() >= kMaxCapacity) {
             auto it = queue_.begin();
             for (; it != queue_.end(); ++it) {
@@ -193,7 +196,8 @@ public:
                             std::int32_t view_w, std::int32_t view_h) const {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& m : queue_) {
-            if (should_commit_completion(m, desired_normalized_path, view_w, view_h)) {
+            if (m.epoch >= min_epoch_ &&
+                should_commit_completion(m, desired_normalized_path, view_w, view_h)) {
                 return true;
             }
         }
@@ -221,9 +225,21 @@ public:
         queue_.clear();
     }
 
+    void erase_below_epoch(std::uint64_t min_epoch) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        min_epoch_ = (std::max)(min_epoch_, min_epoch);
+        const std::uint64_t cutoff = min_epoch_;
+        queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
+                                    [cutoff](const decode_result_msg& m) {
+                                        return m.epoch < cutoff;
+                                    }),
+                     queue_.end());
+    }
+
 private:
     mutable std::mutex mutex_;
     std::deque<decode_result_msg> queue_;
+    std::uint64_t min_epoch_ = 0;
 };
 
 }  // namespace oz::viewer_core

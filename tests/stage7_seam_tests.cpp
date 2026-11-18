@@ -996,6 +996,69 @@ void test_modern_dialogs_mapping_and_fallback() {
         CHECK(check_noninteractive(true, true));
     }
 
+    // 5. Save error guidance for write-protected (win32 19) and access denied (win32 5)
+    {
+        CHECK(format_save_error_guidance(oz::viewer_core::save_error::none, "ignored").empty());
+
+        const std::wstring wp_temp = format_save_error_guidance(
+            oz::viewer_core::save_error::temp_create_failed,
+            "temp file creation failed (win32 19)");
+        CHECK(wp_temp.find(viewer_string(IDS_SAVE_ERR_TEMP)) != std::wstring::npos);
+        CHECK(wp_temp.find(viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT)) != std::wstring::npos);
+        CHECK(wp_temp.find(L"(win32 19)") != std::wstring::npos);
+
+        const std::wstring wp_replace = format_save_error_guidance(
+            oz::viewer_core::save_error::replace_failed,
+            "destination could not be replaced (win32 19)");
+        CHECK(wp_replace.find(viewer_string(IDS_SAVE_ERR_REPLACE)) != std::wstring::npos);
+        CHECK(wp_replace.find(viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT)) != std::wstring::npos);
+        CHECK(wp_replace.find(L"(win32 19)") != std::wstring::npos);
+
+        const std::wstring ad_temp = format_save_error_guidance(
+            oz::viewer_core::save_error::temp_create_failed,
+            "temp file creation failed (win32 5)");
+        CHECK(ad_temp.find(viewer_string(IDS_SAVE_ERR_TEMP)) != std::wstring::npos);
+        CHECK(ad_temp.find(viewer_string(IDS_SAVE_ERR_HINT_ACCESS_DENIED)) != std::wstring::npos);
+        CHECK(ad_temp.find(L"(win32 5)") != std::wstring::npos);
+
+        const std::wstring ad_replace = format_save_error_guidance(
+            oz::viewer_core::save_error::replace_failed,
+            "encoded file could not be moved into place (win32 5)");
+        CHECK(ad_replace.find(viewer_string(IDS_SAVE_ERR_REPLACE)) != std::wstring::npos);
+        CHECK(ad_replace.find(viewer_string(IDS_SAVE_ERR_HINT_ACCESS_DENIED)) != std::wstring::npos);
+        CHECK(ad_replace.find(L"(win32 5)") != std::wstring::npos);
+
+        // Unrelated win32 error code (including prefix-like 190 / 50) preserves detail without false hints.
+        const std::wstring sharing = format_save_error_guidance(
+            oz::viewer_core::save_error::temp_create_failed,
+            "temp file creation failed (win32 32)");
+        CHECK(sharing.find(viewer_string(IDS_SAVE_ERR_TEMP)) != std::wstring::npos);
+        CHECK(sharing.find(viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT)) == std::wstring::npos);
+        CHECK(sharing.find(viewer_string(IDS_SAVE_ERR_HINT_ACCESS_DENIED)) == std::wstring::npos);
+        CHECK(sharing.find(L"(win32 32)") != std::wstring::npos);
+
+        const std::wstring prefix_190 = format_save_error_guidance(
+            oz::viewer_core::save_error::temp_create_failed,
+            "temp file creation failed (win32 190)");
+        CHECK(prefix_190.find(viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT)) == std::wstring::npos);
+        CHECK(prefix_190.find(L"(win32 190)") != std::wstring::npos);
+
+        const std::wstring prefix_50 = format_save_error_guidance(
+            oz::viewer_core::save_error::replace_failed,
+            "destination could not be replaced (win32 50)");
+        CHECK(prefix_50.find(viewer_string(IDS_SAVE_ERR_HINT_ACCESS_DENIED)) == std::wstring::npos);
+        CHECK(prefix_50.find(L"(win32 50)") != std::wstring::npos);
+
+        // Non-write/replace error never triggers the write-protect hint; detail is bounded to 120 chars.
+        const std::string long_detail = std::string(150, 'x') + " (win32 19)";
+        const std::wstring encode_err = format_save_error_guidance(
+            oz::viewer_core::save_error::encode_failed, long_detail);
+        CHECK(encode_err.find(viewer_string(IDS_SAVE_ERR_ENCODE)) != std::wstring::npos);
+        CHECK(encode_err.find(viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT)) == std::wstring::npos);
+        CHECK(encode_err.find(std::wstring(120, L'x')) != std::wstring::npos);
+        CHECK(encode_err.find(std::wstring(121, L'x')) == std::wstring::npos);
+    }
+
     // 4. Test Open file filter parity between modern and legacy dialogs
     const auto open_filters = get_supported_open_filters();
     CHECK(!open_filters.empty());
@@ -3539,6 +3602,8 @@ void test_localization_readiness_seam() {
         IDS_SAVE_ERR_REPLACE,
         IDS_SAVE_ERR_UNCERTAIN,
         IDS_SAVE_ERR_CLEANUP,
+        IDS_SAVE_ERR_HINT_WRITE_PROTECT,
+        IDS_SAVE_ERR_HINT_ACCESS_DENIED,
         IDS_SAVE_PROMPT_EXT_HEAD,
         IDS_SAVE_PROMPT_EXT_BODY,
         IDS_SAVE_PROMPT_TIFF_HEAD,

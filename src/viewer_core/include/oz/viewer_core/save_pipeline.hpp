@@ -280,4 +280,78 @@ struct save_completion_policy_input {
     const document_source_baseline& baseline,
     const file_fingerprint& destination_fingerprint) noexcept;
 
+// Pure policy for preserving an outstanding selected-image navigation request
+// across a committed Save's pre-save decode retirement. Returns true only when
+// interactive navigation has an unpresented target (desired != committed)
+// within a non-empty list, so idle/active documents are never spuriously
+// re-decoded on save.
+[[nodiscard]] inline bool should_reschedule_navigation_after_save(
+    bool has_nav,
+    std::size_t nav_size,
+    std::size_t desired_index,
+    std::size_t committed_index,
+    bool benchmark_mode,
+    bool nav_benchmark_mode) noexcept {
+    return has_nav && nav_size > 0 && !benchmark_mode && !nav_benchmark_mode &&
+           desired_index < nav_size && desired_index != committed_index;
+}
+
+enum class save_completion_prompt : std::uint8_t {
+    none = 0,
+    unverified_baseline,
+    commands_changed,
+    error_detail,
+};
+
+struct save_completion_step_plan {
+    save_completion_action action = save_completion_action::none;
+    bool retire_and_invalidate = false;
+    bool mark_checkpoint = false;
+    bool reschedule_navigation = false;
+    save_completion_prompt prompt = save_completion_prompt::none;
+};
+
+// Pure post-save UI-thread completion plan. Callers execute the steps in order:
+//   1. retire_and_invalidate (cache + pre-save decode epochs)
+//   2. mark_checkpoint (on the STILL-ACTIVE matching document before any nav swap)
+//   3. reschedule_navigation (only if desired_index != committed_index)
+//   4. prompt (after reschedule so modal prompts never precede document finalization)
+[[nodiscard]] inline save_completion_step_plan resolve_save_completion_steps(
+    const save_completion_policy_input& policy_input,
+    bool has_nav,
+    std::size_t nav_size,
+    std::size_t desired_index,
+    std::size_t committed_index,
+    bool benchmark_mode,
+    bool nav_benchmark_mode) noexcept {
+    save_completion_step_plan plan;
+    plan.retire_and_invalidate = policy_input.committed;
+    plan.action = evaluate_save_completion_policy(policy_input);
+    switch (plan.action) {
+        case save_completion_action::checkpoint:
+            plan.mark_checkpoint = true;
+            break;
+        case save_completion_action::saved_unverified_baseline:
+            plan.prompt = save_completion_prompt::unverified_baseline;
+            break;
+        case save_completion_action::saved_commands_changed:
+            plan.prompt = save_completion_prompt::commands_changed;
+            break;
+        case save_completion_action::saved_silent:
+            break;
+        case save_completion_action::none:
+            if (policy_input.error != save_error::none &&
+                policy_input.error != save_error::cancelled) {
+                plan.prompt = save_completion_prompt::error_detail;
+            }
+            break;
+    }
+    if (policy_input.committed) {
+        plan.reschedule_navigation = should_reschedule_navigation_after_save(
+            has_nav, nav_size, desired_index, committed_index,
+            benchmark_mode, nav_benchmark_mode);
+    }
+    return plan;
+}
+
 }  // namespace oz::viewer_core

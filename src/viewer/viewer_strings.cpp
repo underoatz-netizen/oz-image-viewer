@@ -245,6 +245,8 @@ constexpr fallback_entry kFallbackTable[] = {
     {IDS_SAVE_ERR_REPLACE, L"The encoded file could not be put in place. The destination was left unchanged."},
     {IDS_SAVE_ERR_UNCERTAIN, L"The save could not be confirmed.\n\nThe destination may have been partially replaced. The document remains modified; verify the file before continuing."},
     {IDS_SAVE_ERR_CLEANUP, L"The save failed and its temporary file could not be removed."},
+    {IDS_SAVE_ERR_HINT_WRITE_PROTECT, L"The destination drive or media is write-protected (read-only). Check any physical write-protect switch (such as on an SD card) or use File -> Save As to save to a writable folder."},
+    {IDS_SAVE_ERR_HINT_ACCESS_DENIED, L"Access to the destination folder was denied or blocked by folder protection. Check folder permissions or use File -> Save As to save to another writable folder."},
 
     {IDS_SAVE_PROMPT_EXT_HEAD, L"Unsupported output extension."},
     {IDS_SAVE_PROMPT_EXT_BODY, L"Supported formats are PNG (.png), JPEG (.jpg/.jpeg), WebP (.webp), TIFF (.tif/.tiff), and BMP (.bmp)."},

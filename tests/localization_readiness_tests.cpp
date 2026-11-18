@@ -239,6 +239,8 @@ void test_embedded_resources_match_fallback() {
         IDS_SAVE_ERR_REPLACE,
         IDS_SAVE_ERR_UNCERTAIN,
         IDS_SAVE_ERR_CLEANUP,
+        IDS_SAVE_ERR_HINT_WRITE_PROTECT,
+        IDS_SAVE_ERR_HINT_ACCESS_DENIED,
         IDS_SAVE_PROMPT_EXT_HEAD,
         IDS_SAVE_PROMPT_EXT_BODY,
         IDS_SAVE_PROMPT_TIFF_HEAD,

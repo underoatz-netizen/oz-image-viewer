@@ -69,4 +69,11 @@ struct open_filter_entry {
     UINT buttons = MB_OKCANCEL,
     UINT icon = MB_ICONWARNING);
 
+// Bounded user-facing message for a save failure taxonomy value, adding
+// human-clear guidance for write-protected media (win32 19) and access denied
+// (win32 5) while preserving the bounded ASCII diagnostic detail.
+[[nodiscard]] std::wstring format_save_error_guidance(
+    oz::viewer_core::save_error error,
+    const std::string& detail);
+
 }  // namespace oz::viewer

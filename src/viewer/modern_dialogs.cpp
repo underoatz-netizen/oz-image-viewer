@@ -484,4 +484,79 @@ prompt_result show_prompt(
     }
 }
 
+std::wstring format_save_error_guidance(oz::viewer_core::save_error error,
+                                        const std::string& detail) {
+    UINT head_id = IDS_SAVE_ERR_GENERIC;
+    switch (error) {
+        case oz::viewer_core::save_error::none:
+            return {};
+        case oz::viewer_core::save_error::cancelled:
+            head_id = IDS_SAVE_ERR_CANCELLED;
+            break;
+        case oz::viewer_core::save_error::invalid_request:
+            head_id = IDS_SAVE_ERR_INVALID;
+            break;
+        case oz::viewer_core::save_error::stale_source:
+            head_id = IDS_SAVE_ERR_STALE;
+            break;
+        case oz::viewer_core::save_error::destination_conflict:
+            head_id = IDS_SAVE_ERR_CONFLICT;
+            break;
+        case oz::viewer_core::save_error::materialization_failed:
+            head_id = IDS_SAVE_ERR_MATERIAL;
+            break;
+        case oz::viewer_core::save_error::alpha_not_supported:
+            head_id = IDS_SAVE_ERR_ALPHA;
+            break;
+        case oz::viewer_core::save_error::encoder_unavailable:
+            head_id = IDS_SAVE_ERR_ENCODER_UNAVAILABLE;
+            break;
+        case oz::viewer_core::save_error::encoder_configuration_failed:
+            head_id = IDS_SAVE_ERR_ENCODER_CONFIG;
+            break;
+        case oz::viewer_core::save_error::encode_failed:
+            head_id = IDS_SAVE_ERR_ENCODE;
+            break;
+        case oz::viewer_core::save_error::temp_create_failed:
+            head_id = IDS_SAVE_ERR_TEMP;
+            break;
+        case oz::viewer_core::save_error::flush_failed:
+            head_id = IDS_SAVE_ERR_FLUSH;
+            break;
+        case oz::viewer_core::save_error::replace_failed:
+            head_id = IDS_SAVE_ERR_REPLACE;
+            break;
+        case oz::viewer_core::save_error::commit_state_uncertain:
+            head_id = IDS_SAVE_ERR_UNCERTAIN;
+            break;
+        case oz::viewer_core::save_error::cleanup_failed:
+            head_id = IDS_SAVE_ERR_CLEANUP;
+            break;
+    }
+
+    std::wstring message = viewer_string(head_id);
+    if (error == oz::viewer_core::save_error::temp_create_failed ||
+        error == oz::viewer_core::save_error::replace_failed) {
+        if (detail.find("(win32 19)") != std::string::npos) {
+            message += L"\n\n";
+            message += viewer_string(IDS_SAVE_ERR_HINT_WRITE_PROTECT);
+        } else if (detail.find("(win32 5)") != std::string::npos) {
+            message += L"\n\n";
+            message += viewer_string(IDS_SAVE_ERR_HINT_ACCESS_DENIED);
+        }
+    }
+    if (!detail.empty()) {
+        constexpr std::size_t kMaxDetailChars = 120;
+        std::wstring wide_detail;
+        const std::size_t count = (std::min)(detail.size(), kMaxDetailChars);
+        wide_detail.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            wide_detail.push_back(static_cast<wchar_t>(static_cast<unsigned char>(detail[i])));
+        }
+        message += L"\n\n";
+        message += wide_detail;
+    }
+    return message;
+}
+
 }  // namespace oz::viewer

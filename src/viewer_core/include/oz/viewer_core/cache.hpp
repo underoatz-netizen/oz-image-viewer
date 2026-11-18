@@ -469,6 +469,36 @@ public:
         preloads_disabled_ = false;
     }
 
+    // Remove all cached scale variants matching normalized_path.
+    // Returns the number of entries erased.
+    std::size_t invalidate_path(const std::wstring& normalized_path) {
+        std::vector<cache_key> to_erase;
+        for (const auto& kv : map_) {
+            if (kv.first.normalized_path == normalized_path) {
+                to_erase.push_back(kv.first);
+            }
+        }
+        std::size_t erased = 0;
+        for (const auto& k : to_erase) {
+            auto it = map_.find(k);
+            if (it != map_.end()) {
+                current_bytes_ = (current_bytes_ >= it->second.bytes)
+                                     ? (current_bytes_ - it->second.bytes)
+                                     : 0;
+                lru_list_.erase(it->second.list_iter);
+                map_.erase(it);
+                ++erased;
+            }
+        }
+        if (pinned_key_ && pinned_key_->normalized_path == normalized_path) {
+            pinned_key_.reset();
+        }
+        if (map_.empty() || current_bytes_ <= budget_bytes_) {
+            preloads_disabled_ = false;
+        }
+        return erased;
+    }
+
 private:
     struct entry {
         std::shared_ptr<decoded_image_data> image;

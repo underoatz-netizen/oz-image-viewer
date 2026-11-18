@@ -788,6 +788,64 @@ void test_cache_pinned_oversized_current() {
     CHECK(cache.size() == 1);
 }
 
+void test_cache_invalidate_path() {
+    oz::viewer_core::cpu_image_cache cache(10000);
+
+    // Insert multi-scale variants for target path + an unrelated neighbor.
+    oz::viewer_core::cache_key target_den1{L"c:\\photos\\a.png", 1};
+    oz::viewer_core::cache_key target_den2{L"c:\\photos\\a.png", 2};
+    oz::viewer_core::cache_key neighbor_den1{L"c:\\photos\\b.png", 1};
+
+    auto img_t1 = make_dummy_image(2000);
+    auto img_t2 = make_dummy_image(1000);
+    auto img_nb = make_dummy_image(1500);
+
+    const std::size_t expected_t1 = img_t1->byte_size();
+    const std::size_t expected_t2 = img_t2->byte_size();
+    const std::size_t expected_nb = img_nb->byte_size();
+
+    cache.insert(target_den1, img_t1, true);
+    cache.insert(target_den2, img_t2, false);
+    cache.insert(neighbor_den1, img_nb, false);
+    CHECK(cache.size() == 3);
+    CHECK(cache.pinned_key().has_value());
+    CHECK(*cache.pinned_key() == target_den1);
+    CHECK(cache.used_bytes() == expected_t1 + expected_t2 + expected_nb);
+
+    // Invalidating non-existent path is a no-op.
+    CHECK(cache.invalidate_path(L"c:\\photos\\missing.png") == 0);
+    CHECK(cache.size() == 3);
+    CHECK(cache.pinned_key().has_value());
+    CHECK(cache.used_bytes() == expected_t1 + expected_t2 + expected_nb);
+
+    // Invalidating target path erases both scale variants, clears pin, and leaves neighbor intact.
+    CHECK(cache.invalidate_path(L"c:\\photos\\a.png") == 2);
+    CHECK(cache.size() == 1);
+    CHECK(!cache.pinned_key().has_value());
+    CHECK(cache.used_bytes() == expected_nb);
+    CHECK(cache.get(target_den1) == nullptr);
+    CHECK(cache.get(target_den2) == nullptr);
+    CHECK(cache.get(neighbor_den1) != nullptr);
+
+    // Re-pin neighbor, then invalidate an unrelated path: neighbor stays pinned.
+    cache.pin_current(neighbor_den1);
+    CHECK(cache.invalidate_path(L"c:\\photos\\a.png") == 0);
+    CHECK(cache.pinned_key().has_value());
+    CHECK(*cache.pinned_key() == neighbor_den1);
+
+    // Oversized pinned entry invalidation re-enables preloads and clears used_bytes.
+    oz::viewer_core::cpu_image_cache small_cache(5000);
+    oz::viewer_core::cache_key k_big{L"c:\\photos\\big.png", 1};
+    small_cache.insert(k_big, make_dummy_image(8000), true);
+    CHECK(small_cache.preloads_disabled());
+    CHECK(small_cache.invalidate_path(L"c:\\photos\\big.png") == 1);
+    CHECK(small_cache.size() == 0);
+    CHECK(small_cache.used_bytes() == 0);
+    CHECK(!small_cache.pinned_key().has_value());
+    CHECK(!small_cache.preloads_disabled());
+    CHECK(small_cache.can_admit_preload(1000));
+}
+
 void test_work_queue_priority_and_replacement() {
     oz::viewer_core::decode_work_queue queue;
 
@@ -1016,6 +1074,312 @@ void test_completion_retention_drop_policy() {
     CHECK(all2.size() == 32);
     CHECK(all2.front().epoch == 1);
     CHECK(all2.back().epoch == 99);
+}
+
+void test_completion_erase_below_epoch() {
+    oz::viewer_core::completion_queue q;
+    const std::wstring path_a = L"c:\\photos\\a.png";
+    const std::wstring path_b = L"c:\\photos\\b.png";
+    auto mk_valid = [](std::uint64_t epoch, const std::wstring& norm_path) {
+        oz::viewer_core::decode_result_msg m;
+        m.epoch = epoch;
+        m.priority = oz::viewer_core::work_priority::p0_selected;
+        m.key = {norm_path, 1};
+        m.path = norm_path;
+        m.ok = true;
+        m.src_width = 100;
+        m.src_height = 100;
+        m.actual_scale_den = 1;
+        m.image = make_dummy_image(1000);
+        m.image->scale_den = 1;
+        m.image->src_width = 100;
+        m.image->src_height = 100;
+        return m;
+    };
+
+    q.push(mk_valid(3, path_a));
+    q.push(mk_valid(5, path_b));
+    CHECK(q.size() == 2);
+    CHECK(q.has_valid_for_path(path_a, 100, 100));
+
+    // Drop < 5: epoch 3 removed, epoch 5 retained.
+    q.erase_below_epoch(5);
+    CHECK(q.size() == 1);
+    CHECK(!q.has_valid_for_path(path_a, 100, 100));
+    CHECK(q.has_valid_for_path(path_b, 100, 100));
+
+    // Late in-flight push with epoch < min_epoch_ is rejected.
+    q.push(mk_valid(4, path_a));
+    CHECK(q.size() == 1);
+    CHECK(!q.has_valid_for_path(path_a, 100, 100));
+
+    // Monotonicity: smaller cutoff does not lower min_epoch_.
+    q.erase_below_epoch(2);
+    q.push(mk_valid(4, path_a));
+    CHECK(q.size() == 1);
+    CHECK(!q.has_valid_for_path(path_a, 100, 100));
+
+    // Push with epoch >= min_epoch_ is accepted.
+    q.push(mk_valid(5, path_a));
+    CHECK(q.size() == 2);
+    CHECK(q.has_valid_for_path(path_a, 100, 100));
+    auto drained = q.pop_all();
+    CHECK(drained.size() == 2);
+}
+
+void test_save_navigation_overlap_reschedule() {
+    using namespace oz::viewer_core;
+
+    // 1. Pure predicate checks.
+    CHECK(should_reschedule_navigation_after_save(true, 3, 1, 0, false, false));
+    CHECK(!should_reschedule_navigation_after_save(true, 3, 0, 0, false, false));
+    CHECK(!should_reschedule_navigation_after_save(false, 0, 1, 0, false, false));
+    CHECK(!should_reschedule_navigation_after_save(true, 0, 0, 1, false, false));
+    CHECK(!should_reschedule_navigation_after_save(true, 2, 2, 0, false, false));
+    CHECK(!should_reschedule_navigation_after_save(true, 3, 1, 0, true, false));
+    CHECK(!should_reschedule_navigation_after_save(true, 3, 1, 0, false, true));
+
+    // 2. End-to-end overlap simulation:
+    //    Active document is img1 (index 0); navigation to img2 (index 1) starts at epoch 2
+    //    while a Save As overwriting img2 is in flight.
+    const std::filesystem::path img1 = L"c:\\photos\\img1.png";
+    const std::filesystem::path img2 = L"c:\\photos\\img2.png";
+    const std::wstring img2_norm = normalize_path_key(img2);
+
+    cpu_image_cache cache(1024 * 1024);
+    auto stale_img2 = make_dummy_image(2048);
+    stale_img2->scale_den = 1;
+    stale_img2->src_width = 100;
+    stale_img2->src_height = 100;
+    stale_img2->pixels[0] = 0x11;
+    cache.insert({img2_norm, 1}, stale_img2, false);
+
+    decode_work_queue work_queue;
+    completion_queue comp_queue;
+    std::size_t committed_index = 0;
+    std::size_t desired_index = 1;
+    std::uint64_t current_epoch = 2;
+
+    decode_request pre_save_req;
+    pre_save_req.epoch = current_epoch;
+    pre_save_req.priority = work_priority::p0_selected;
+    pre_save_req.key = {img2_norm, 1};
+    pre_save_req.path = img2;
+    pre_save_req.view_w = 100;
+    pre_save_req.view_h = 100;
+    work_queue.replace_plan(current_epoch, {pre_save_req});
+
+    // Save As commits over img2 before the pre-save decode completes:
+    // invalidate cache, bump epoch, retire pre-save plan & completions, then reschedule.
+    CHECK(cache.invalidate_path(img2_norm) == 1);
+    work_queue.replace_plan(++current_epoch, {});
+    const std::uint64_t min_decode_epoch = current_epoch;
+    comp_queue.erase_below_epoch(min_decode_epoch);
+
+    // Late pre-save completion from epoch 2 must be rejected and never re-cached.
+    decode_result_msg late_stale;
+    late_stale.epoch = 2;
+    late_stale.priority = work_priority::p0_selected;
+    late_stale.key = {img2_norm, 1};
+    late_stale.path = img2;
+    late_stale.ok = true;
+    late_stale.src_width = 100;
+    late_stale.src_height = 100;
+    late_stale.actual_scale_den = 1;
+    late_stale.image = stale_img2;
+    comp_queue.push(late_stale);
+    CHECK(comp_queue.size() == 0);
+    CHECK(!comp_queue.has_valid_for_path(img2_norm, 100, 100));
+    CHECK(cache.find_for_viewport(img2_norm, 100, 100) == nullptr);
+
+    // Outstanding desired_index != committed_index triggers reschedule at current_epoch.
+    const std::vector<std::filesystem::path> nav_items{img1, img2};
+    CHECK(should_reschedule_navigation_after_save(
+        !nav_items.empty(), nav_items.size(), desired_index, committed_index, false, false));
+
+    decode_request post_save_req;
+    post_save_req.epoch = current_epoch;
+    post_save_req.priority = work_priority::p0_selected;
+    post_save_req.key = {img2_norm, 1};
+    post_save_req.path = img2;
+    post_save_req.view_w = 100;
+    post_save_req.view_h = 100;
+    work_queue.replace_plan(current_epoch, {post_save_req});
+
+    std::uint64_t popped_epoch = 0;
+    auto popped = work_queue.pop_work(popped_epoch);
+    CHECK(popped.has_value());
+    CHECK(popped->epoch == current_epoch);
+
+    auto fresh_img2 = make_dummy_image(2048);
+    fresh_img2->scale_den = 1;
+    fresh_img2->src_width = 100;
+    fresh_img2->src_height = 100;
+    fresh_img2->pixels[0] = 0x99;
+
+    decode_result_msg fresh_msg;
+    fresh_msg.epoch = popped->epoch;
+    fresh_msg.priority = popped->priority;
+    fresh_msg.key = popped->key;
+    fresh_msg.path = popped->path;
+    fresh_msg.ok = true;
+    fresh_msg.src_width = 100;
+    fresh_msg.src_height = 100;
+    fresh_msg.actual_scale_den = 1;
+    fresh_msg.image = fresh_img2;
+    comp_queue.push(fresh_msg);
+
+    CHECK(comp_queue.has_valid_for_path(img2_norm, 100, 100));
+    auto delivered = comp_queue.pop_all();
+    CHECK(delivered.size() == 1);
+    CHECK(delivered[0].image != nullptr);
+    CHECK(delivered[0].image->pixels[0] == 0x99);
+}
+
+void test_save_completion_cache_hit_overlap_ordering() {
+    using namespace oz::viewer_core;
+
+    const std::filesystem::path img1 = L"c:\\photos\\img1.png";
+    const std::filesystem::path img2 = L"c:\\photos\\img2.png";
+    const std::wstring img1_norm = normalize_path_key(img1);
+    const std::wstring img2_norm = normalize_path_key(img2);
+
+    // Pre-decoded neighbor img2 is cached with its own baseline fingerprint.
+    auto make_cached = [](std::uint64_t size, std::uint64_t mtime, std::uint8_t tag) {
+        auto img = make_dummy_image(2048);
+        img->scale_den = 1;
+        img->src_width = 100;
+        img->src_height = 100;
+        img->source_file_size = size;
+        img->source_last_write_time = mtime;
+        img->pixels[0] = tag;
+        return img;
+    };
+
+    // Scenario A: Same-source Save on img1 with NONEMPTY edits completes while
+    // desired_index = 1 hits pre-cached img2 synchronously.
+    {
+        cpu_image_cache cache(1024 * 1024);
+        cache.insert({img1_norm, 1}, make_cached(1000, 100, 0x10), true);
+        cache.insert({img2_norm, 1}, make_cached(2222, 222, 0x20), false);
+
+        document_metadata meta1;
+        meta1.source_path = img1;
+        meta1.source_dimensions = {100, 100};
+        meta1.codec = codec_id::png_wic;
+        meta1.file_size = 1000;
+        meta1.last_write_time = 100;
+        image_document doc(meta1);
+        const std::uint64_t img1_inst = doc.instance_id();
+        CHECK(doc.history().push_command(rotate_command{rotate_direction::right_90}));
+        const std::vector<edit_command> captured(
+            doc.history().active_commands().begin(), doc.history().active_commands().end());
+        CHECK(!captured.empty());
+
+        const file_fingerprint img1_committed{true, 1555, 155};
+        const save_completion_policy_input policy_input{
+            true, save_error::none, doc.instance_id() == img1_inst, true,
+            doc.history().active_commands(), captured, img1_committed};
+        const save_completion_step_plan steps = resolve_save_completion_steps(
+            policy_input, true, 2, /*desired_index=*/1, /*committed_index=*/0, false, false);
+
+        // Must checkpoint img1 with no false commands_changed warning, then reschedule.
+        CHECK(steps.retire_and_invalidate);
+        CHECK(steps.action == save_completion_action::checkpoint);
+        CHECK(steps.mark_checkpoint);
+        CHECK(steps.prompt == save_completion_prompt::none);
+        CHECK(steps.reschedule_navigation);
+
+        // Execute exact handle_save_completion step order:
+        CHECK(cache.invalidate_path(img1_norm) == 1);
+        doc.mark_saved_with_baseline(img1_committed.file_size, img1_committed.last_write_time);
+        CHECK(!doc.is_dirty());
+        CHECK(doc.source_baseline().file_size == 1555);
+
+        // Step 3: synchronous cache hit on img2 resets doc to img2 cleanly.
+        auto hit = cache.find_for_viewport(img2_norm, 100, 100);
+        CHECK(hit != nullptr);
+        document_metadata meta2;
+        meta2.source_path = img2;
+        meta2.source_dimensions = {100, 100};
+        meta2.codec = codec_id::png_wic;
+        meta2.file_size = hit->source_file_size;
+        meta2.last_write_time = hit->source_last_write_time;
+        doc.reset(meta2);
+
+        CHECK(!doc.is_dirty());
+        CHECK(doc.metadata().source_path == img2);
+        CHECK(doc.source_baseline().file_size == 2222);
+        CHECK(doc.source_baseline().last_write_time == 222);
+    }
+
+    // Scenario B: Same-source Save on img1 with EMPTY commands after Undo completes
+    // while desired_index = 1 hits pre-cached img2 synchronously.
+    // img1's committed_fingerprint MUST NOT overwrite img2's source_baseline.
+    {
+        cpu_image_cache cache(1024 * 1024);
+        cache.insert({img1_norm, 1}, make_cached(1000, 100, 0x10), true);
+        cache.insert({img2_norm, 1}, make_cached(3333, 333, 0x30), false);
+
+        document_metadata meta1;
+        meta1.source_path = img1;
+        meta1.source_dimensions = {100, 100};
+        meta1.codec = codec_id::png_wic;
+        meta1.file_size = 1000;
+        meta1.last_write_time = 100;
+        image_document doc(meta1);
+        CHECK(doc.history().push_command(rotate_command{rotate_direction::right_90}));
+        CHECK(doc.history().undo());
+        const std::vector<edit_command> captured(
+            doc.history().active_commands().begin(), doc.history().active_commands().end());
+        CHECK(captured.empty());
+
+        const file_fingerprint img1_committed{true, 1777, 177};
+        const save_completion_policy_input policy_input{
+            true, save_error::none, true, true,
+            doc.history().active_commands(), captured, img1_committed};
+        const save_completion_step_plan steps = resolve_save_completion_steps(
+            policy_input, true, 2, /*desired_index=*/1, /*committed_index=*/0, false, false);
+
+        CHECK(steps.retire_and_invalidate);
+        CHECK(steps.mark_checkpoint);
+        CHECK(steps.reschedule_navigation);
+        CHECK(steps.prompt == save_completion_prompt::none);
+
+        CHECK(cache.invalidate_path(img1_norm) == 1);
+        // Step 2: checkpoint applies to img1 BEFORE Step 3 swaps doc to img2.
+        doc.mark_saved_with_baseline(img1_committed.file_size, img1_committed.last_write_time);
+        CHECK(doc.source_baseline().file_size == 1777);
+
+        // Step 3: synchronous cache hit swaps doc to img2; nothing mutates doc after this.
+        auto hit = cache.find_for_viewport(img2_norm, 100, 100);
+        CHECK(hit != nullptr);
+        document_metadata meta2;
+        meta2.source_path = img2;
+        meta2.source_dimensions = {100, 100};
+        meta2.codec = codec_id::png_wic;
+        meta2.file_size = hit->source_file_size;
+        meta2.last_write_time = hit->source_last_write_time;
+        doc.reset(meta2);
+
+        CHECK(!doc.is_dirty());
+        CHECK(doc.metadata().source_path == img2);
+        CHECK(doc.source_baseline().valid);
+        CHECK(doc.source_baseline().file_size == 3333);
+        CHECK(doc.source_baseline().last_write_time == 333);
+    }
+
+    // Scenario C: Failed save does not invalidate/reschedule and schedules error_detail prompt.
+    {
+        const save_completion_policy_input fail_input{
+            false, save_error::temp_create_failed, true, true, {}, {}, {}};
+        const save_completion_step_plan fail_steps = resolve_save_completion_steps(
+            fail_input, true, 2, 1, 0, false, false);
+        CHECK(!fail_steps.retire_and_invalidate);
+        CHECK(!fail_steps.mark_checkpoint);
+        CHECK(!fail_steps.reschedule_navigation);
+        CHECK(fail_steps.prompt == save_completion_prompt::error_detail);
+    }
 }
 
 // --- Stage 3.1 codec registry + PNG (WIC) tests ----------------------------
@@ -6357,6 +6721,7 @@ int wmain() {
     test_cache_key_matching_and_profile();
     test_cache_admission_eviction_and_pinned_current();
     test_cache_pinned_oversized_current();
+    test_cache_invalidate_path();
     test_work_queue_priority_and_replacement();
     test_actual_profile_selection_and_cache_mismatch();
     test_cache_entry_vs_resident_image_counts();
@@ -6365,6 +6730,9 @@ int wmain() {
     test_failed_present_preserves_pin_seam();
     test_oversized_current_stays_pinned();
     test_completion_retention_drop_policy();
+    test_completion_erase_below_epoch();
+    test_save_navigation_overlap_reschedule();
+    test_save_completion_cache_hit_overlap_ordering();
 
     // Stage 3.1 codec registry + PNG tests
     test_registry_signature_routing();

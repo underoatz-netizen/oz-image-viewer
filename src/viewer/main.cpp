@@ -415,6 +415,7 @@ struct app_state {
     std::size_t desired_index = 0;
     std::size_t committed_index = 0;
     std::uint64_t current_epoch = 1;
+    std::uint64_t min_decode_epoch = 0;
     bool persistent_worker_started = false;
     oz::viewer_core::decode_work_queue work_queue;
     oz::viewer_core::completion_queue comp_queue;
@@ -2323,59 +2324,7 @@ static bool edit_transition_blocked(app_state& app) {
 // worker ASCII diagnostic and is truncated before display.
 static std::wstring save_error_ui_message(oz::viewer_core::save_error error,
                                           const std::string& detail) {
-    UINT head_id = IDS_SAVE_ERR_GENERIC;
-    switch (error) {
-        case oz::viewer_core::save_error::none:
-            return {};
-        case oz::viewer_core::save_error::cancelled:
-            head_id = IDS_SAVE_ERR_CANCELLED;
-            break;
-        case oz::viewer_core::save_error::invalid_request:
-            head_id = IDS_SAVE_ERR_INVALID;
-            break;
-        case oz::viewer_core::save_error::stale_source:
-            head_id = IDS_SAVE_ERR_STALE;
-            break;
-        case oz::viewer_core::save_error::destination_conflict:
-            head_id = IDS_SAVE_ERR_CONFLICT;
-            break;
-        case oz::viewer_core::save_error::materialization_failed:
-            head_id = IDS_SAVE_ERR_MATERIAL;
-            break;
-        case oz::viewer_core::save_error::alpha_not_supported:
-            head_id = IDS_SAVE_ERR_ALPHA;
-            break;
-        case oz::viewer_core::save_error::encoder_unavailable:
-            head_id = IDS_SAVE_ERR_ENCODER_UNAVAILABLE;
-            break;
-        case oz::viewer_core::save_error::encoder_configuration_failed:
-            head_id = IDS_SAVE_ERR_ENCODER_CONFIG;
-            break;
-        case oz::viewer_core::save_error::encode_failed:
-            head_id = IDS_SAVE_ERR_ENCODE;
-            break;
-        case oz::viewer_core::save_error::temp_create_failed:
-            head_id = IDS_SAVE_ERR_TEMP;
-            break;
-        case oz::viewer_core::save_error::flush_failed:
-            head_id = IDS_SAVE_ERR_FLUSH;
-            break;
-        case oz::viewer_core::save_error::replace_failed:
-            head_id = IDS_SAVE_ERR_REPLACE;
-            break;
-        case oz::viewer_core::save_error::commit_state_uncertain:
-            head_id = IDS_SAVE_ERR_UNCERTAIN;
-            break;
-        case oz::viewer_core::save_error::cleanup_failed:
-            head_id = IDS_SAVE_ERR_CLEANUP;
-            break;
-    }
-    std::wstring message = oz::viewer::viewer_string(head_id);
-    if (!detail.empty()) {
-        message += L"\n\n";
-        message += widen_bounded_error(detail, L"");
-    }
-    return message;
+    return oz::viewer::format_save_error_guidance(error, detail);
 }
 
 static bool destination_is_current_source(const app_state& app,
@@ -2758,12 +2707,41 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
     const oz::viewer_core::save_completion_policy_input policy_input{
         comp.committed, comp.error, document_matches, pending.same_source,
         active, pending.captured_commands, comp.committed_fingerprint};
-    switch (oz::viewer_core::evaluate_save_completion_policy(policy_input)) {
-    case oz::viewer_core::save_completion_action::checkpoint:
+    const oz::viewer_core::save_completion_step_plan steps =
+        oz::viewer_core::resolve_save_completion_steps(
+            policy_input, !app.nav.empty(), app.nav.size(), app.desired_index,
+            app.committed_index, app.benchmark, app.nav_benchmark);
+
+    // Step 1: Invalidate overwritten cache entries and retire pre-save decode work.
+    if (steps.retire_and_invalidate) {
+        app.cache.invalidate_path(oz::viewer_core::normalize_path_key(pending.destination));
+        if (pending.same_source && !app.doc.active_path.empty()) {
+            app.cache.invalidate_path(oz::viewer_core::normalize_path_key(app.doc.active_path));
+        }
+        if (!app.nav.empty()) {
+            app.work_queue.replace_plan(++app.current_epoch, {});
+            app.min_decode_epoch = app.current_epoch;
+            app.comp_queue.erase_below_epoch(app.min_decode_epoch);
+        }
+    }
+
+    // Step 2: Finalize checkpoint on the STILL-ACTIVE original document before
+    // any synchronous cache-hit navigation can swap app.image_doc.
+    if (steps.mark_checkpoint && app.image_doc) {
         app.image_doc->mark_saved_with_baseline(comp.committed_fingerprint.file_size,
                                                 comp.committed_fingerprint.last_write_time);
+    }
+
+    // Step 3: Preserve any outstanding selected-image navigation at the new epoch.
+    if (steps.reschedule_navigation) {
+        schedule_navigation_plan(app);
+    }
+
+    // Step 4: Present any deferred warning or non-cancelled error prompt.
+    switch (steps.prompt) {
+    case oz::viewer_core::save_completion_prompt::none:
         return;
-    case oz::viewer_core::save_completion_action::saved_unverified_baseline: {
+    case oz::viewer_core::save_completion_prompt::unverified_baseline: {
         const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
         const std::wstring head = oz::viewer::viewer_string(IDS_SAVE_PROMPT_UNVERIFIED_HEAD);
         const std::wstring body = oz::viewer::viewer_string(IDS_SAVE_PROMPT_UNVERIFIED_BODY);
@@ -2776,7 +2754,7 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
             MB_ICONWARNING));
         return;
     }
-    case oz::viewer_core::save_completion_action::saved_commands_changed: {
+    case oz::viewer_core::save_completion_prompt::commands_changed: {
         // Defensive: conflicting edits are disabled while saving, so
         // this cannot normally happen. The file was written from the
         // captured snapshot; the document must stay modified.
@@ -2792,20 +2770,14 @@ static void handle_save_completion(app_state& app, oz::viewer::save_completion_m
             MB_ICONWARNING));
         return;
     }
-    case oz::viewer_core::save_completion_action::saved_silent:
-        return;  // Save As copy is silent and remains dirty.
-    case oz::viewer_core::save_completion_action::none:
-        break;
+    case oz::viewer_core::save_completion_prompt::error_detail: {
+        const std::wstring message = save_error_ui_message(comp.error, comp.detail);
+        if (!message.empty()) {
+            const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
+            static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), message.c_str(), nullptr, MB_OK, MB_ICONWARNING));
+        }
+        return;
     }
-
-    if (comp.error == oz::viewer_core::save_error::cancelled) {
-        return;  // User-initiated cancellation; no file was written.
-    }
-
-    const std::wstring message = save_error_ui_message(comp.error, comp.detail);
-    if (!message.empty()) {
-        const std::wstring title = oz::viewer::viewer_string(IDS_APP_TITLE);
-        static_cast<void>(oz::viewer::show_prompt(app.hwnd, title.c_str(), message.c_str(), nullptr, MB_OK, MB_ICONWARNING));
     }
 }
 #endif
@@ -3730,6 +3702,11 @@ static void start_recycle_delete(app_state& app) {
             app.hwnd, title.c_str(), headline.c_str(), detail.c_str(), MB_OK, MB_ICONWARNING));
         return;
     }
+
+    app.cache.invalidate_path(oz::viewer_core::normalize_path_key(target));
+    app.work_queue.replace_plan(++app.current_epoch, {});
+    app.min_decode_epoch = app.current_epoch;
+    app.comp_queue.erase_below_epoch(app.min_decode_epoch);
 
     // Success: deterministic successor from the pre-delete navigation
     // snapshot (the shell operation never touches navigation state).
@@ -5380,6 +5357,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             bool desired_mismatch_needs_requeue = false;
 
             for (auto& item_msg : messages) {
+                if (item_msg.epoch < app->min_decode_epoch) {
+                    if (item_msg.key.normalized_path == desired_norm && !desired_norm.empty()) {
+                        desired_mismatch_needs_requeue = true;
+                    }
+                    continue;
+                }
                 if (!item_msg.ok || !item_msg.image) {
                     if (app->nav_benchmark && app->current_nav_bench_req_id != 0 &&
                         item_msg.priority == oz::viewer_core::work_priority::p0_selected &&
