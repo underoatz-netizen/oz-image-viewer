@@ -121,7 +121,7 @@ bool verify_source_file_metadata(const std::filesystem::path& path,
 #include <thread>
 #include <vector>
 
-namespace {
+namespace oz_viewer_main_internal {
 
 constexpr UINT kMsgDecodeComplete = WM_APP + 1;
 constexpr UINT kMsgEnumComplete   = WM_APP + 2;
@@ -5724,7 +5724,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-}  // namespace
+}  // namespace oz_viewer_main_internal
+
+using namespace oz_viewer_main_internal;
 
 int wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*lpCmdLine*/,
              int /*nCmdShow*/) {
