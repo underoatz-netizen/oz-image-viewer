@@ -12,15 +12,15 @@ It is built with C++23, Win32, Direct3D 11, DXGI and Direct2D.
 
 ## Project status
 
-**PikaView** version 0.1.1 (formerly **OZ Image Viewer**) is available for 64-bit Windows systems.
+**PikaView** version 0.1.2 (formerly **OZ Image Viewer**) is available for 64-bit Windows systems.
 
-- GitHub Releases: <https://github.com/underoatz-netizen/oz-image-viewer/releases> (v0.1.1: <https://github.com/underoatz-netizen/oz-image-viewer/releases/tag/v0.1.1>)
+- GitHub Releases: <https://github.com/underoatz-netizen/oz-image-viewer/releases> (v0.1.2: <https://github.com/underoatz-netizen/oz-image-viewer/releases/tag/v0.1.2>)
 - Product overview: <https://underoatz-netizen.github.io/software/oz-image-viewer/>
 - Downloads & checksums: <https://underoatz-netizen.github.io/software/oz-image-viewer/downloads/>
 - Release changelog: <https://underoatz-netizen.github.io/software/oz-image-viewer/changelog/>
 - User guide & FAQ: <https://underoatz-netizen.github.io/software/oz-image-viewer/guide/>
 - Source repository: <https://github.com/underoatz-netizen/oz-image-viewer>
-- Release notes & historical continuity: see [RELEASE_NOTES.md](RELEASE_NOTES.md) ([ไทย](RELEASE_NOTES.th.md)) and [docs/releases/v0.1.1/RELEASE_NOTES.md](docs/releases/v0.1.1/RELEASE_NOTES.md). Historical OZ Image Viewer 0.1.0 release assets, git tag (`v0.1.0`), and provenance archive ([`docs/releases/v0.1.0/BUILD-PROVENANCE.json`](docs/releases/v0.1.0/BUILD-PROVENANCE.json)) remain unchanged and are not re-versioned.
+- Release notes, provenance & reproducibility proof: see [RELEASE_NOTES.md](RELEASE_NOTES.md) ([ไทย](RELEASE_NOTES.th.md)), [docs/releases/v0.1.2/RELEASE_NOTES.md](docs/releases/v0.1.2/RELEASE_NOTES.md), [`docs/releases/v0.1.2/BUILD-PROVENANCE.json`](docs/releases/v0.1.2/BUILD-PROVENANCE.json), and [`docs/releases/v0.1.2/REPRODUCIBLE-BUILD-PROOF.json`](docs/releases/v0.1.2/REPRODUCIBLE-BUILD-PROOF.json). Historical OZ Image Viewer 0.1.0 ([`docs/releases/v0.1.0/BUILD-PROVENANCE.json`](docs/releases/v0.1.0/BUILD-PROVENANCE.json)) and PikaView 0.1.1 ([docs/releases/v0.1.1/RELEASE_NOTES.md](docs/releases/v0.1.1/RELEASE_NOTES.md), [`docs/releases/v0.1.1/BUILD-PROVENANCE.json`](docs/releases/v0.1.1/BUILD-PROVENANCE.json)) release assets, git tags, and provenance records remain unchanged and are not re-versioned.
 
 ## Platform
 
@@ -51,12 +51,16 @@ WebP, AVIF and HEIC/HEIF support depend on the optional codecs being compiled in
   one as it is selected.
 - Cursor-centred mouse-wheel zoom, keyboard zoom, drag-to-pan, fit-to-window and
   100% views, and borderless-windowed fullscreen.
-- Opens from the command line, from an Open button, or by dragging a single file
+- Opens from the command line, from the command bar, or by dragging a single file
   onto the window.
-- Interactive single-image printing (`File -> Print...` or `Ctrl+P`) produces
-  fit-to-page output of the committed document without modifying the file (see
-  [RELEASE_NOTES.md](RELEASE_NOTES.md) for observed verification scope and
-  evidence limits).
+- Single-row 40-DIP Lucide 1.71.0 command bar in dark charcoal (`32` DIP action
+  buttons, subtle separators, deterministic right-side **More** overflow menu
+  opened via the button or `F10`/`Alt`, crisp crop strip icons, preserved
+  keyboard shortcuts, and automatic canvas focus restore).
+- Interactive single-image printing (command bar **Print**, `More -> Print...`,
+  or `Ctrl+P`) produces fit-to-page output of the committed document without
+  modifying the file (see [RELEASE_NOTES.md](RELEASE_NOTES.md) for observed
+  verification scope and evidence limits).
 
 **Editing (non-destructive)**
 
@@ -79,6 +83,7 @@ WebP, AVIF and HEIC/HEIF support depend on the optional codecs being compiled in
 | `1` | Actual size (100%) |
 | Left-drag | Pan the image |
 | Double-click | Toggle between fit and 100% |
+| `F10` / `Alt` | Open the **More** command bar overflow menu |
 | `F11` | Enter or leave fullscreen |
 | `Esc` | Leave fullscreen, or cancel a crop |
 | `C` | Enter crop mode |
@@ -174,7 +179,8 @@ exact source acquisition and build instructions are documented in
 [THIRD-PARTY-SOURCE.txt](THIRD-PARTY-SOURCE.txt).
 
 Third-party dependencies include libjpeg-turbo, libwebp, libavif with dav1d and
-libyuv, and libheif with libde265. libheif and libde265 are licensed under the
+libyuv, Lucide Icons 1.71.0 (ISC, with Feather-derived icons under MIT), and
+libheif with libde265. libheif and libde265 are licensed under the
 GNU Lesser General Public License version 3.0 (LGPL-3.0-only) and are loaded
 dynamically as standalone DLLs (`heif.dll` and `libde265.dll`) that can be
 freely replaced alongside `ozviewer.exe` with ABI-compatible builds under the

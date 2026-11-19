@@ -1,0 +1,95 @@
+{
+    "schema":  1,
+    "product":  "PikaView",
+    "packageName":  "pikaview",
+    "version":  "0.1.2",
+    "tag":  "v0.1.2",
+    "source":  {
+                   "commitSha":  "4541ffedc4fde9d4095d92f3f7a0c5397bbb501b",
+                   "treeSha":  "0c464561de3d418b8d2a8b3689ca163a1cbad7bd",
+                   "cleanStatus":  "clean"
+               },
+    "deterministicInputs":  {
+                                "cmakeCompileOptions":  [
+                                                            "/W4",
+                                                            "/permissive-",
+                                                            "/utf-8",
+                                                            "/EHsc",
+                                                            "/experimental:deterministic"
+                                                        ],
+                                "cmakeLinkOptions":  [
+                                                         "/Brepro",
+                                                         "/PDBALTPATH:%_PDB%"
+                                                     ],
+                                "staticLinkerFlags":  "/Brepro",
+                                "triplet":  "oz-x64-windows-static-md",
+                                "vcpkgPlatformToolset":  "v143",
+                                "vcpkgCFlags":  "/experimental:deterministic",
+                                "vcpkgCxxFlags":  "/experimental:deterministic",
+                                "vcpkgRegistryBaseline":  "52d80838fb40c755b1615fbc9c7b994a33742a22"
+                            },
+    "builds":  {
+                   "workspaceA":  {
+                                      "workspaceDir":  "repro-a",
+                                      "startUtc":  "2026-11-19T09:41:40.5679294Z",
+                                      "endUtc":  "2026-11-19T09:48:57.8137080Z",
+                                      "vcpkgBinarySources":  "clear",
+                                      "cachedPackageRestoresObserved":  false,
+                                      "fromSourceLibde265":  true,
+                                      "fromSourceLibheif":  true,
+                                      "targetedCtestPassed":  "11/11",
+                                      "peHeadersSummary":  {
+                                                               "ozviewerReproDebugDir":  true,
+                                                               "heifPdbPath":  "heif.pdb",
+                                                               "libde265PdbPath":  "libde265.pdb"
+                                                           }
+                                  },
+                   "workspaceB":  {
+                                      "workspaceDir":  "repro-b",
+                                      "startUtc":  "2026-11-19T09:51:29.6169287Z",
+                                      "endUtc":  "2026-11-19T09:57:58.2956134Z",
+                                      "vcpkgBinarySources":  "clear",
+                                      "cachedPackageRestoresObserved":  false,
+                                      "fromSourceLibde265":  true,
+                                      "fromSourceLibheif":  true,
+                                      "peHeadersSummary":  {
+                                                               "ozviewerReproDebugDir":  true,
+                                                               "heifPdbPath":  "heif.pdb",
+                                                               "libde265PdbPath":  "libde265.pdb"
+                                                           }
+                                  },
+                   "standaloneLgplRebuild":  {
+                                                 "sourceZipName":  "pikaview-0.1.2-lgpl-corresponding-source.zip",
+                                                 "sourceZipBytes":  2421056,
+                                                 "sourceZipSha256":  "f28505ee05f9dc9468e2da6ed8d4fc56d21c227ef6ef354a053ebbd551d32753",
+                                                 "script":  "build-lgpl-dlls.ps1",
+                                                 "startUtc":  "2026-11-19T09:58:24.6947896Z",
+                                                 "endUtc":  "2026-11-19T10:00:44.4274211Z",
+                                                 "vcpkgBinarySources":  "clear",
+                                                 "cachedPackageRestoresObserved":  false
+                                             }
+               },
+    "bitForBitComparison":  {
+                                "ozviewer.exe":  {
+                                                     "bytes":  3853824,
+                                                     "buildASha256":  "04dfd470ae8ab01f4e911d15dd4f38a85b4e18ebc0fd0442dfcfda10ff036c92",
+                                                     "buildBSha256":  "04dfd470ae8ab01f4e911d15dd4f38a85b4e18ebc0fd0442dfcfda10ff036c92",
+                                                     "allMatch":  true
+                                                 },
+                                "heif.dll":  {
+                                                 "bytes":  1423872,
+                                                 "buildASha256":  "9bf0954c60cfb0e16ba55c329f169657364e88ca0643d5cdc978bc4253a8d019",
+                                                 "buildBSha256":  "9bf0954c60cfb0e16ba55c329f169657364e88ca0643d5cdc978bc4253a8d019",
+                                                 "standaloneLgplSha256":  "9bf0954c60cfb0e16ba55c329f169657364e88ca0643d5cdc978bc4253a8d019",
+                                                 "allMatch":  true
+                                             },
+                                "libde265.dll":  {
+                                                     "bytes":  366592,
+                                                     "buildASha256":  "15536336f0ef6ca8b5249a853685e90b1414f5996080525b52e7c9d268faadcb",
+                                                     "buildBSha256":  "15536336f0ef6ca8b5249a853685e90b1414f5996080525b52e7c9d268faadcb",
+                                                     "standaloneLgplSha256":  "15536336f0ef6ca8b5249a853685e90b1414f5996080525b52e7c9d268faadcb",
+                                                     "allMatch":  true
+                                                 }
+                            },
+    "scopeDisclosure":  "Dual-build bit-for-bit reproducibility (repro-a == repro-b) is proved for ozviewer.exe, and three-way bit-for-bit reproducibility (repro-a == repro-b == Standalone LGPL rebuild) is proved for dynamically loaded LGPL PE binaries (heif.dll, libde265.dll), all built from clean source with VCPKG_BINARY_SOURCES=clear. Distribution container wrappers (portable ZIP entry timestamps and Inno Setup installer stub/compression wrapper) are built once from the verified Build A payload and pinned by SHA-256 in SHA256SUMS (while BUILD-PROVENANCE.json records the underlying staged binaries, signed VC143 CRT DLLs, and LGPL corresponding-source package)."
+}
