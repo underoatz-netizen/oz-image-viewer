@@ -1270,19 +1270,33 @@ Test-ControllerCleanupStateFlow -SimulateUninitializedBug `$false -TestScratchRo
     Assert-Condition ($descArgValue -eq "OZ release test") "Controller Description literal expected 'OZ release test', got '$descArgValue'"
     Pass "AST constraint verification: Controller New-LocalUser Description is '$descArgValue' (length $($descArgValue.Length) <= 48)."
 
-    # 9. Version-aware Release Asset Spec & SHA256SUMS Validation (v0.1.1 vs v0.1.0)
+    # 9. Version-aware Release Asset Spec & SHA256SUMS Validation (v0.1.1 / v0.1.2 vs v0.1.0)
     $spec011 = Resolve-ReleaseAssetSpec -CandidateTag "v0.1.1"
     Assert-Condition ($spec011.Version -eq "0.1.1" -and $spec011.PackageFamily -eq "pikaview") "v0.1.1 spec must use pikaview"
     Assert-Condition ($spec011.ChecksumFileName -eq "SHA256SUMS") "v0.1.1 spec must require SHA256SUMS"
     Assert-Condition ($spec011.ExpectedAssetNames.Count -eq 4) "v0.1.1 spec must expect 4 assets"
     Pass "Resolve-ReleaseAssetSpec: v0.1.1 resolves pikaview + SHA256SUMS."
 
+    $spec012 = Resolve-ReleaseAssetSpec -CandidateTag "v0.1.2"
+    Assert-Condition ($spec012.Version -eq "0.1.2" -and $spec012.PackageFamily -eq "pikaview") "v0.1.2 spec must use pikaview"
+    Assert-Condition ($spec012.ChecksumFileName -eq "SHA256SUMS") "v0.1.2 spec must require SHA256SUMS"
+    Assert-Condition ($spec012.ExpectedAssetNames.Count -eq 4) "v0.1.2 spec must expect 4 assets"
+    Assert-Condition ($spec012.InstallerName -eq "pikaview-0.1.2-win-x64-installer.exe") "v0.1.2 spec installer name mismatch"
+    Assert-Condition ($spec012.PortableName -eq "pikaview-0.1.2-win-x64-portable.zip") "v0.1.2 spec portable name mismatch"
+    Assert-Condition ($spec012.SourceName -eq "pikaview-0.1.2-lgpl-corresponding-source.zip") "v0.1.2 spec source name mismatch"
+    Pass "Resolve-ReleaseAssetSpec: v0.1.2 resolves pikaview + SHA256SUMS."
+
     $spec010 = $null
     Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.0" | Out-Null } "Unsupported CandidateTag version" "Rejects v0.1.0 as candidate tag (upgrade base only)"
     Pass "Resolve-ReleaseAssetSpec: v0.1.0 rejected as candidate tag (upgrade base only)."
 
     Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "0.1.1" | Out-Null } "Invalid CandidateTag syntax" "Rejects tag without v prefix"
-    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.2" | Out-Null } "Unsupported CandidateTag version" "Rejects unsupported version"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag " v0.1.1 " | Out-Null } "Invalid CandidateTag syntax" "Rejects whitespace-padded v0.1.1 tag"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag " v0.1.2 " | Out-Null } "Invalid CandidateTag syntax" "Rejects whitespace-padded v0.1.2 tag"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.2 " | Out-Null } "Invalid CandidateTag syntax" "Rejects trailing-space v0.1.2 tag"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.1.2`n" | Out-Null } "Invalid CandidateTag syntax" "Rejects trailing-newline v0.1.2 tag"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "`tv0.1.2" | Out-Null } "Invalid CandidateTag syntax" "Rejects leading-tab v0.1.2 tag"
+    Assert-Throws { Resolve-ReleaseAssetSpec -CandidateTag "v0.9.9" | Out-Null } "Unsupported CandidateTag version" "Rejects unsupported version"
 
     $sumsWork = Join-Path $WorkDir "sha256sums-tests"
     New-Item -ItemType Directory -Path $sumsWork -Force | Out-Null

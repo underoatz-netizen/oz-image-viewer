@@ -476,7 +476,7 @@ try {
     if ($dispVer -ne $ExpectedVersion) {
         Record-Check -Name "stage1_uninstall_version" -Status "fail" -Details "DisplayVersion mismatch: expected $ExpectedVersion, got $dispVer"
     }
-    $expectedDispName = if ($ExpectedVersion -eq "0.1.1") { "PikaView $ExpectedVersion" } else { "OZ Image Viewer" }
+    $expectedDispName = if ($ExpectedVersion -in @("0.1.1", "0.1.2")) { "PikaView $ExpectedVersion" } else { "OZ Image Viewer" }
     $dispName = Get-RegValueSafe -SubKeyPath "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1" -ValueName "DisplayName"
     if ($dispName -ne $expectedDispName) {
         Record-Check -Name "stage1_uninstall_display_name" -Status "fail" -Details "DisplayName mismatch: expected '$expectedDispName', got '$dispName'"
@@ -596,7 +596,7 @@ try {
     Record-Check -Name "stage3_capabilities_registered" -Status "pass" -Details "Capabilities registered."
 
     # Verify registered application entry points to Capabilities
-    $expectedRegAppName = if ($ExpectedVersion -eq "0.1.1") { "PikaView" } else { "OZ Image Viewer" }
+    $expectedRegAppName = if ($ExpectedVersion -in @("0.1.1", "0.1.2")) { "PikaView" } else { "OZ Image Viewer" }
     $regAppVal = Get-RegValueSafe -SubKeyPath "Software\RegisteredApplications" -ValueName $expectedRegAppName
     if ($regAppVal -ne "Software\OZImageViewer\Capabilities") {
         Record-Check -Name "stage3_registered_apps_value" -Status "fail" -Details "RegisteredApplications\$expectedRegAppName value mismatch: expected 'Software\OZImageViewer\Capabilities', got '$regAppVal'"

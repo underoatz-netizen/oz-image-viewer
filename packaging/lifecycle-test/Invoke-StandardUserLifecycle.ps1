@@ -506,8 +506,8 @@ try {
     $script:ParentReport["expectedProfileImagePath"] = $expectedProfilePath
 
     $requireUpgrade = -not [string]::IsNullOrWhiteSpace($UpgradeFromInstallerPath)
-    if ($spec.Version -eq "0.1.1" -and -not $requireUpgrade) {
-        throw "Security/validation policy: v0.1.1 standard-user lifecycle requires -UpgradeFromInstallerPath for true v0.1.0 -> v0.1.1 upgrade verification."
+    if ($spec.Version -in @("0.1.1", "0.1.2") -and -not $requireUpgrade) {
+        throw "Security/validation policy: v$($spec.Version) standard-user lifecycle requires -UpgradeFromInstallerPath for true v0.1.0 -> v$($spec.Version) upgrade verification."
     }
     $integrityPassed = Test-ChildReportIntegrity `
         -ReportData $childReportData `

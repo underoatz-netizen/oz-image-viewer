@@ -286,13 +286,13 @@ function Resolve-ReleaseAssetSpec {
         [Parameter(Mandatory = $true)][string]$CandidateTag
     )
 
-    $trimmedTag = $CandidateTag.Trim()
-    if ($trimmedTag -notmatch '^v(\d+\.\d+\.\d+)$') {
-        throw "Invalid CandidateTag syntax: '$CandidateTag'. Expected strict semver tag 'vX.Y.Z' (e.g. 'v0.1.1')."
+    if ($null -eq $CandidateTag -or -not ($CandidateTag -cmatch '\Av(\d+\.\d+\.\d+)\z')) {
+        throw "Invalid CandidateTag syntax: '$CandidateTag'. Expected strict semver tag 'vX.Y.Z' (e.g. 'v0.1.2')."
     }
+    $trimmedTag = $CandidateTag
     $version = $Matches[1]
 
-    if ($version -eq "0.1.1") {
+    if ($version -in @("0.1.1", "0.1.2")) {
         $family = "pikaview"
         $installer = "$family-$version-win-x64-installer.exe"
         $portable = "$family-$version-win-x64-portable.zip"
@@ -300,7 +300,7 @@ function Resolve-ReleaseAssetSpec {
         $checksum = "SHA256SUMS"
         $expected = @($installer, $portable, $source, $checksum)
     } else {
-        throw "Unsupported CandidateTag version '$trimmedTag'. This workflow only validates v0.1.1 (pikaview); v0.1.0 is supported solely as the historical upgrade base."
+        throw "Unsupported CandidateTag version '$trimmedTag'. This workflow only validates v0.1.1 or v0.1.2 (pikaview); v0.1.0 is supported solely as the historical upgrade base."
     }
 
     return [ordered]@{

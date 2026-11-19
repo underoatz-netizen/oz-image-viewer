@@ -8,19 +8,19 @@ on:
         required: true
         type: string
       candidate_tag:
-        description: 'Candidate draft release tag to validate (e.g. v0.1.1)'
+        description: 'Candidate draft release tag to validate (v0.1.1 or v0.1.2)'
         required: true
         type: string
       expected_installer_sha256:
-        description: 'Expected SHA-256 hash of pikaview-0.1.1-win-x64-installer.exe (or ozviewer-0.1.0-win-x64-installer.exe)'
+        description: 'Expected SHA-256 hash of pikaview-<version>-win-x64-installer.exe (e.g. 0.1.2 or 0.1.1)'
         required: true
         type: string
       expected_portable_sha256:
-        description: 'Expected SHA-256 hash of pikaview-0.1.1-win-x64-portable.zip (or ozviewer-0.1.0-win-x64-portable.zip)'
+        description: 'Expected SHA-256 hash of pikaview-<version>-win-x64-portable.zip (e.g. 0.1.2 or 0.1.1)'
         required: true
         type: string
       expected_source_sha256:
-        description: 'Expected SHA-256 hash of pikaview-0.1.1-lgpl-corresponding-source.zip (or ozviewer-0.1.0-lgpl-corresponding-source.zip)'
+        description: 'Expected SHA-256 hash of pikaview-<version>-lgpl-corresponding-source.zip (e.g. 0.1.2 or 0.1.1)'
         required: true
         type: string
       expected_checksums_sha256:
@@ -118,7 +118,7 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CANDIDATE_TAG_COMMIT_SHA=$($identity.commitSha)`n", (New-Object System.Text.UTF8Encoding($false)))
           [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "resolved_commit=$($identity.commitSha)`n", (New-Object System.Text.UTF8Encoding($false)))
 
-          if ($spec.Version -eq "0.1.1") {
+          if ($spec.Version -in @("0.1.1", "0.1.2")) {
               $histDir = Join-Path $env:RUNNER_TEMP "historical-v0.1.0"
               New-Item -ItemType Directory -Path $histDir -Force | Out-Null
               $histName = "ozviewer-0.1.0-win-x64-installer.exe"
@@ -192,18 +192,18 @@ jobs:
         with:
           name: candidate-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-win-x64-installer.exe
-            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-win-x64-portable.zip
-            ${{ runner.temp }}/release-candidates/pikaview-0.1.1-lgpl-corresponding-source.zip
+            ${{ runner.temp }}/release-candidates/pikaview-*-win-x64-installer.exe
+            ${{ runner.temp }}/release-candidates/pikaview-*-win-x64-portable.zip
+            ${{ runner.temp }}/release-candidates/pikaview-*-lgpl-corresponding-source.zip
             ${{ runner.temp }}/release-candidates/SHA256SUMS
             ${{ runner.temp }}/release-candidates/candidate-handoff-manifest.json
           if-no-files-found: error
           retention-days: 1
           overwrite: false
 
-      - name: Upload historical v0.1.0 installer artifact (for v0.1.1 upgrade test)
+      - name: Upload historical v0.1.0 installer artifact (for v0.1.1/v0.1.2 upgrade test)
         id: upload_historical
-        if: env.CANDIDATE_TAG == 'v0.1.1'
+        if: env.CANDIDATE_TAG == 'v0.1.1' || env.CANDIDATE_TAG == 'v0.1.2'
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: historical-v010-installer-${{ github.run_id }}-${{ github.run_attempt }}
@@ -304,14 +304,14 @@ jobs:
               -ExpectedTagCommitSha $env:CANDIDATE_TAG_COMMIT_SHA
 
       - name: Download historical v0.1.0 installer for upgrade test
-        if: env.CANDIDATE_TAG == 'v0.1.1'
+        if: env.CANDIDATE_TAG == 'v0.1.1' || env.CANDIDATE_TAG == 'v0.1.2'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           artifact-ids: ${{ needs.fetch-candidate.outputs.historical_artifact_id }}
           path: ${{ runner.temp }}/historical-v0.1.0
 
       - name: Audit historical v0.1.0 installer directory and rehash
-        if: env.CANDIDATE_TAG == 'v0.1.1'
+        if: env.CANDIDATE_TAG == 'v0.1.1' || env.CANDIDATE_TAG == 'v0.1.2'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -426,7 +426,7 @@ jobs:
               "-AllowDisposableExecution"
           )
 
-          if ($spec.Version -eq "0.1.1") {
+          if ($spec.Version -in @("0.1.1", "0.1.2")) {
               $histPath = $env:HISTORICAL_V010_INSTALLER
               if ([string]::IsNullOrWhiteSpace($histPath) -or -not (Test-Path -LiteralPath $histPath -PathType Leaf)) {
                   throw "Historical v0.1.0 installer missing at '$histPath'."
@@ -460,7 +460,7 @@ jobs:
                   throw "Lifecycle harness report $propName does not match the pinned expected value."
               }
           }
-          $requiredChecks = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks:($spec.Version -eq "0.1.1"))
+          $requiredChecks = @(Get-StandardLifecycleRequiredCheckNames -IncludeUpgradeChecks:($spec.Version -in @("0.1.1", "0.1.2")))
           Test-LifecycleReportContract `
               -ReportData $reportContent `
               -RequiredCheckNames $requiredChecks `
@@ -499,7 +499,7 @@ jobs:
               "-ParentReportPath", $parentReportPath,
               "-AllowDisposableExecution"
           )
-          if ($env:CANDIDATE_TAG -eq "v0.1.1") {
+          if ($env:CANDIDATE_TAG -in @("v0.1.1", "v0.1.2")) {
               $histPath = $env:HISTORICAL_V010_INSTALLER
               $controllerArgs += @("-UpgradeFromInstallerPath", $histPath)
           }
